@@ -618,6 +618,13 @@ void initServer()
     }
   });
 
+  // Always serve the built-in WLED UI here, even when a custom /index.htm is
+  // present on the filesystem (empty path skips the filesystem lookup).
+  // Used as a fallback by the Zugvögel "Lichtnest" custom UI usermod.
+  server.on(F("/classic"), HTTP_GET, [](AsyncWebServerRequest *request) {
+    handleStaticContent(request, "", 200, FPSTR(CONTENT_TYPE_HTML), PAGE_index, PAGE_index_length);
+  });
+
 #ifndef WLED_DISABLE_2D
   #ifdef WLED_ENABLE_PIXART
   static const char _pixart_htm[] PROGMEM = "/pixart.htm";

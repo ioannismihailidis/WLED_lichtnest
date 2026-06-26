@@ -1,0 +1,6 @@
+{
+  "name": "lichtnest",
+  "build": {
+    "libArchive": false
+  }
+}

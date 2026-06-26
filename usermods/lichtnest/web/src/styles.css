@@ -1,0 +1,46 @@
+:root{
+  --bg:#08090b;
+  --panel:#111317;
+  --panel2:#0c0e12;
+  --inset:#0d0f13;
+  --line:rgba(255,255,255,.07);
+  --line2:rgba(255,255,255,.12);
+  --accent:#f0a23c;
+  --accent2:#ff5a3c;
+  --text:#f3f1ec;
+  --text2:#c9cdd3;
+  --muted:#62676f;
+  --muted2:#9ba0a8;
+  --green:#5ec98a;
+  --sans:'Manrope',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  --mono:ui-monospace,'JetBrains Mono',SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body,#app{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+input[type=range]{accent-color:var(--accent)}
+::-webkit-scrollbar{width:0;height:0}
+.scrl{scrollbar-width:none}
+button{font-family:inherit}
+
+.mono{font-family:var(--mono)}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.34em;color:var(--accent);margin-bottom:7px}
+.h1{font-size:25px;font-weight:800;letter-spacing:-.02em;color:var(--text)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px}
+.muted{color:var(--muted)}
+
+@keyframes zvpulse{0%,100%{opacity:.55}50%{opacity:1}}
+@keyframes zvslide{from{transform:translateY(8px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes zvfade{from{opacity:0}to{opacity:1}}
+.screen{animation:zvslide .25s ease}
+
+/* range slider */
+input[type=range]{-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:8px;border-radius:5px;background:#1a1d22}
+input[type=range]::-moz-range-track{height:8px;border-radius:5px;background:#1a1d22}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;margin-top:-7px;width:22px;height:22px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px -2px var(--accent)}
+input[type=range]::-moz-range-thumb{width:22px;height:22px;border:none;border-radius:50%;background:var(--accent);box-shadow:0 0 12px -2px var(--accent)}
