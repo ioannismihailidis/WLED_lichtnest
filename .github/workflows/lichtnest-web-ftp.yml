@@ -15,7 +15,7 @@ name: Lichtnest Web (FTP test deploy)
 
 on:
   push:
-    branches: [zugvoegel, main]
+    branches: [zugvoegel]
     paths:
       - 'usermods/lichtnest/web/**'
       - '.github/workflows/lichtnest-web-ftp.yml'
