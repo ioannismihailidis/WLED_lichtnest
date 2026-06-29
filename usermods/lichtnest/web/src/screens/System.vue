@@ -112,7 +112,8 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
 <template>
   <div class="screen" style="padding:8px 20px 60px;max-width:680px;margin:0 auto">
     <div class="hd"><div class="eyebrow">WLED · CONFIG</div><div class="title">System</div></div>
-    <p v-if="!cfg.loaded" class="note">Lade Konfiguration …</p>
+    <p v-if="wled.offline" class="note">Offline · Lokales Projekt — Hardware-Einstellungen (Ports, LED-Typ, WLAN, ESP-NOW) brauchen ein verbundenes Gerät. Tubes &amp; Animationen legst du offline an und exportierst sie als Playlist.</p>
+    <p v-else-if="!cfg.loaded" class="note">Lade Konfiguration …</p>
 
     <template v-if="c">
       <!-- LEISTUNG -->

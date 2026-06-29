@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { wled } from './wled.js'
+import { wled, connectDevice, goOffline } from './wled.js'
 import Start from './screens/Start.vue'
 import Effekte from './screens/Effekte.vue'
 import Tubes from './screens/Tubes.vue'
@@ -37,6 +37,7 @@ const screenComp = computed(() => {
 const stubTitle = computed(() => (NAV.find((n) => n.id === screen.value) || {}).label || '')
 
 const statusText = computed(() => {
+  if (wled.offline) return 'Lokales Projekt'
   const host = wled.info.name || 'WLED'
   return wled.online ? host : (wled.error || 'Verbinde …')
 })
@@ -57,8 +58,9 @@ const statusText = computed(() => {
         </button>
       </nav>
       <div class="status">
-        <span class="dot" :class="{ off: !wled.online }" />
+        <span class="dot" :class="{ off: !wled.online && !wled.offline, local: wled.offline }" />
         <span class="mono">{{ statusText }}</span>
+        <button class="connbtn" @click="wled.offline ? connectDevice() : goOffline()">{{ wled.offline ? 'Verbinden' : 'Offline' }}</button>
       </div>
     </aside>
 
@@ -67,8 +69,9 @@ const statusText = computed(() => {
       <header v-if="!wide" class="statusbar">
         <span class="eyebrow" style="margin:0;letter-spacing:.22em">ZUGVØGEL · LICHTNEST</span>
         <span class="status">
-          <span class="dot" :class="{ off: !wled.online }" />
+          <span class="dot" :class="{ off: !wled.online && !wled.offline, local: wled.offline }" />
           <span class="mono">{{ statusText }}</span>
+          <button class="connbtn" @click="wled.offline ? connectDevice() : goOffline()">{{ wled.offline ? 'Verbinden' : 'Offline' }}</button>
         </span>
       </header>
 
@@ -111,6 +114,9 @@ const statusText = computed(() => {
 .status { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 10px; font-size: 11px; color: var(--muted); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
 .dot.off { background: #c4503f; box-shadow: 0 0 8px #c4503f; }
+.dot.local { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.connbtn { margin-left: auto; background: rgba(255,255,255,.06); border: 1px solid var(--line); color: var(--text2); font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 7px; cursor: pointer; }
+.connbtn:hover { border-color: var(--accent); color: var(--accent); }
 
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .statusbar {

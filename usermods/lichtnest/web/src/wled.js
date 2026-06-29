@@ -58,6 +58,7 @@ function wsUrl () {
 export const wled = reactive({
   ready: false,
   online: false,
+  offline: false,   // true = local-project mode (no device), persisted in localStorage
   error: '',
   on: false,
   bri: 128,
@@ -79,7 +80,15 @@ export const wled = reactive({
 // the device AND never jumps when a parameter changes.
 const devPhase = { ph: 0, syncAt: 0, valid: false }
 function syncDevicePhase (ph) { devPhase.ph = ph; devPhase.syncAt = performance.now(); devPhase.valid = true }
+let localPhase = 0, localPhaseTs = 0
 export function devicePhase () {
+  if (wled.offline) {   // no device clock — free-run locally at the current rate (still jump-free)
+    const now = performance.now()
+    const dt = localPhaseTs ? (now - localPhaseTs) / 1000 : 0
+    localPhaseTs = now
+    if (dt > 0 && dt < 1) localPhase += dt * phaseRate(lichtnest.fx, lichtnest.p, wled.info.leds?.count || 1)
+    return localPhase
+  }
   if (!devPhase.valid) return 0
   const N = wled.info.leds?.count || 1
   return devPhase.ph + (performance.now() - devPhase.syncAt) / 1000 * phaseRate(lichtnest.fx, lichtnest.p, N)
@@ -125,6 +134,74 @@ function applyState (s) {
   }
 }
 
+// --- offline / local-project mode ------------------------------------------
+// With no device reachable (dev/file mode) the UI works on a local project kept
+// in localStorage: create tubes, edit effects/playlists, preview via the client-side
+// simulation, then export playlists to a file (or import them on a real device).
+const PROJECT_KEY = 'zv_project'
+let projectTimer = null
+function recomputeLeds () {
+  const total = (wled.info.ports || []).reduce((m, b) => Math.max(m, (b.start || 0) + (b.len || 0)), 0)
+  wled.info.leds = { ...wled.info.leds, count: total }
+}
+function saveProject () {
+  if (!wled.offline) return
+  if (projectTimer) clearTimeout(projectTimer)
+  projectTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(PROJECT_KEY, JSON.stringify({
+        on: wled.on, bri: wled.bri, segments: wled.segments, ports: wled.info.ports,
+        plan: { photo: plan.photo, photoData: plan.photoData, tubes: plan.tubes, ports: plan.ports, portMax: plan.portMax },
+        playlists: playlists.list, lichtnest: { fx: lichtnest.fx, p: lichtnest.p },
+      }))
+    } catch (e) { /* localStorage quota — photo too big? */ }
+  }, 400)
+}
+const defaultPorts = () => [{ i: 0, start: 0, len: DEFAULT_PORT_MAX }, { i: 1, start: DEFAULT_PORT_MAX, len: DEFAULT_PORT_MAX }]
+// enter local mode, hydrating the store from the saved project (or sensible defaults)
+export function enterOffline () {
+  let p = null
+  try { p = JSON.parse(localStorage.getItem(PROJECT_KEY)) } catch (e) { /* none */ }
+  if (!p) p = {}
+  wled.offline = true
+  wled.on = p.on !== false
+  wled.bri = p.bri ?? 200
+  wled.segments = Array.isArray(p.segments) ? p.segments : []
+  wled.info.ports = (Array.isArray(p.ports) && p.ports.length) ? p.ports : defaultPorts()
+  recomputeLeds()
+  const pp = p.plan || {}
+  plan.photo = !!pp.photo; plan.photoData = pp.photoData || null
+  plan.tubes = pp.tubes || {}; plan.ports = pp.ports || {}; plan.portMax = pp.portMax || {}
+  plan.loaded = true; plan.rev++
+  playlists.list = Array.isArray(p.playlists) ? p.playlists : []; playlists.loaded = true
+  presets.loaded = true
+  lichtnest.fx = p.lichtnest?.fx ?? 3; lichtnest.p = p.lichtnest?.p || {}
+  wled.ready = true; wled.online = false; wled.error = ''
+}
+// emulate the device applying a POSTed partial state, locally (tubes/effect/on/bri)
+function applyLocal (body) {
+  if (body.on !== undefined) wled.on = !!body.on
+  if (body.bri !== undefined) wled.bri = body.bri
+  if (body.mainseg !== undefined) wled.mainseg = body.mainseg
+  if (Array.isArray(body.seg)) {
+    body.seg.forEach((s) => {
+      if (s.id === undefined) return
+      const i = wled.segments.findIndex((x) => x.id === s.id)
+      if (s.start === 0 && s.stop === 0) { if (i >= 0) wled.segments.splice(i, 1); return } // remove signal
+      if (i >= 0) wled.segments[i] = { ...wled.segments[i], ...s }
+      else wled.segments.push({ on: true, col: [[240, 162, 60]], ...s })
+    })
+    wled.segments = wled.segments.filter((x) => (x.stop ?? 0) > (x.start ?? 0))
+    recomputeLeds()
+  }
+  if (body.lichtnest) {
+    const o = body.lichtnest
+    if (o.fx !== undefined) lichtnest.fx = o.fx
+    if (o.p) lichtnest.p = { ...lichtnest.p, ...o.p }
+  }
+  saveProject()
+}
+
 // --- throttled state pushes (coalesce slider spam) -------------------------
 let pTop = {}
 let pSeg = {}
@@ -138,6 +215,7 @@ function flush () {
   pTop = {}
   pSeg = {}
   if (!Object.keys(body).length) return
+  if (wled.offline) { applyLocal(body); return }
   fetch(httpUrl('/json/state'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -175,6 +253,7 @@ export const actions = {
 
 // Discrete (non-throttled) state post — for tube/segment operations.
 export async function postState (body) {
+  if (wled.offline) { applyLocal(body); return true }
   try {
     const r = await fetch(httpUrl('/json/state'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -192,6 +271,7 @@ const TUBES_PRESET = 250
 let tubesPersistTimer = null
 let bootPresetSet = false
 export function persistTubes () {
+  if (wled.offline) { saveProject(); return }
   if (tubesPersistTimer) clearTimeout(tubesPersistTimer)
   tubesPersistTimer = setTimeout(async () => {
     tubesPersistTimer = null
@@ -239,6 +319,7 @@ export const tubes = {
 // toggling off restores the snapshot taken when entering test mode.
 let testSnapshot = null
 export async function toggleTest (id) {
+  if (wled.offline) { wled.testTube = wled.testTube === id ? null : id; return } // preview reads testTube directly
   if (wled.testTube === id) {                 // off -> restore segments + re-enable the effect
     await postState({ seg: testSnapshot || [], lichtnest: { geo: tubeGeometry() } })
     testSnapshot = null; wled.testTube = null
@@ -261,7 +342,7 @@ export async function toggleTest (id) {
 // --- 2D plan (photo + per-tube endpoint layout, stored on the device FS) ----
 // Photo  -> /plan.jpg            (client-compressed JPEG, uploaded via /upload)
 // Layout -> /lichtnest_plan.json { photo: bool, tubes: { <segId>: {x1,y1,x2,y2} } }
-export const plan = reactive({ loaded: false, photo: false, rev: 0, tubes: {}, ports: {}, portMax: {} })
+export const plan = reactive({ loaded: false, photo: false, photoData: null, rev: 0, tubes: {}, ports: {}, portMax: {} })
 
 // theoretical max LEDs per port (UI/planning cap; configurable in Settings). The
 // actually-driven LEDs come from the tubes' total, not from the WLED bus length.
@@ -270,6 +351,7 @@ export function portMaxLeds (i) { return plan.portMax[i] || DEFAULT_PORT_MAX }
 export function setPortMax (i, v) { plan.portMax = { ...plan.portMax, [i]: Math.max(1, v | 0) }; savePlan() }
 
 export async function loadPlan () {
+  if (wled.offline) { plan.loaded = true; return }   // already hydrated by enterOffline()
   try {
     const r = await fetch(httpUrl('/lichtnest_plan.json?v=' + Date.now()))
     if (r.ok) { const d = await r.json(); plan.photo = !!d.photo; plan.tubes = d.tubes || {}; plan.ports = d.ports || {}; plan.portMax = d.portMax || {}; plan.rev++ }
@@ -279,6 +361,7 @@ export async function loadPlan () {
 
 let planTimer = null
 export function savePlan () {
+  if (wled.offline) { saveProject(); return }
   if (planTimer) clearTimeout(planTimer)
   planTimer = setTimeout(() => {
     const body = JSON.stringify({ photo: plan.photo, tubes: plan.tubes, ports: plan.ports, portMax: plan.portMax })
@@ -290,14 +373,18 @@ export function savePlan () {
 }
 
 export async function uploadPhoto (blob) {
+  if (wled.offline) {
+    const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(blob) })
+    plan.photoData = dataUrl; plan.photo = true; plan.rev++; saveProject(); return true
+  }
   const fd = new FormData()
   fd.append('file', blob, 'plan.jpg')
   const r = await fetch(httpUrl('/upload'), { method: 'POST', body: fd }).catch(() => null)
   if (r && r.ok) { plan.photo = true; plan.rev++; savePlan() }
   return !!(r && r.ok)
 }
-export function removePhoto () { plan.photo = false; savePlan() }
-export function planPhotoUrl () { return (base || '') + '/plan.jpg?v=' + plan.rev }
+export function removePhoto () { plan.photo = false; if (wled.offline) { plan.photoData = null; plan.rev++; saveProject(); return } savePlan() }
+export function planPhotoUrl () { return wled.offline ? (plan.photoData || '') : ((base || '') + '/plan.jpg?v=' + plan.rev) }
 
 // --- Scenes (WLED presets) + Playlists --------------------------------------
 // Scenes  = WLED presets (saved looks). Playlists = our own FS-stored sequences
@@ -306,6 +393,7 @@ export const presets = reactive({ loaded: false, list: [] })
 export const playlists = reactive({ loaded: false, list: [] })
 
 export async function loadPresets () {
+  if (wled.offline) { presets.loaded = true; return }
   try {
     const r = await fetch(httpUrl('/presets.json?v=' + Date.now()))
     if (r.ok) {
@@ -330,6 +418,7 @@ export async function applyScene (id) { return postState({ ps: id }) }
 export function sceneName (id) { const s = presets.list.find((p) => p.id === id); return s ? s.name : ('Szene ' + id) }
 
 export async function loadPlaylists () {
+  if (wled.offline) { playlists.loaded = true; return }   // already hydrated by enterOffline()
   try {
     const r = await fetch(httpUrl('/lichtnest_playlists.json?v=' + Date.now()))
     if (r.ok) { const d = await r.json(); playlists.list = Array.isArray(d.list) ? d.list : [] }
@@ -349,6 +438,7 @@ async function writePlaylists () {
 }
 let plSaveTimer = null
 export function savePlaylists () {
+  if (wled.offline) { saveProject(); return }
   if (plSaveTimer) clearTimeout(plSaveTimer)
   plSaveTimer = setTimeout(() => { plSaveTimer = null; writePlaylists() }, 600)
 }
@@ -357,11 +447,29 @@ async function flushPlaylists () {
   await writePlaylists()
 }
 
+// --- offline playback engine (local timer; the device runs its own engine when online) ---
+let offTimer = null
+const offItems = (pl) => (pl ? (pl.items || []).filter((it) => it.fx != null) : [])
+const offFind = () => playlists.list.find((p) => p.id === wled.pl.id)
+function offApplyStep (pl, idx) {
+  const items = offItems(pl); if (!items.length) { wled.pl.active = false; return }
+  idx = ((idx % items.length) + items.length) % items.length
+  const it = items[idx]
+  lichtnest.fx = it.fx; lichtnest.p = { ...it.p }
+  wled.pl.active = true; wled.pl.id = pl.id; wled.pl.name = pl.name
+  wled.pl.idx = idx; wled.pl.total = items.length; wled.pl.fx = it.fx
+  wled.pl.nextFx = items[(idx + 1) % items.length].fx
+  wled.pl.elapsedMs = 0; wled.pl.durMs = Math.max(1, it.dur || 10) * 1000; wled.pl.syncAt = Date.now()
+  if (offTimer) clearTimeout(offTimer)
+  offTimer = setTimeout(() => offApplyStep(pl, playback.loop ? wled.pl.idx : wled.pl.idx + 1), wled.pl.durMs)
+}
+
 // NOTE: WLED's POST /json/state response does NOT include usermod state, and a usermod
 // state change doesn't trigger a WS push — so after every command we GET the state back
 // (pollState) to refresh wled.pl. Optimistic flips give instant visual feedback.
 export async function playPlaylist (pl, startIdx = 0) {
   if (!pl || !(pl.items || []).some((it) => it.fx != null)) return false
+  if (wled.offline) { offApplyStep(pl, startIdx); return true }
   await flushPlaylists()                                   // firmware reads the file on play
   wled.pl.active = true; wled.pl.id = pl.id; wled.pl.name = pl.name; wled.pl.idx = startIdx
   await postState({ lichtnest: { play: pl.id, from: startIdx } })
@@ -369,14 +477,15 @@ export async function playPlaylist (pl, startIdx = 0) {
   return true
 }
 export async function stopPlaylist () {
+  if (wled.offline) { if (offTimer) clearTimeout(offTimer); offTimer = null; wled.pl.active = false; return true }
   wled.pl.active = false
   const r = await postState({ lichtnest: { stop: true } })
   await pollState()
   return r
 }
-export function nextStep () { postState({ lichtnest: { next: true } }).then(pollState) }
-export function prevStep () { postState({ lichtnest: { prev: true } }).then(pollState) }
-export function setLoop (v) { playback.loop = v; postState({ lichtnest: { loop: v } }).then(pollState) }
+export function nextStep () { if (wled.offline) { const pl = offFind(); if (pl) offApplyStep(pl, wled.pl.idx + 1); return } postState({ lichtnest: { next: true } }).then(pollState) }
+export function prevStep () { if (wled.offline) { const pl = offFind(); if (pl) offApplyStep(pl, wled.pl.idx - 1); return } postState({ lichtnest: { prev: true } }).then(pollState) }
+export function setLoop (v) { playback.loop = v; if (wled.offline) { wled.pl.loop = v; return } postState({ lichtnest: { loop: v } }).then(pollState) }
 export const isPlaying = (id) => wled.pl.active && wled.pl.id === id
 
 export function playlistProgress (now) {
@@ -413,6 +522,7 @@ export const fxActions = {
 // --- device config (/json/cfg) ----------------------------------------------
 export const cfg = reactive({ loaded: false, data: null })
 export async function loadCfg () {
+  if (wled.offline) return null   // hardware config needs a connected device
   try { const r = await fetch(httpUrl('/json/cfg')); if (r.ok) { cfg.data = await r.json(); cfg.loaded = true } } catch (e) { /* ignore */ }
   return cfg.data
 }
@@ -473,20 +583,39 @@ async function pollState () {
   try { const r = await fetch(httpUrl('/json/state')); if (r.ok) { const s = await r.json().catch(() => null); if (s) applyState(s) } } catch (e) { /* ignore */ }
 }
 
-export async function init () {
-  // File / dev mode: ask for the device host before the first request.
-  if (isFileMode() && !base) await promptHost()
-  await load()
-  // Still nothing and we're local? The host was probably wrong — ask again.
-  if (isFileMode() && !wled.online) { await promptHost(); await load() }
+function goOnline () {
   loadPlan()        // tube geometry for effects + plan
   loadPlaylists()   // so the player can mark each step on the timeline
   connect()
-  // light periodic resync in case a WS message was missed
-  setInterval(() => { if (!ws || ws.readyState !== 1) load() }, 8000)
-  // keep the preview phase-locked to the device (POST/WS don't carry usermod state),
-  // so all effects — especially the fast strobe — stay in sync, not free-running.
-  setInterval(pollState, 1200)
+}
+
+export async function init () {
+  // periodic resync + phase poll (both no-op while offline / disconnected)
+  setInterval(() => { if (!wled.offline && (!ws || ws.readyState !== 1)) load() }, 8000)
+  setInterval(() => { if (!wled.offline) pollState() }, 1200)
+
+  // Dev/file mode with no host configured -> start in local (offline) mode.
+  if (isFileMode() && !base) { enterOffline(); return }
+  await load()
+  if (!wled.online && isFileMode()) { enterOffline(); return }   // configured device unreachable
+  if (!wled.offline) goOnline()
+}
+
+// switch the running UI to local-project mode (no device)
+export function goOffline () {
+  if (ws) { try { ws.close() } catch (e) {} ws = null }
+  enterOffline()
+}
+// leave local mode and (re)connect to a device
+export async function connectDevice (host) {
+  if (host) setHost(host)
+  else if (isFileMode() && !base) await promptHost()
+  if (isFileMode() && !base) return false   // user cancelled the host prompt
+  wled.offline = false
+  await load()
+  if (wled.online) { goOnline(); return true }
+  if (isFileMode()) enterOffline()          // couldn't reach -> back to local
+  return false
 }
 
 // helpers for components
