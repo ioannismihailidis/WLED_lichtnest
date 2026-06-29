@@ -96,6 +96,32 @@ function rowStyle (uid, index) {
   else if (drag.target < drag.startIndex && index >= drag.target && index < drag.startIndex) s = 1
   return s ? { transform: `translateY(${s * drag.h}px)` } : null
 }
+
+// ---- export / import (transfer playlists to another controller) ----
+const importInput = ref(null)
+function exportAll () {
+  const blob = new Blob([JSON.stringify({ list: playlists.list }, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a'); a.href = url; a.download = 'lichtnest_playlists.json'; a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+async function onImport (e) {
+  const file = e.target.files[0]; e.target.value = ''
+  if (!file) return
+  try {
+    const d = JSON.parse(await file.text())
+    const arr = Array.isArray(d) ? d : (d && Array.isArray(d.list) ? d.list : null)
+    if (!arr || !arr.length) throw new Error('keine Playlists in der Datei')
+    arr.forEach((pl, i) => {
+      pl.id = 'pl' + Date.now().toString(36) + i.toString(36) + Math.floor(Math.random() * 1296).toString(36)
+      pl.default = false
+      pl.name = pl.name || 'Importiert'
+      pl.items = (pl.items || []).filter((it) => it && it.fx != null).map((it) => ({ ...it, uid: uid() }))
+    })
+    playlists.list.push(...arr)
+    savePlaylists()
+  } catch (err) { alert('Import fehlgeschlagen: ' + (err.message || err)) }
+}
 </script>
 
 <template>
@@ -115,7 +141,16 @@ function rowStyle (uid, index) {
         </button>
       </div>
       <button class="add" @click="addPlaylist"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>Neue Playlist</button>
-      <p v-if="!playlists.list.length" class="note">Noch keine Playlist. Lege eine an und füge Effekte als Schritte hinzu.</p>
+      <div class="ioRow">
+        <input ref="importInput" type="file" accept=".json,application/json" style="display:none" @change="onImport">
+        <button class="iobtn" :disabled="!playlists.list.length" @click="exportAll">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10" /><path d="m8 12 4 4 4-4" /><path d="M5 20h14" /></svg>Exportieren
+        </button>
+        <button class="iobtn" @click="importInput.click()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10" /><path d="m8 14 4-4 4 4" /><path d="M5 4h14" /></svg>Importieren
+        </button>
+      </div>
+      <p v-if="!playlists.list.length" class="note">Noch keine Playlist. Lege eine an, füge Effekte als Schritte hinzu — oder importiere eine Datei.</p>
     </template>
 
     <!-- EDITOR -->
@@ -201,6 +236,10 @@ function rowStyle (uid, index) {
 .ic.del:hover { color: #e0614f; border-color: #e0614f; }
 .ic.sm { width: 30px; height: 30px; }
 .add { width: 100%; height: 44px; border-radius: 12px; background: transparent; border: 1.5px dashed rgba(240,162,60,.4); color: var(--accent); font-weight: 700; font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 4px; }
+.ioRow { display: flex; gap: 8px; margin-top: 8px; }
+.iobtn { flex: 1; height: 38px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); color: var(--text2); font-size: 12px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.iobtn:disabled { opacity: .4; cursor: default; }
+.iobtn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 
 .link { display: flex; align-items: center; gap: 6px; background: none; border: none; color: var(--muted2); font-size: 14px; font-weight: 600; cursor: pointer; padding: 6px 0 12px; }
 .ehd { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
