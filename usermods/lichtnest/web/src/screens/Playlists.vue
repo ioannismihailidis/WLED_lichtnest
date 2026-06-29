@@ -97,13 +97,31 @@ function rowStyle (uid, index) {
   return s ? { transform: `translateY(${s * drag.h}px)` } : null
 }
 
-// ---- export / import (transfer playlists to another controller) ----
+// ---- export / import (transfer playlists; pick which ones) ----
 const importInput = ref(null)
-function exportAll () {
-  const blob = new Blob([JSON.stringify({ list: playlists.list }, null, 2)], { type: 'application/json' })
+const importPicker = ref(null)   // [{...playlist, sel}] while choosing what to import from a file
+const selCount = computed(() => (importPicker.value || []).filter((p) => p.sel).length)
+
+function downloadJson (obj, name) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
-  const a = document.createElement('a'); a.href = url; a.download = 'lichtnest_playlists.json'; a.click()
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+function exportAll () { downloadJson({ list: playlists.list }, 'lichtnest_playlists.json') }
+function exportOne (pl) {
+  const safe = (pl.name || 'playlist').trim().replace(/[^\w-]+/g, '_').toLowerCase() || 'playlist'
+  downloadJson({ list: [pl] }, 'lichtnest_' + safe + '.json')
+}
+function addImported (arr) {
+  arr.forEach((pl, i) => {
+    pl.id = 'pl' + Date.now().toString(36) + i.toString(36) + Math.floor(Math.random() * 1296).toString(36)
+    pl.default = false
+    pl.name = pl.name || 'Importiert'
+    pl.items = (pl.items || []).filter((it) => it && it.fx != null).map((it) => ({ ...it, uid: uid() }))
+  })
+  playlists.list.push(...arr)
+  savePlaylists()
 }
 async function onImport (e) {
   const file = e.target.files[0]; e.target.value = ''
@@ -112,15 +130,14 @@ async function onImport (e) {
     const d = JSON.parse(await file.text())
     const arr = Array.isArray(d) ? d : (d && Array.isArray(d.list) ? d.list : null)
     if (!arr || !arr.length) throw new Error('keine Playlists in der Datei')
-    arr.forEach((pl, i) => {
-      pl.id = 'pl' + Date.now().toString(36) + i.toString(36) + Math.floor(Math.random() * 1296).toString(36)
-      pl.default = false
-      pl.name = pl.name || 'Importiert'
-      pl.items = (pl.items || []).filter((it) => it && it.fx != null).map((it) => ({ ...it, uid: uid() }))
-    })
-    playlists.list.push(...arr)
-    savePlaylists()
+    if (arr.length === 1) { addImported(arr); return }                              // single -> import directly
+    importPicker.value = arr.map((p) => ({ ...p, name: p.name || 'Importiert', sel: true })) // many -> choose
   } catch (err) { alert('Import fehlgeschlagen: ' + (err.message || err)) }
+}
+function confirmImport () {
+  const chosen = (importPicker.value || []).filter((p) => p.sel).map(({ sel, ...p }) => p)
+  importPicker.value = null
+  if (chosen.length) addImported(chosen)
 }
 </script>
 
@@ -135,6 +152,9 @@ async function onImport (e) {
           <span class="pn">{{ pl.name }}<span v-if="pl.default" class="defbadge mono">START</span></span>
           <span class="pm mono">{{ meta(pl) }}</span>
         </button>
+        <button class="ic" title="Diese Playlist exportieren" @click="exportOne(pl)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10" /><path d="m8 12 4 4 4-4" /><path d="M5 20h14" /></svg>
+        </button>
         <button class="ic" :class="{ active: isPlaying(pl.id) }" @click="isPlaying(pl.id) ? stop() : play(pl)">
           <svg v-if="isPlaying(pl.id)" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
           <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z" /></svg>
@@ -144,7 +164,7 @@ async function onImport (e) {
       <div class="ioRow">
         <input ref="importInput" type="file" accept=".json,application/json" style="display:none" @change="onImport">
         <button class="iobtn" :disabled="!playlists.list.length" @click="exportAll">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10" /><path d="m8 12 4 4 4-4" /><path d="M5 20h14" /></svg>Exportieren
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10" /><path d="m8 12 4 4 4-4" /><path d="M5 20h14" /></svg>Alle exportieren
         </button>
         <button class="iobtn" @click="importInput.click()">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10" /><path d="m8 14 4-4 4 4" /><path d="M5 4h14" /></svg>Importieren
@@ -218,6 +238,23 @@ async function onImport (e) {
         </button>
       </div>
     </template>
+
+    <!-- IMPORT: choose which playlists from the file -->
+    <div v-if="importPicker" class="modal" @click="importPicker = null">
+      <div class="card" @click.stop>
+        <div class="mhead"><span class="mtitle">Playlists importieren</span></div>
+        <p class="impnote mono">Welche aus der Datei hinzufügen?</p>
+        <label v-for="(p, i) in importPicker" :key="i" class="improw">
+          <input type="checkbox" v-model="p.sel">
+          <span class="impn">{{ p.name }}</span>
+          <span class="impm mono">{{ (p.items || []).length }} Schritte</span>
+        </label>
+        <div class="mrow">
+          <button class="cancel2" @click="importPicker = null">Abbrechen</button>
+          <button class="addbtn" :disabled="!selCount" @click="confirmImport">Importieren ({{ selCount }})</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -285,4 +322,20 @@ async function onImport (e) {
 .chip { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 9px 12px; color: var(--text2); font-size: 13px; font-weight: 600; cursor: pointer; }
 .cprev { width: 16px; height: 10px; border-radius: 3px; }
 .plus { color: var(--accent); font-weight: 800; }
+
+/* import picker modal */
+.modal { position: fixed; inset: 0; z-index: 50; background: rgba(8,9,11,.6); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 18px; max-height: 80vh; overflow-y: auto; }
+.mhead { margin-bottom: 4px; }
+.mtitle { font-size: 16px; font-weight: 800; color: var(--text); }
+.impnote { font-size: 11px; color: var(--muted); margin: 0 0 10px; }
+.improw { display: flex; align-items: center; gap: 10px; padding: 10px 8px; border-radius: 10px; cursor: pointer; }
+.improw:hover { background: rgba(255,255,255,.04); }
+.improw input { width: 18px; height: 18px; accent-color: var(--accent); flex: none; cursor: pointer; }
+.impn { flex: 1; font-size: 14px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.impm { font-size: 11px; color: var(--muted); flex: none; }
+.mrow { display: flex; gap: 10px; margin-top: 14px; }
+.cancel2 { flex: 1; height: 44px; border-radius: 12px; background: var(--inset); border: 1px solid var(--line); color: var(--text2); font-weight: 700; font-size: 14px; cursor: pointer; }
+.addbtn { flex: 1; height: 44px; border-radius: 12px; background: var(--accent); border: none; color: #1a1206; font-weight: 800; font-size: 14px; cursor: pointer; }
+.addbtn:disabled { opacity: .5; cursor: default; }
 </style>
