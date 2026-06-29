@@ -1,0 +1,67 @@
+name: Lichtnest Web (FTP test deploy)
+
+# Builds the Zugvoegel "Lichtnest" custom UI (a single self-contained Vue app) and
+# uploads the build output via FTP to a test web host. The UI can then be opened in a
+# browser and pointed at any controller with ?host=http://<device-ip> (the app supports
+# file/dev mode). This is for browser testing only; deploying onto the device itself
+# still happens over HTTP via `npm run push` (POST /upload).
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   FTP_SERVER      FTP host, e.g. ftp.example.com
+#   FTP_USERNAME    FTP user
+#   FTP_PASSWORD    FTP password
+#   FTP_SERVER_DIR  target directory on the server, e.g. /lichtnest/ (trailing slash)
+# If FTP_SERVER is unset the build + artifact still run; only the FTP upload is skipped.
+
+on:
+  push:
+    branches: [zugvoegel, main]
+    paths:
+      - 'usermods/lichtnest/web/**'
+      - '.github/workflows/lichtnest-web-ftp.yml'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    # job-level env so the FTP step's `if:` can read it (secrets aren't valid in a step's own env for its if)
+    env:
+      FTP_SERVER: ${{ secrets.FTP_SERVER }}
+    defaults:
+      run:
+        working-directory: usermods/lichtnest/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: usermods/lichtnest/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build single-file UI
+        run: npm run build   # -> dist/index.html (self-contained) + dist/index.htm.gz
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichtnest-web
+          path: |
+            usermods/lichtnest/web/dist/index.html
+            usermods/lichtnest/web/dist/index.htm.gz
+
+      - name: Upload to FTP test host
+        if: ${{ env.FTP_SERVER != '' }}
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          server-dir: ${{ secrets.FTP_SERVER_DIR }}
+          local-dir: usermods/lichtnest/web/dist/
