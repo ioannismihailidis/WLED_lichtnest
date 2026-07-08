@@ -4,10 +4,13 @@ import { lichtnest, fxActions, rgbToHex, hexToRgb } from '../wled.js'
 import { EFFECTS, effectById } from '../effects.js'
 import { fadeCols, fadeCw, gradientCss } from '../fxsim.js'
 import GradientEditor from '../components/GradientEditor.vue'
+import MiniPlan from '../components/MiniPlan.vue'
+import TexturePreview from '../components/TexturePreview.vue'
 
 const view = ref('list')
 const editId = ref(0)
 const edit = computed(() => effectById(editId.value))
+const previewMode = ref('tubes')   // 'tubes' (effect on the real layout) | 'texture' (full 2D field)
 
 function open (id) { editId.value = id; fxActions.setEffect(id); view.value = 'editor' }
 function back () { view.value = 'list' }
@@ -59,7 +62,14 @@ const isActive = (id) => lichtnest.fx === id
     <!-- EDITOR -->
     <template v-else>
       <button class="link" @click="back()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>Effekte</button>
-      <div class="bigprev" :style="{ background: previewBg(edit) }" />
+      <div class="bigprev">
+        <MiniPlan v-if="previewMode === 'tubes'" class="pvcanvas" />
+        <TexturePreview v-else class="pvcanvas" />
+        <div class="pvtoggle">
+          <button :class="{ on: previewMode === 'tubes' }" @click="previewMode = 'tubes'">Tubes</button>
+          <button :class="{ on: previewMode === 'texture' }" @click="previewMode = 'texture'">Textur</button>
+        </div>
+      </div>
       <div class="ehead">
         <div class="ename">{{ edit.name }}</div>
         <div class="edesc">{{ edit.desc }}</div>
@@ -100,7 +110,11 @@ const isActive = (id) => lichtnest.fx === id
 .prev { display: block; height: 40px; border-radius: 11px; }
 
 .link { display: flex; align-items: center; gap: 6px; background: none; border: none; color: var(--muted2); font-size: 14px; font-weight: 600; cursor: pointer; padding: 8px 0; margin-bottom: 6px; }
-.bigprev { height: 130px; border-radius: 20px; border: 1px solid var(--line); margin-bottom: 16px; }
+.bigprev { position: relative; height: 150px; border-radius: 20px; border: 1px solid var(--line); margin-bottom: 16px; overflow: hidden; background: var(--inset); }
+.pvcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pvtoggle { position: absolute; top: 8px; right: 8px; display: flex; gap: 3px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 9px; padding: 3px; z-index: 2; }
+.pvtoggle button { border: none; background: transparent; color: var(--muted2); font-size: 11px; font-weight: 700; padding: 4px 9px; border-radius: 6px; cursor: pointer; }
+.pvtoggle button.on { background: var(--accent); color: #1a1206; }
 .ehead { margin-bottom: 18px; }
 .ename { font-size: 22px; font-weight: 800; color: var(--text); }
 .edesc { font-size: 13px; color: var(--muted); margin-top: 4px; }
