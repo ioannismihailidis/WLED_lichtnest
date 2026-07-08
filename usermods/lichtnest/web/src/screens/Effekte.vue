@@ -11,6 +11,7 @@ const view = ref('list')
 const editId = ref(0)
 const edit = computed(() => effectById(editId.value))
 const previewMode = ref('tubes')   // 'tubes' (effect on the real layout) | 'texture' (full 2D field)
+const pvRestart = ref(0)           // bump to replay the preview from animation start
 
 function open (id) { editId.value = id; fxActions.setEffect(id); view.value = 'editor' }
 function back () { view.value = 'list' }
@@ -63,8 +64,11 @@ const isActive = (id) => lichtnest.fx === id
     <template v-else>
       <button class="link" @click="back()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>Effekte</button>
       <div class="bigprev">
-        <MiniPlan v-if="previewMode === 'tubes'" class="pvcanvas" />
-        <TexturePreview v-else class="pvcanvas" />
+        <MiniPlan v-if="previewMode === 'tubes'" local :restart-key="pvRestart" class="pvcanvas" />
+        <TexturePreview v-else local :restart-key="pvRestart" class="pvcanvas" />
+        <button class="pvrestart" title="Animation neu starten" @click="pvRestart++">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4" /><path d="M3 4.5V10h5.5" /></svg>
+        </button>
         <div class="pvtoggle">
           <button :class="{ on: previewMode === 'tubes' }" @click="previewMode = 'tubes'">Tubes</button>
           <button :class="{ on: previewMode === 'texture' }" @click="previewMode = 'texture'">Textur</button>
@@ -115,6 +119,8 @@ const isActive = (id) => lichtnest.fx === id
 .pvtoggle { position: absolute; top: 8px; right: 8px; display: flex; gap: 3px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 9px; padding: 3px; z-index: 2; }
 .pvtoggle button { border: none; background: transparent; color: var(--muted2); font-size: 11px; font-weight: 700; padding: 4px 9px; border-radius: 6px; cursor: pointer; }
 .pvtoggle button.on { background: var(--accent); color: #1a1206; }
+.pvrestart { position: absolute; top: 8px; left: 8px; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 9px; color: var(--muted2); cursor: pointer; z-index: 2; }
+.pvrestart:active { color: var(--accent); transform: scale(.92); }
 .ehead { margin-bottom: 18px; }
 .ename { font-size: 22px; font-weight: 800; color: var(--text); }
 .edesc { font-size: 13px; color: var(--muted); margin-top: 4px; }

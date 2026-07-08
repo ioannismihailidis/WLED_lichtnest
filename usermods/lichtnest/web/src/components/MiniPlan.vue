@@ -1,7 +1,21 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { wled, lichtnest, plan, devicePhase } from '../wled.js'
-import { fxColor, rgbCss } from '../fxsim.js'
+import { fxColor, rgbCss, phaseRate } from '../fxsim.js'
+
+// optional fx/p override (e.g. a playlist step); `local` free-runs its own phase;
+// bumping `restartKey` replays the animation from phase 0 (local mode only)
+const props = defineProps({ fx: { type: Number, default: null }, p: { type: Object, default: null }, local: { type: Boolean, default: false }, restartKey: { type: Number, default: 0 } })
+const efx = () => (props.fx != null ? props.fx : lichtnest.fx)
+const ep = () => (props.p != null ? props.p : lichtnest.p)
+let lph = 0, lts = 0
+function phaseNow () {
+  if (!props.local) return devicePhase()
+  const now = performance.now(); const dt = lts ? (now - lts) / 1000 : 0; lts = now
+  if (dt > 0 && dt < 1) lph += dt * phaseRate(efx(), ep(), wled.info.leds?.count || 1)
+  return lph
+}
+watch(() => props.restartKey, () => { lph = 0; lts = 0 })
 
 const canvas = ref(null)
 let raf = 0
@@ -25,7 +39,7 @@ function draw () {
   let cw = w, ch = w / aspect
   if (ch > h) { ch = h; cw = h * aspect }
   const ox = (w - cw) / 2, oy = (h - ch) / 2
-  const t = devicePhase()
+  const t = phaseNow()
   const list = tubes.value
   const total = wled.info.leds?.count || list.reduce((m, x) => Math.max(m, x.start + x.leds), 1)
   const on = wled.on
@@ -36,7 +50,7 @@ function draw () {
     for (let i = 0; i < n; i++) {
       const f = n > 1 ? i / (n - 1) : 0
       const x = tube.x1 + (tube.x2 - tube.x1) * f, y = tube.y1 + (tube.y2 - tube.y1) * f
-      const col = on ? fxColor(lichtnest.fx, lichtnest.p, x, y, tube.start + i, total, ti, list.length, t, cx, cy) : [28, 30, 34]
+      const col = on ? fxColor(efx(), ep(), x, y, tube.start + i, total, ti, list.length, t, cx, cy) : [28, 30, 34]
       ctx.fillStyle = rgbCss(col)
       ctx.beginPath(); ctx.arc(ox + x * cw, oy + y * ch, 1.5, 0, 6.283); ctx.fill()
     }

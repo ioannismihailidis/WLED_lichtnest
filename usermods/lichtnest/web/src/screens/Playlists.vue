@@ -6,10 +6,14 @@ import { fadeCols, fadeCw } from '../fxsim.js'
 import { confirmDialog } from '../confirm.js'
 import PlaylistPlayer from '../components/PlaylistPlayer.vue'
 import GradientEditor from '../components/GradientEditor.vue'
+import MiniPlan from '../components/MiniPlan.vue'
+import TexturePreview from '../components/TexturePreview.vue'
 
 const view = ref('list')
 const editId = ref(null)
 const expanded = ref(null) // uid of the expanded step
+const stepPvMode = ref('texture') // step preview: 'tubes' | 'texture'
+const stepRestart = ref(0)        // bump to replay the step preview from animation start
 const now = ref(Date.now())
 let timer = null
 onMounted(() => { loadPlaylists(); timer = setInterval(() => { now.value = Date.now() }, 500) })
@@ -206,6 +210,17 @@ function confirmImport () {
 
         <!-- expanded: transition + live params -->
         <div v-if="expanded === it.uid" class="iexp">
+          <div class="steppv">
+            <MiniPlan v-if="stepPvMode === 'tubes'" :fx="it.fx" :p="it.p" local :restart-key="stepRestart" class="spvcanvas" />
+            <TexturePreview v-else :fx="it.fx" :p="it.p" local :restart-key="stepRestart" class="spvcanvas" />
+            <button class="pvrestart2" title="Animation neu starten" @click="stepRestart++">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4" /><path d="M3 4.5V10h5.5" /></svg>
+            </button>
+            <div class="pvtoggle2">
+              <button :class="{ on: stepPvMode === 'tubes' }" @click="stepPvMode = 'tubes'">Tubes</button>
+              <button :class="{ on: stepPvMode === 'texture' }" @click="stepPvMode = 'texture'">Textur</button>
+            </div>
+          </div>
           <div class="frow">
             <span class="flbl">Übergang</span>
             <span class="seg">
@@ -301,6 +316,13 @@ function confirmImport () {
 .pstep.on { background: var(--accent); color: #1a1206; border-color: transparent; }
 
 .iexp { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.06); }
+.steppv { position: relative; height: 110px; border-radius: 12px; overflow: hidden; background: var(--inset); border: 1px solid var(--line); margin-bottom: 12px; }
+.spvcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pvtoggle2 { position: absolute; top: 6px; right: 6px; display: flex; gap: 2px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 8px; padding: 2px; z-index: 2; }
+.pvtoggle2 button { border: none; background: transparent; color: var(--muted2); font-size: 10px; font-weight: 700; padding: 3px 7px; border-radius: 5px; cursor: pointer; }
+.pvtoggle2 button.on { background: var(--accent); color: #1a1206; }
+.pvrestart2 { position: absolute; top: 6px; left: 6px; display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 8px; color: var(--muted2); cursor: pointer; z-index: 2; }
+.pvrestart2:active { color: var(--accent); transform: scale(.9); }
 .frow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
 .flbl { font-size: 12px; color: var(--text2); }
 .seg { display: flex; gap: 4px; background: var(--inset); border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
