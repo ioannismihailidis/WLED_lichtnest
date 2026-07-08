@@ -45,5 +45,18 @@ export const EFFECTS = [
       { key: 'tempo', type: 'range', name: 'Atem-Tempo', min: 0, max: 100, unit: '%' },
     ],
   },
+  {
+    id: 4, key: 'radial', name: 'Radiale Gradienten',
+    desc: 'Weiche Ringe wandern aus der Mitte nach außen; starten mittig, sobald voll eingefadet.',
+    preview: 'repeating-radial-gradient(circle at 50% 50%, #27c5ff 0 7%, #0d0f13 7% 20%)',
+    params: [
+      { key: 'color', type: 'color', name: 'Farbe' },
+      { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90, unit: '%' },
+      { key: 'hz', type: 'range', name: 'Frequenz', min: 1, max: 20 },
+      { key: 'rfin', type: 'range', name: 'Falloff innen', min: 0, max: 100, unit: '%' },
+      { key: 'rfout', type: 'range', name: 'Falloff außen', min: 0, max: 100, unit: '%' },
+      { key: 'speed', type: 'range', name: 'Geschwindigkeit', min: 0, max: 100, unit: '%' },
+    ],
+  },
 ]
 export const effectById = (id) => EFFECTS.find((e) => e.id === id) || EFFECTS[3]

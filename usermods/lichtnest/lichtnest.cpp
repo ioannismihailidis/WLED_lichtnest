@@ -30,7 +30,7 @@
 #define ZV_MAXCOL 8
 // one effect + its full parameter set (union over all effects)
 struct FxParams {
-  uint8_t  fx = 3;                                          // 0 fade,1 strobe,2 schwarm,3 solid
+  uint8_t  fx = 3;                                          // 0 fade,1 strobe,2 schwarm,3 solid,4 radial
   // fade: dynamic colour gradient — fcount colours, each with its own band width
   uint8_t  fcount = 3;
   uint32_t fcols[ZV_MAXCOL] = { 0xFF5A3C, 0x7B3CFF, 0x27C5FF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF };
@@ -40,6 +40,7 @@ struct FxParams {
   uint8_t  hz = 6, duty = 30, mode = 1;                    // strobe (mode 0 all,1 alt,2 seq)
   uint8_t  tail = 22, dir = 0, tempo = 35;                 // schwarm / solid
   bool     breathe = true;                                 // solid
+  uint8_t  rfin = 20, rfout = 20, rwidth = 30;             // radial: inner/outer edge falloff + core width (%)
 };
 
 // one playlist step
@@ -84,8 +85,17 @@ class Lichtnest : public Usermod {
 
     // accumulated phase per effect type — integrating the rate param over time so a
     // speed/hz/tempo change speeds up the internal clock instead of jumping the phase
-    float    _ph[4] = {0, 0, 0, 0};
+    float    _ph[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     uint32_t _phLastMs = 0;
+    float    _cx = 0.5f, _cy = 0.5f;   // radial centre = centroid of the tube geometry
+
+    // recompute the radial centre (average tube midpoint) after geometry changes
+    void computeCenter() {
+      if (geoCount == 0) { _cx = 0.5f; _cy = 0.5f; return; }
+      float sx = 0, sy = 0;
+      for (uint8_t g = 0; g < geoCount; g++) { sx += (gx1[g] + gx2[g]) * 0.5f; sy += (gy1[g] + gy2[g]) * 0.5f; }
+      _cx = sx / geoCount; _cy = sy / geoCount;
+    }
 
     static const char _name[];
     static const char _enabled[];
@@ -134,10 +144,11 @@ class Lichtnest : public Usermod {
         case 0:  return (P.speed / 100.0f) * 0.4f;
         case 1:  return (P.hz < 1 ? 1.0f : (float)P.hz);
         case 2:  return (P.speed / 100.0f) * 0.5f * (N ? N : 1);
-        default: return 0.3f + P.tempo / 100.0f * 2.0f;
+        case 4:  return (P.speed / 100.0f) * 3.0f;                 // radial: outward speed
+        default: return 0.3f + P.tempo / 100.0f * 2.0f;            // solid
       }
     }
-    void advancePhase(const FxParams& P, float dt, uint16_t N) { _ph[P.fx & 3] += dt * phaseRate(P, N); }
+    void advancePhase(const FxParams& P, float dt, uint16_t N) { _ph[P.fx & 7] += dt * phaseRate(P, N); }
 
     // `phase` is the accumulated phase for this effect (already integrates the rate param)
     uint32_t computeColor(const FxParams& P, float phase, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal) {
@@ -165,6 +176,21 @@ class Lichtnest : public Usermod {
           float d = ci - pos; if (d < 0) d += N;
           float tl = (P.tail / 100.0f) * N; if (tl < 1) tl = 1;
           return scaleCol(P.col, expf(-d / tl));
+        }
+        case 4: { // Radiale Gradienten — rings that start at the centre and travel outward
+          float dx = x - _cx, dy = y - _cy;
+          float r = sqrtf(dx * dx + dy * dy);
+          float freq = (P.hz < 1 ? 1.0f : (float)P.hz);
+          float cyc = r * freq - phase;                        // phase integrates speed -> rings move outward
+          float f = cyc - floorf(cyc);                         // 0..1 within one ring cycle
+          float w = P.rwidth / 100.0f;                         // core band width
+          float fi = P.rfin / 100.0f, fo = P.rfout / 100.0f;   // inner / outer edge falloff
+          float b;
+          if (f < fi)               b = fi > 0 ? f / fi : 1.0f;                 // inner edge ramp up
+          else if (f < fi + w)      b = 1.0f;                                   // solid core
+          else if (f < fi + w + fo) b = fo > 0 ? 1.0f - (f - fi - w) / fo : 0;  // outer edge ramp down
+          else                      b = 0.0f;                                   // gap between rings
+          return scaleCol(P.col, b);
         }
         default: { // Solid / Atmen
           float b = 1.0f;
@@ -209,10 +235,11 @@ class Lichtnest : public Usermod {
         else trProg = (float)el / (float)_trDurMs;
       }
       FxParams& to = activeParams();
-      advancePhase(to, dt, chainTotal);
+      // radial holds its phase at the centre while fading in, then launches once fully faded
+      if (!(to.fx == 4 && tr)) advancePhase(to, dt, chainTotal);
       if (tr && _trFrom.fx != to.fx) advancePhase(_trFrom, dt, chainTotal);
-      float phTo = _ph[to.fx & 3];
-      float phFrom = tr ? _ph[_trFrom.fx & 3] : 0.0f;
+      float phTo = _ph[to.fx & 7];
+      float phFrom = tr ? _ph[_trFrom.fx & 7] : 0.0f;
 
       for (uint8_t g = 0; g < geoCount; g++) {
         if (geoId[g] >= strip.getSegmentsNum()) continue;
@@ -263,7 +290,7 @@ class Lichtnest : public Usermod {
       if (o.isNull()) o = root.createNestedObject(F("lichtnest"));
       FxParams& A = activeParams();
       o["fx"] = A.fx;
-      o["ph"] = _ph[A.fx & 3];             // accumulated phase, so the UI preview stays phase-synced & jump-free
+      o["ph"] = _ph[A.fx & 7];             // accumulated phase, so the UI preview stays phase-synced & jump-free
       JsonObject p = o.createNestedObject("p");
       writeParams(p, A);
       // live playback state for the UI's player
@@ -304,6 +331,7 @@ class Lichtnest : public Usermod {
         _plActive = false; _trActive = false;
         _manual.fx = o["fx"] | _manual.fx;
         parseParams(o["p"], _manual);
+        if (_manual.fx == 4) _ph[4] = 0;   // radial restarts from the centre on (manual) activation
       } else if (o.containsKey("p")) {
         parseParams(o["p"], activeParams());
       }
@@ -319,6 +347,7 @@ class Lichtnest : public Usermod {
           gx2[geoCount] = t["x2"] | 0.0f; gy2[geoCount] = t["y2"] | 0.0f;
           geoCount++;
         }
+        computeCenter();
       }
     }
 
@@ -329,6 +358,7 @@ class Lichtnest : public Usermod {
       top["speed"] = _manual.speed; top["width"] = _manual.width; top["angle"] = _manual.angle;
       top["hz"] = _manual.hz; top["duty"] = _manual.duty; top["mode"] = _manual.mode;
       top["tail"] = _manual.tail; top["dir"] = _manual.dir; top["tempo"] = _manual.tempo; top["breathe"] = _manual.breathe;
+      top["rfin"] = _manual.rfin; top["rfout"] = _manual.rfout; top["rwidth"] = _manual.rwidth;
       top["color"] = _manual.col;
       uint8_t n = (_manual.fcount < 1 ? 1 : (_manual.fcount > ZV_MAXCOL ? ZV_MAXCOL : _manual.fcount));
       JsonArray cols = top.createNestedArray("fcols");
@@ -346,6 +376,7 @@ class Lichtnest : public Usermod {
       getJsonValue(top["hz"], _manual.hz, _manual.hz); getJsonValue(top["duty"], _manual.duty, _manual.duty); getJsonValue(top["mode"], _manual.mode, _manual.mode);
       getJsonValue(top["tail"], _manual.tail, _manual.tail); getJsonValue(top["dir"], _manual.dir, _manual.dir); getJsonValue(top["tempo"], _manual.tempo, _manual.tempo);
       getJsonValue(top["breathe"], _manual.breathe, _manual.breathe);
+      getJsonValue(top["rfin"], _manual.rfin, _manual.rfin); getJsonValue(top["rfout"], _manual.rfout, _manual.rfout); getJsonValue(top["rwidth"], _manual.rwidth, _manual.rwidth);
       getJsonValue(top["color"], _manual.col, _manual.col);
       JsonArray cols = top["fcols"];
       if (!cols.isNull()) { uint8_t n = 0; for (JsonVariant v : cols) { if (n >= ZV_MAXCOL) break; _manual.fcols[n++] = v.as<uint32_t>(); } if (n >= 1) _manual.fcount = n; }
@@ -379,6 +410,7 @@ class Lichtnest : public Usermod {
       P.speed = p["speed"] | P.speed; P.width = p["width"] | P.width; P.angle = p["angle"] | P.angle;
       P.hz = p["hz"] | P.hz; P.duty = p["duty"] | P.duty; P.mode = p["mode"] | P.mode;
       P.tail = p["tail"] | P.tail; P.dir = p["dir"] | P.dir; P.tempo = p["tempo"] | P.tempo; P.breathe = p["breathe"] | P.breathe;
+      P.rfin = p["rfin"] | P.rfin; P.rfout = p["rfout"] | P.rfout; P.rwidth = p["rwidth"] | P.rwidth;
     }
     static void writeParams(JsonObject& p, const FxParams& P) {
       addCol(p, "color", P.col);
@@ -390,6 +422,7 @@ class Lichtnest : public Usermod {
       p["speed"] = P.speed; p["width"] = P.width; p["angle"] = P.angle;
       p["hz"] = P.hz; p["duty"] = P.duty; p["mode"] = P.mode;
       p["tail"] = P.tail; p["dir"] = P.dir; p["tempo"] = P.tempo; p["breathe"] = P.breathe;
+      p["rfin"] = P.rfin; p["rfout"] = P.rfout; p["rwidth"] = P.rwidth;
     }
 
     // --- playlist engine helpers ---
@@ -405,6 +438,7 @@ class Lichtnest : public Usermod {
         _trActive = false;
       }
       _plIdx = (uint8_t)idx; _plStepStart = millis();
+      if (_steps[idx].p.fx == 4) _ph[4] = 0;   // radial restarts from the centre when the step begins
     }
 
     bool startPlaylist(const char* id, int fromIdx) {
@@ -470,6 +504,7 @@ class Lichtnest : public Usermod {
             gx2[geoCount] = c["x2"] | 0.0f; gy2[geoCount] = c["y2"] | 0.0f;
             geoCount++;
           }
+          computeCenter();
         }
       }
       f.close();
@@ -478,7 +513,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.5.2";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.6.0";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);

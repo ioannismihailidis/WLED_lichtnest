@@ -41,12 +41,13 @@ export function phaseRate (fx, p, N) {
   if (fx === 0) return ((p.speed || 0) / 100) * 0.4
   if (fx === 1) return Math.max(1, p.hz || 6)
   if (fx === 2) return ((p.speed || 0) / 100) * 0.5 * (N || 1)
+  if (fx === 4) return ((p.speed || 0) / 100) * 3
   return 0.3 + ((p.tempo ?? 35) / 100) * 2
 }
 
-// fx: 0 fade, 1 strobe, 2 schwarm, 3 solid. p: param pool. (x,y) normalised 0..1.
-// `phase` is the accumulated phase for this effect.
-export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase) {
+// fx: 0 fade, 1 strobe, 2 schwarm, 3 solid, 4 radial. p: param pool. (x,y) normalised 0..1.
+// `phase` is the accumulated phase for this effect; (cx,cy) is the radial centre.
+export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase, cx = 0.5, cy = 0.5) {
   const col = p.color || [255, 255, 255]
   switch (fx) {
     case 0: {
@@ -72,6 +73,20 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       let d = ci - pos; if (d < 0) d += N
       let tl = ((p.tail || 0) / 100) * N; if (tl < 1) tl = 1
       return scale(col, Math.exp(-d / tl))
+    }
+    case 4: { // radial rings from the centre
+      const dx = x - cx, dy = y - cy
+      const r = Math.sqrt(dx * dx + dy * dy)
+      const freq = Math.max(1, p.hz || 8)
+      const f = ((r * freq - phase) % 1 + 1) % 1
+      const w = (p.rwidth ?? 30) / 100
+      const fi = (p.rfin ?? 20) / 100, fo = (p.rfout ?? 20) / 100
+      let b
+      if (f < fi) b = fi > 0 ? f / fi : 1
+      else if (f < fi + w) b = 1
+      else if (f < fi + w + fo) b = fo > 0 ? 1 - (f - fi - w) / fo : 0
+      else b = 0
+      return scale(col, b)
     }
     default: {
       let b = 1

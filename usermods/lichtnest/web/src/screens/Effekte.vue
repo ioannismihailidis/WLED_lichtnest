@@ -33,6 +33,7 @@ function previewBg (e) {
   if (e.key === 'fade') return gradientCss(gradCols.value, gradCw.value)
   if (e.key === 'strobe') return `repeating-linear-gradient(90deg,${colHex('color', [255, 255, 255])} 0 12px,#0d0f13 12px 30px)`
   if (e.key === 'schwarm') return `linear-gradient(90deg,#0d0f13,${colHex('color', [240, 162, 60])} 75%,#fff)`
+  if (e.key === 'radial') return `repeating-radial-gradient(circle at 50% 50%, ${colHex('color', [39, 197, 255])} 0 7%, #0d0f13 7% 20%)`
   return colHex('color', [39, 197, 255])
 }
 const isActive = (id) => lichtnest.fx === id

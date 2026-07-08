@@ -60,6 +60,8 @@ function draw () {
   const list = items.value
   const total = wled.info.leds?.count || list.reduce((m, x) => Math.max(m, x.start + x.leds), 1)
   const testing = wled.testTube
+  let cx = 0.5, cy = 0.5
+  if (list.length) { let sx = 0, sy = 0; for (const tb of list) { sx += (tb.x1 + tb.x2) / 2; sy += (tb.y1 + tb.y2) / 2 } cx = sx / list.length; cy = sy / list.length }
   ctx.lineCap = 'round'
 
   // 1) tube casing — light rim + dark body, reads as a real strip
@@ -104,7 +106,7 @@ function draw () {
       const x = tube.x1 + (tube.x2 - tube.x1) * frac, y = tube.y1 + (tube.y2 - tube.y1) * frac
       let col
       if (testing != null) col = (tube.id === testing) ? [255, 255, 255] : [3, 3, 4]
-      else col = fxColor(lichtnest.fx, lichtnest.p, x, y, tube.start + Math.round(frac * (tube.leds - 1)), total, ti, list.length, t)
+      else col = fxColor(lichtnest.fx, lichtnest.p, x, y, tube.start + Math.round(frac * (tube.leds - 1)), total, ti, list.length, t, cx, cy)
       const R = col[0] | 0, G = col[1] | 0, B = col[2] | 0
       ctx.shadowBlur = r * 1.5; ctx.shadowColor = `rgb(${R},${G},${B})`
       ctx.fillStyle = `rgb(${Math.max(R, 9)},${Math.max(G, 9)},${Math.max(B, 10)})`

@@ -29,12 +29,14 @@ function draw () {
   const list = tubes.value
   const total = wled.info.leds?.count || list.reduce((m, x) => Math.max(m, x.start + x.leds), 1)
   const on = wled.on
+  let cx = 0.5, cy = 0.5
+  if (list.length) { let sx = 0, sy = 0; for (const tb of list) { sx += (tb.x1 + tb.x2) / 2; sy += (tb.y1 + tb.y2) / 2 } cx = sx / list.length; cy = sy / list.length }
   list.forEach((tube, ti) => {
     const n = Math.max(2, tube.leds || 1)   // every LED
     for (let i = 0; i < n; i++) {
       const f = n > 1 ? i / (n - 1) : 0
       const x = tube.x1 + (tube.x2 - tube.x1) * f, y = tube.y1 + (tube.y2 - tube.y1) * f
-      const col = on ? fxColor(lichtnest.fx, lichtnest.p, x, y, tube.start + i, total, ti, list.length, t) : [28, 30, 34]
+      const col = on ? fxColor(lichtnest.fx, lichtnest.p, x, y, tube.start + i, total, ti, list.length, t, cx, cy) : [28, 30, 34]
       ctx.fillStyle = rgbCss(col)
       ctx.beginPath(); ctx.arc(ox + x * cw, oy + y * ch, 1.5, 0, 6.283); ctx.fill()
     }

@@ -80,10 +80,12 @@ export const wled = reactive({
 // the device AND never jumps when a parameter changes.
 const devPhase = { ph: 0, syncAt: 0, valid: false }
 function syncDevicePhase (ph) { devPhase.ph = ph; devPhase.syncAt = performance.now(); devPhase.valid = true }
-let localPhase = 0, localPhaseTs = 0
+let localPhase = 0, localPhaseTs = 0, localLastFx = -1
 export function devicePhase () {
   if (wled.offline) {   // no device clock — free-run locally at the current rate (still jump-free)
     const now = performance.now()
+    if (lichtnest.fx === 4 && localLastFx !== 4) localPhase = 0   // radial restarts from the centre
+    localLastFx = lichtnest.fx
     const dt = localPhaseTs ? (now - localPhaseTs) / 1000 : 0
     localPhaseTs = now
     if (dt > 0 && dt < 1) localPhase += dt * phaseRate(lichtnest.fx, lichtnest.p, wled.info.leds?.count || 1)
