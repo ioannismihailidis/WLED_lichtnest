@@ -74,17 +74,18 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       let tl = ((p.tail || 0) / 100) * N; if (tl < 1) tl = 1
       return scale(col, Math.exp(-d / tl))
     }
-    case 4: { // radial rings from the centre
+    case 4: { // radial rings from the centre — width/falloff/gap share one cycle
       const dx = x - cx, dy = y - cy
       const r = Math.sqrt(dx * dx + dy * dy)
       const freq = Math.max(1, p.hz || 8)
       const f = ((r * freq - phase) % 1 + 1) % 1
-      const w = (p.rwidth ?? 30) / 100
-      const fi = (p.rfin ?? 20) / 100, fo = (p.rfout ?? 20) / 100
+      const w = p.rwidth ?? 30, fi = p.rfin ?? 20, fo = p.rfout ?? 20, gap = p.rgap ?? 30
+      const period = Math.max(1, fi + w + fo + gap)
+      const fp = f * period
       let b
-      if (f < fi) b = fi > 0 ? f / fi : 1
-      else if (f < fi + w) b = 1
-      else if (f < fi + w + fo) b = fo > 0 ? 1 - (f - fi - w) / fo : 0
+      if (fp < fi) b = fi > 0 ? fp / fi : 1
+      else if (fp < fi + w) b = 1
+      else if (fp < fi + w + fo) b = fo > 0 ? 1 - (fp - fi - w) / fo : 0
       else b = 0
       return scale(col, b)
     }
