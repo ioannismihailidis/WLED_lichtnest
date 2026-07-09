@@ -38,10 +38,9 @@ function scale (c, k) { k = Math.max(0, Math.min(1, k)); return [c[0] * k, c[1] 
 
 // phase advance per second for each effect's rate param (matches the firmware)
 export function phaseRate (fx, p, N) {
-  if (fx === 0) return ((p.speed || 0) / 100) * 0.4
+  if (fx === 0) return Math.max(1, p.hz || 6) * 0.15
   if (fx === 1) return Math.max(1, p.hz || 6)
   if (fx === 2) return ((p.speed || 0) / 100) * 0.5 * (N || 1)
-  if (fx === 4) return ((p.speed || 0) / 100) * 3
   return 0.3 + ((p.tempo ?? 35) / 100) * 2
 }
 
@@ -50,11 +49,28 @@ export function phaseRate (fx, p, N) {
 export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase, cx = 0.5, cy = 0.5) {
   const col = p.color || [255, 255, 255]
   switch (fx) {
-    case 0: {
-      const ang = (p.angle || 0) * Math.PI / 180
-      const proj = x * Math.cos(ang) + y * Math.sin(ang)
-      const w = (p.width || 100) / 100
-      return gradN(proj / w - phase, fadeCols(p), fadeCw(p))
+    case 0: { // Puls — Frequenz = emission rate, Geschwindigkeit = travel; linear or radial (pmode)
+      if ((p.speed || 0) === 0) return [0, 0, 0]              // no travel → nothing is emitted
+      let u, u0
+      if (p.pmode === 1) {                                    // radial: distance from the centre, origin = centre
+        const dx = x - cx, dy = y - cy
+        u = Math.sqrt(dx * dx + dy * dy); u0 = 0
+      } else {                                                // linear: projection along the direction, origin = near edge
+        const ang = (p.angle || 0) * Math.PI / 180
+        const ax = Math.cos(ang), ay = Math.sin(ang)
+        u = x * ax + y * ay; u0 = (ax < 0 ? ax : 0) + (ay < 0 ? ay : 0)
+      }
+      const v = (p.speed / 100) * 0.6                          // travel speed (proj/sec-equiv)
+      const R = Math.max(1, p.hz || 6) * 0.15                  // emission rate (= phaseRate)
+      const L = v / R                                          // spacing between successive bands
+      const s = phase - (u - u0) / L
+      const f = s - Math.floor(s)                              // 0..1 within one band's cycle
+      const duty = Math.min(0.98, Math.max(0.02, (p.rwidth ?? 30) / 100))   // Breite = lit fraction of each cycle
+      let c = f < duty ? gradN(f / duty, fadeCols(p), fadeCw(p)) : [0, 0, 0]  // gradient across band, else gap
+      const front = u0 - 0.04 + phase * L                      // first band's leading edge (= u0 + v*t)
+      let rev = (front - u) / 0.06 + 0.5                       // start-black reveal
+      rev = rev < 0 ? 0 : rev > 1 ? 1 : rev
+      return scale(c, rev)
     }
     case 1: {
       const flash = Math.floor(phase); const inFrac = phase - flash
@@ -73,21 +89,6 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       let d = ci - pos; if (d < 0) d += N
       let tl = ((p.tail || 0) / 100) * N; if (tl < 1) tl = 1
       return scale(col, Math.exp(-d / tl))
-    }
-    case 4: { // radial rings from the centre — width/falloff/gap share one cycle
-      const dx = x - cx, dy = y - cy
-      const r = Math.sqrt(dx * dx + dy * dy)
-      const freq = Math.max(1, p.hz || 8)
-      const f = ((r * freq - phase) % 1 + 1) % 1
-      const w = p.rwidth ?? 30, fi = p.rfin ?? 20, fo = p.rfout ?? 20, gap = p.rgap ?? 30
-      const period = Math.max(1, fi + w + fo + gap)
-      const fp = f * period
-      let b
-      if (fp < fi) b = fi > 0 ? fp / fi : 1
-      else if (fp < fi + w) b = 1
-      else if (fp < fi + w + fo) b = fo > 0 ? 1 - (fp - fi - w) / fo : 0
-      else b = 0
-      return scale(col, b)
     }
     default: {
       let b = 1

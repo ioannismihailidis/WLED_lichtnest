@@ -3,14 +3,16 @@
 // Param keys + types mirror the firmware's shared parameter pool.
 export const EFFECTS = [
   {
-    id: 0, key: 'fade', name: 'Räumlicher Farbfade',
-    desc: 'Ein Farbverlauf wandert räumlich durch alle Tubes.',
-    preview: 'linear-gradient(90deg,#ff5a3c,#7b3cff,#27c5ff,#ff5a3c)',
+    id: 0, key: 'pulse', name: 'Puls',
+    desc: 'Farb-Bänder pulsen aus Schwarz — linear entlang einer Richtung oder radial aus der Mitte.',
+    preview: 'repeating-linear-gradient(90deg,#0d0f13 0 6%,#ff5a3c 11%,#7b3cff 17%,#27c5ff 23%,#0d0f13 30% 44%)',
     params: [
       { key: 'grad', type: 'gradient', name: 'Farbverlauf' },
+      { key: 'pmode', type: 'select', name: 'Modus', options: [{ v: 0, l: 'Linear' }, { v: 1, l: 'Radial' }] },
+      { key: 'angle', type: 'range', name: 'Richtung', min: 0, max: 360, unit: '°', show: (p) => (p.pmode || 0) === 0 },
+      { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90, unit: '%' },
+      { key: 'hz', type: 'range', name: 'Frequenz', min: 1, max: 20 },
       { key: 'speed', type: 'range', name: 'Geschwindigkeit', min: 0, max: 100, unit: '%' },
-      { key: 'angle', type: 'range', name: 'Richtung', min: 0, max: 360, unit: '°' },
-      { key: 'width', type: 'range', name: 'Skalierung', min: 10, max: 300, unit: '%' },
     ],
   },
   {
@@ -43,20 +45,6 @@ export const EFFECTS = [
       { key: 'color', type: 'color', name: 'Farbe' },
       { key: 'breathe', type: 'toggle', name: 'Atmen' },
       { key: 'tempo', type: 'range', name: 'Atem-Tempo', min: 0, max: 100, unit: '%' },
-    ],
-  },
-  {
-    id: 4, key: 'radial', name: 'Radiale Gradienten',
-    desc: 'Weiche Ringe wandern aus der Mitte nach außen; starten mittig, sobald voll eingefadet.',
-    preview: 'repeating-radial-gradient(circle at 50% 50%, #27c5ff 0 7%, #0d0f13 7% 20%)',
-    params: [
-      { key: 'color', type: 'color', name: 'Farbe' },
-      { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90 },
-      { key: 'rgap', type: 'range', name: 'Abstand', min: 0, max: 200 },
-      { key: 'hz', type: 'range', name: 'Frequenz', min: 1, max: 20 },
-      { key: 'rfin', type: 'range', name: 'Falloff innen', min: 0, max: 100 },
-      { key: 'rfout', type: 'range', name: 'Falloff außen', min: 0, max: 100 },
-      { key: 'speed', type: 'range', name: 'Geschwindigkeit', min: 0, max: 100, unit: '%' },
     ],
   },
 ]

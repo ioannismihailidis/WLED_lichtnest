@@ -233,7 +233,7 @@ function confirmImport () {
             <span class="dur mono"><button @click="bumpTrDur(it, -0.5)">−</button><b>{{ it.trDur }}s</b><button @click="bumpTrDur(it, 0.5)">+</button></span>
           </div>
           <div class="plbl mono">PARAMETER<span v-if="isCurrent(it)" class="livetag"> · LIVE</span></div>
-          <div v-for="p in effectById(it.fx).params" :key="p.key" class="ctl">
+          <div v-for="p in effectById(it.fx).params.filter(pp => !pp.show || pp.show(it.p))" :key="p.key" class="ctl">
             <div class="crow"><span class="cl">{{ p.name }}</span><span v-if="p.type === 'range'" class="cv mono">{{ rangeVal(it, p) }}{{ p.unit || '' }}</span></div>
             <input v-if="p.type === 'range'" type="range" :min="p.min" :max="p.max" :value="rangeVal(it, p)" @input="setParam(it, p.key, +$event.target.value)" style="width:100%;height:22px">
             <input v-else-if="p.type === 'color'" type="color" :value="colHex(it, p.key)" @input="setParam(it, p.key, hexToRgb($event.target.value))" class="color">

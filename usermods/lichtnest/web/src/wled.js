@@ -84,7 +84,8 @@ let localPhase = 0, localPhaseTs = 0, localLastFx = -1
 export function devicePhase () {
   if (wled.offline) {   // no device clock — free-run locally at the current rate (still jump-free)
     const now = performance.now()
-    if (lichtnest.fx === 4 && localLastFx !== 4) localPhase = 0   // radial restarts from the centre
+    // pulse restarts from black on (re)activation
+    if (lichtnest.fx === 0 && localLastFx !== 0) localPhase = 0
     localLastFx = lichtnest.fx
     const dt = localPhaseTs ? (now - localPhaseTs) / 1000 : 0
     localPhaseTs = now

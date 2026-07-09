@@ -16,7 +16,7 @@ const power = computed(() => wled.info.leds?.pwr ?? 0)
 
 const paramSummary = computed(() => {
   const p = lichtnest.p; const k = eff.value.key
-  if (k === 'fade') return `${p.speed ?? 0}% · ${p.angle ?? 0}°`
+  if (k === 'pulse') return p.pmode ? `${p.speed ?? 0}% · ${p.hz ?? 0} Hz · radial` : `${p.speed ?? 0}% · ${p.hz ?? 0} Hz · ${p.angle ?? 0}°`
   if (k === 'strobe') return `${p.hz ?? 0} Hz · ${['Alle', 'Wechsel', 'Reihum'][p.mode ?? 0]}`
   if (k === 'schwarm') return `${p.speed ?? 0}% · ${p.dir ? 'Rückwärts' : 'Vorwärts'}`
   return p.breathe !== false ? `Atmen · ${p.tempo ?? 0}%` : 'statisch'
