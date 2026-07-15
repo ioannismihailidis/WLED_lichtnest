@@ -27,11 +27,17 @@ const playhead = computed(() => {
   const cur = s[p.idx]; if (!cur) return p.frac * 100
   return cur.left + cur.w * p.stepFrac
 })
+// step label: custom name if set, else the effect name
+function stepName (i, fallbackFx) {
+  const it = steps.value[i]
+  if (it && it.name && it.name.trim()) return it.name
+  return effectById(it ? it.fx : fallbackFx).name
+}
 </script>
 
 <template>
   <div v-if="prog" class="nowbar">
-    <div class="nowrow mono"><span>▶ Schritt {{ prog.step }}/{{ prog.total }} · {{ effectById(prog.fx).name }}</span><span>noch {{ prog.remaining }}s</span></div>
+    <div class="nowrow mono"><span>▶ Schritt {{ prog.step }}/{{ prog.total }} · {{ stepName(prog.idx, prog.fx) }}</span><span>noch {{ prog.remaining }}s</span></div>
     <div class="pltrack">
       <div class="plfill" :style="{ width: (segs.length ? playhead : prog.frac * 100) + '%' }" />
       <div v-for="s in segs.slice(1)" :key="s.i" class="tick" :style="{ left: s.left + '%' }" />
@@ -40,7 +46,7 @@ const playhead = computed(() => {
       <button class="tctl" title="Vorheriger Schritt" @click.stop="prevStep()"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6z" /><path d="M20 5v14l-10-7z" /></svg></button>
       <button class="tctl" :class="{ on: playback.loop }" title="Aktuellen Schritt wiederholen" @click.stop="setLoop(!playback.loop)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><path d="M7 22l-4-4 4-4" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg></button>
       <button class="tctl" title="Nächster Schritt" @click.stop="nextStep()"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2z" /><path d="M4 5v14l10-7z" /></svg></button>
-      <span class="mono nxt">{{ playback.loop ? 'Schritt wiederholt' : '→ ' + effectById(prog.nextFx).name }}</span>
+      <span class="mono nxt">{{ playback.loop ? 'Schritt wiederholt' : '→ ' + stepName((prog.idx + 1) % prog.total, prog.nextFx) }}</span>
     </div>
   </div>
 </template>
