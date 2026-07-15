@@ -1,6 +1,6 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { wled, toggleTest, lichtnest, plan, loadPlan, savePlan, uploadPhoto, removePhoto, planPhotoUrl, devicePhase } from '../wled.js'
+import { wled, toggleTest, lichtnest, plan, loadPlan, savePlan, uploadPhoto, removePhoto, planPhotoUrl, devicePhase, markers, effectOrigin } from '../wled.js'
 import { fxColor } from '../fxsim.js'
 import { confirmDialog } from '../confirm.js'
 
@@ -60,8 +60,7 @@ function draw () {
   const list = items.value
   const total = wled.info.leds?.count || list.reduce((m, x) => Math.max(m, x.start + x.leds), 1)
   const testing = wled.testTube
-  let cx = 0.5, cy = 0.5
-  if (list.length) { let sx = 0, sy = 0; for (const tb of list) { sx += (tb.x1 + tb.x2) / 2; sy += (tb.y1 + tb.y2) / 2 } cx = sx / list.length; cy = sy / list.length }
+  const [cx, cy] = effectOrigin(lichtnest.p, list)
   ctx.lineCap = 'round'
 
   // 1) tube casing — light rim + dark body, reads as a real strip
@@ -132,6 +131,38 @@ function toNorm (e) {
 function startHandle (id, end, e) { e.stopPropagation(); drag.kind = 'handle'; drag.id = id; drag.end = end; window.addEventListener('pointermove', hMove); window.addEventListener('pointerup', hUp) }
 function hMove (e) { if (drag.kind === 'handle') { const n = toNorm(e); const c = plan.tubes[drag.id]; if (c) { c['x' + drag.end] = n.x; c['y' + drag.end] = n.y } } }
 function hUp () { if (drag.kind === 'handle') savePlan(); drag.kind = null; window.removeEventListener('pointermove', hMove); window.removeEventListener('pointerup', hUp) }
+
+// ---- markers (named plan points used as spatial-effect origins) ----
+// a tap (no real movement) opens the edit dialog; dragging repositions the marker
+const markerDrag = reactive({ id: null, moved: false, sx: 0, sy: 0 })
+const editMarkerId = ref(null)
+const editMarkerName = ref('')
+function startMarker (id, e) {
+  e.stopPropagation()
+  markerDrag.id = id; markerDrag.moved = false; markerDrag.sx = e.clientX; markerDrag.sy = e.clientY
+  window.addEventListener('pointermove', mMove); window.addEventListener('pointerup', mUp)
+}
+function mMove (e) {
+  if (markerDrag.id == null) return
+  if (!markerDrag.moved && Math.hypot(e.clientX - markerDrag.sx, e.clientY - markerDrag.sy) > 4) markerDrag.moved = true
+  if (markerDrag.moved) { const n = toNorm(e); const m = plan.points[markerDrag.id]; if (m) { m.x = n.x; m.y = n.y } }
+}
+function mUp () {
+  window.removeEventListener('pointermove', mMove); window.removeEventListener('pointerup', mUp)
+  const id = markerDrag.id; markerDrag.id = null
+  if (id == null) return
+  if (markerDrag.moved) savePlan()
+  else openMarker(id)
+}
+function openMarker (id) { editMarkerId.value = id; editMarkerName.value = plan.points[id]?.name || '' }
+function addMarker () { openMarker(markers.add(0.5, 0.5)) }
+function saveMarkerName () { if (editMarkerId.value != null) markers.rename(editMarkerId.value, editMarkerName.value.trim()); editMarkerId.value = null }
+async function deleteMarker () {
+  const id = editMarkerId.value; if (id == null) return
+  if (await confirmDialog({ title: (plan.points[id]?.name || 'Marker') + ' löschen?', body: 'Effekte, die diesen Marker als Ursprung nutzen, springen zurück auf die automatische Mitte.', confirmLabel: 'Löschen' })) {
+    markers.remove(id); editMarkerId.value = null
+  }
+}
 
 // ---- viewport zoom & pan (wheel + drag, pinch + drag) ----
 const clampZoom = (z) => Math.max(1, Math.min(5, +(+z).toFixed(3)))
@@ -215,6 +246,11 @@ const stageTransform = computed(() => `translate(${pan.x}px,${pan.y}px) scale(${
             <span class="hdot" :style="{ background: t.pc }" />
           </div>
         </template>
+
+        <div v-for="(m, id) in plan.points" :key="'mk' + id" class="marker" :style="{ left: m.x * 100 + '%', top: m.y * 100 + '%', transform: `translate(-50%,-100%) scale(${invZoom})` }" @pointerdown="startMarker(+id, $event)">
+          <svg width="22" height="28" viewBox="0 0 24 30" class="mkpin"><path d="M12 29c6-8 9-13 9-18a9 9 0 1 0-18 0c0 5 3 10 9 18z" /><circle cx="12" cy="11" r="3.2" fill="#0a0b0d" /></svg>
+          <span class="mklabel">{{ m.name }}</span>
+        </div>
       </div>
 
       <div class="zoom">
@@ -230,6 +266,24 @@ const stageTransform = computed(() => `translate(${pan.x}px,${pan.y}px) scale(${
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
         Tube an Port {{ i + 1 }}
       </button>
+      <button class="add markeradd" @click="addMarker">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+        Marker
+      </button>
+    </div>
+
+    <!-- MARKER MODAL -->
+    <div v-if="editMarkerId !== null" class="modal" @click="editMarkerId = null">
+      <div class="mcard" @click.stop>
+        <div class="mhead"><span class="mtitle">Marker</span></div>
+        <div class="seclbl2 mono">NAME</div>
+        <input v-model="editMarkerName" class="mkname" placeholder="z. B. Baum links" @keyup.enter="saveMarkerName" />
+        <p class="hint" style="margin:10px 2px 0">Wird bei räumlichen Effekten (z. B. Impuls · Radial) als wählbarer Ursprung angeboten.</p>
+        <div class="mrow">
+          <button class="cancel2 delbtn" @click="deleteMarker">Löschen</button>
+          <button class="addbtn" @click="saveMarkerName">Speichern</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -261,4 +315,21 @@ const stageTransform = computed(() => `translate(${pan.x}px,${pan.y}px) scale(${
 
 .addrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .add { flex: 1; min-width: 140px; height: 44px; border-radius: 12px; background: transparent; border: 1.5px dashed rgba(240,162,60,.4); color: var(--accent); font-weight: 700; font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 7px; }
+.markeradd { border-color: rgba(123,60,255,.45); color: #a58bff; }
+
+.marker { position: absolute; z-index: 5; display: flex; flex-direction: column; align-items: center; cursor: grab; touch-action: none; }
+.mkpin { fill: #7b3cff; stroke: rgba(255,255,255,.85); stroke-width: 1.4; filter: drop-shadow(0 2px 5px rgba(0,0,0,.55)); }
+.mklabel { margin-top: 2px; font-size: 10px; font-weight: 700; color: #f3f1ec; background: rgba(13,15,19,.75); backdrop-filter: blur(4px); padding: 2px 7px; border-radius: 7px; white-space: nowrap; pointer-events: none; }
+
+/* marker modal */
+.modal { position: fixed; inset: 0; z-index: 50; background: rgba(6,7,9,.72); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.mcard { width: 100%; max-width: 360px; background: #14161b; border: 1px solid var(--line2); border-radius: 20px; padding: 22px; box-shadow: 0 30px 70px -15px rgba(0,0,0,.8); }
+.mhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 18px; }
+.mtitle { font-size: 17px; font-weight: 800; color: var(--text); }
+.seclbl2 { font-size: 11px; color: var(--muted); margin-bottom: 9px; letter-spacing: .08em; }
+.mkname { width: 100%; background: var(--inset); border: 1px solid var(--line2); border-radius: 11px; color: var(--text); font-size: 14px; padding: 11px; outline: none; box-sizing: border-box; }
+.mrow { display: flex; gap: 10px; margin-top: 18px; }
+.cancel2 { flex: none; padding: 0 18px; height: 44px; border-radius: 12px; background: #1f2228; border: 1px solid var(--line2); color: var(--text2); font-weight: 700; font-size: 14px; cursor: pointer; }
+.delbtn:hover { color: #e0614f; border-color: #e0614f; }
+.addbtn { flex: 1; height: 44px; padding: 0 16px; border-radius: 11px; background: var(--accent); border: none; color: #1a1206; font-weight: 800; font-size: 13px; cursor: pointer; }
 </style>

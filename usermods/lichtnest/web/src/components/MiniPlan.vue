@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { wled, lichtnest, plan, liveFxP } from '../wled.js'
+import { wled, lichtnest, plan, liveFxP, effectOrigin } from '../wled.js'
 import { fxColor, rgbCss, phaseRate, strobePhaseAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt } from '../fxsim.js'
 import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulseUmax } from '../impulse.js'
 
@@ -62,9 +62,8 @@ function draw () {
   const list = tubes.value
   const total = wled.info.leds?.count || list.reduce((m, x) => Math.max(m, x.start + x.leds), 1)
   const on = wled.on
-  let cx = 0.5, cy = 0.5
-  if (list.length) { let sx = 0, sy = 0; for (const tb of list) { sx += (tb.x1 + tb.x2) / 2; sy += (tb.y1 + tb.y2) / 2 } cx = sx / list.length; cy = sy / list.length }
   const fx = efx(), p = ep()
+  const [cx, cy] = effectOrigin(p, list)
   let umax = 1
   if (fx === 0) { const pts = []; for (const tb of list) pts.push({ x: tb.x1, y: tb.y1 }, { x: tb.x2, y: tb.y2 }); umax = impulseUmax(p, pts, cx, cy) }
   const { elapsed, phase: t, wait } = frame(fx, p, umax)

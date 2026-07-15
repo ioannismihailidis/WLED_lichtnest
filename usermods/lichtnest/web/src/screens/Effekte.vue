@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { lichtnest, fxActions, rgbToHex, hexToRgb } from '../wled.js'
+import { lichtnest, fxActions, rgbToHex, hexToRgb, plan } from '../wled.js'
 import { EFFECTS, effectById } from '../effects.js'
 import { fadeCols, fadeCw, gradientCss } from '../fxsim.js'
 import GradientEditor from '../components/GradientEditor.vue'
@@ -22,6 +22,8 @@ function back () { view.value = 'list' }
 function rangeVal (p) { const v = lichtnest.p[p.key]; return typeof v === 'number' ? v : (p.def ?? p.min ?? 0) }
 function dispVal (p) { const v = rangeVal(p); return p.mul ? (v * p.mul).toFixed(1) : v }
 function selVal (p) { const v = lichtnest.p[p.key]; return v != null ? v : p.options[0].v }
+// marker origin: '' = auto (Mitte); otherwise a plan.points id. 255 (firmware sentinel) also means auto.
+function markerVal (p) { const v = lichtnest.p[p.key]; return (v != null && v !== 255) ? String(v) : '' }
 const colHex = (k, d) => rgbToHex(lichtnest.p[k] || d)
 function colVal (p) { return colHex(p.key, [255, 255, 255]) }
 function toggleVal (p) { return !!lichtnest.p[p.key] }
@@ -29,6 +31,7 @@ function toggleVal (p) { return !!lichtnest.p[p.key] }
 function setRange (p, e) { fxActions.setParam(p.key, +e.target.value) }
 function setColor (p, e) { fxActions.setParam(p.key, hexToRgb(e.target.value)) }
 function setSel (p, v) { fxActions.setParam(p.key, v) }
+function setMarker (p, e) { const v = e.target.value; fxActions.setParam(p.key, v === '' ? 255 : +v) }
 function setToggle (p) { fxActions.setParam(p.key, !lichtnest.p[p.key]) }
 
 // dynamic fade gradient (N colours + per-colour width)
@@ -100,6 +103,13 @@ function restartPreview () { pvRestart.value++; if (isActive(editId.value)) fxAc
         <div v-else-if="p.type === 'select'" class="seg">
           <button v-for="o in p.options" :key="o.v" :class="{ on: selVal(p) === o.v }" @click="setSel(p, o.v)">{{ o.l }}</button>
         </div>
+        <template v-else-if="p.type === 'marker'">
+          <select class="mksel" :value="markerVal(p)" @change="setMarker(p, $event)">
+            <option value="">Mitte (automatisch)</option>
+            <option v-for="(m, id) in plan.points" :key="id" :value="id">{{ m.name }}</option>
+          </select>
+          <div v-if="!Object.keys(plan.points).length" class="mkhint">Noch kein Marker gesetzt — im 2D-Plan (Tubes) einen hinzufügen.</div>
+        </template>
         <button v-else-if="p.type === 'toggle'" class="sw" :class="{ on: toggleVal(p) }" @click="setToggle(p)"><span /></button>
       </div>
 
@@ -143,6 +153,8 @@ function restartPreview () { pvRestart.value++; if (isActive(editId.value)) fxAc
 .seg { display: flex; gap: 6px; }
 .seg button { flex: 1; padding: 10px 4px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); color: var(--muted2); font-weight: 600; font-size: 13px; cursor: pointer; }
 .seg button.on { background: rgba(240,162,60,.16); border-color: var(--accent); color: var(--accent); }
+.mksel { width: 100%; height: 42px; border-radius: 11px; background: var(--inset); border: 1px solid var(--line2); color: var(--text); font-size: 13px; font-weight: 600; padding: 0 12px; cursor: pointer; }
+.mkhint { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.4; }
 .sw { width: 50px; height: 28px; border-radius: 999px; background: #2a2e35; border: none; cursor: pointer; padding: 3px; display: flex; }
 .sw span { width: 22px; height: 22px; border-radius: 50%; background: #f3f1ec; transition: transform .15s; }
 .sw.on { background: var(--accent); }

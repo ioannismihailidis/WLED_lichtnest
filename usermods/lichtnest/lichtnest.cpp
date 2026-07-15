@@ -14,7 +14,7 @@
  *   autostarts on boot, so the installation runs without a browser.
  *
  * The Vue front-end (FS-hosted) drives this over JSON:
- *   POST /json/state {"lichtnest":{"fx":N,"p":{...},"geo":[{id,x1,y1,x2,y2}...]}}
+ *   POST /json/state {"lichtnest":{"fx":N,"p":{...},"geo":[{id,x1,y1,x2,y2}...],"pts":[{id,x,y}...]}}
  *   POST /json/state {"lichtnest":{"play":"<id>","from":I}}   start playlist
  *   POST /json/state {"lichtnest":{"stop":true}}              back to manual
  *   POST /json/state {"lichtnest":{"next":true|"prev":true}}  step
@@ -25,6 +25,7 @@
  */
 
 #define ZV_MAXGEO   32
+#define ZV_MAXPTS   16
 #define ZV_MAXSTEPS 32
 
 #define ZV_MAXCOL 8
@@ -43,6 +44,7 @@ struct FxParams {
   uint32_t col = 0x27C5FF;                                 // schwarm colour
   uint8_t  speed = 42, width = 120, angle = 25;            // impulse: travel speed + linear direction
   uint8_t  pmode = 0;                                      // impulse mode: 0 linear, 1 radial
+  uint8_t  origin = 255;                                   // radial: named plan marker id (255 = auto centre)
   uint8_t  hz = 6, duty = 30, mode = 1;                    // strobe duty + mode (0 all,1 alt,2 seq)
   uint8_t  tail = 22, dir = 0, tempo = 35;                 // schwarm
   bool     breathe = true;                                 // solid
@@ -75,6 +77,16 @@ class Lichtnest : public Usermod {
     uint8_t geoCount = 0;
     uint8_t geoId[ZV_MAXGEO];
     float gx1[ZV_MAXGEO], gy1[ZV_MAXGEO], gx2[ZV_MAXGEO], gy2[ZV_MAXGEO];
+
+    // --- named plan markers: stable IDs with normalised 0..1 coordinates, placed by the
+    // UI's 2D-plan editor and used as selectable origins for spatial effects (e.g. radial) ---
+    uint8_t pointCount = 0;
+    uint8_t pointId[ZV_MAXPTS];
+    float pointX[ZV_MAXPTS], pointY[ZV_MAXPTS];
+    bool pointPosition(uint8_t id, float& x, float& y) const {
+      for (uint8_t i = 0; i < pointCount; i++) if (pointId[i] == id) { x = pointX[i]; y = pointY[i]; return true; }
+      return false;
+    }
 
     // --- playlist engine ---
     PlStep   _steps[ZV_MAXSTEPS];
@@ -176,7 +188,11 @@ class Lichtnest : public Usermod {
 
     // --- impulse geometry ---------------------------------------------------
     float pulseDist(const FxParams& P, float x, float y) {
-      if (P.pmode == 1) { float dx = x - _cx, dy = y - _cy; return sqrtf(dx * dx + dy * dy); }
+      if (P.pmode == 1) {
+        float ox = _cx, oy = _cy;                          // default: auto centre (tube centroid)
+        if (P.origin != 255) pointPosition(P.origin, ox, oy);   // else: named marker, if it still exists
+        float dx = x - ox, dy = y - oy; return sqrtf(dx * dx + dy * dy);
+      }
       float ax = cosf(P.angle * 3.14159265f / 180.0f), ay = sinf(P.angle * 3.14159265f / 180.0f);
       float u0 = (ax < 0 ? ax : 0) + (ay < 0 ? ay : 0);
       return x * ax + y * ay - u0;
@@ -461,13 +477,25 @@ class Lichtnest : public Usermod {
         }
         computeCenter();
       }
+
+      // --- named plan markers ---
+      JsonArray pts = o["pts"];
+      if (!pts.isNull()) {
+        pointCount = 0;
+        for (JsonObject t : pts) {
+          if (pointCount >= ZV_MAXPTS) break;
+          pointId[pointCount] = t["id"] | 0;
+          pointX[pointCount] = t["x"] | 0.5f; pointY[pointCount] = t["y"] | 0.5f;
+          pointCount++;
+        }
+      }
     }
 
     void addToConfig(JsonObject& root) override {
       JsonObject top = root.createNestedObject(FPSTR(_name));
       top[FPSTR(_enabled)] = enabled;
       top["fx"] = _manual.fx;
-      top["speed"] = _manual.speed; top["width"] = _manual.width; top["angle"] = _manual.angle; top["pmode"] = _manual.pmode;
+      top["speed"] = _manual.speed; top["width"] = _manual.width; top["angle"] = _manual.angle; top["pmode"] = _manual.pmode; top["origin"] = _manual.origin;
       top["hz"] = _manual.hz; top["duty"] = _manual.duty; top["mode"] = _manual.mode;
       top["tail"] = _manual.tail; top["dir"] = _manual.dir; top["tempo"] = _manual.tempo; top["breathe"] = _manual.breathe;
       top["rfin"] = _manual.rfin; top["rfout"] = _manual.rfout; top["rwidth"] = _manual.rwidth; top["rgap"] = _manual.rgap;
@@ -485,7 +513,7 @@ class Lichtnest : public Usermod {
       ok &= getJsonValue(top[FPSTR(_enabled)], enabled, true);
       getJsonValue(top["fx"], _manual.fx, _manual.fx);
       getJsonValue(top["speed"], _manual.speed, _manual.speed); getJsonValue(top["width"], _manual.width, _manual.width); getJsonValue(top["angle"], _manual.angle, _manual.angle);
-      getJsonValue(top["pmode"], _manual.pmode, _manual.pmode);
+      getJsonValue(top["pmode"], _manual.pmode, _manual.pmode); getJsonValue(top["origin"], _manual.origin, _manual.origin);
       getJsonValue(top["hz"], _manual.hz, _manual.hz); getJsonValue(top["duty"], _manual.duty, _manual.duty); getJsonValue(top["mode"], _manual.mode, _manual.mode);
       getJsonValue(top["tail"], _manual.tail, _manual.tail); getJsonValue(top["dir"], _manual.dir, _manual.dir); getJsonValue(top["tempo"], _manual.tempo, _manual.tempo);
       getJsonValue(top["breathe"], _manual.breathe, _manual.breathe);
@@ -521,7 +549,7 @@ class Lichtnest : public Usermod {
       JsonArray cw = p["cw"];
       if (!cw.isNull()) { uint8_t n = 0; for (JsonVariant v : cw) { if (n >= ZV_MAXCOL) break; int w = v | 100; P.fcw[n++] = (uint8_t)(w < 1 ? 1 : (w > 255 ? 255 : w)); } }
       P.speed = p["speed"] | P.speed; P.width = p["width"] | P.width; P.angle = p["angle"] | P.angle;
-      P.pmode = p["pmode"] | P.pmode;
+      P.pmode = p["pmode"] | P.pmode; P.origin = p["origin"] | P.origin;
       P.hz = p["hz"] | P.hz; P.duty = p["duty"] | P.duty; P.mode = p["mode"] | P.mode;
       P.tail = p["tail"] | P.tail; P.dir = p["dir"] | P.dir; P.tempo = p["tempo"] | P.tempo; P.breathe = p["breathe"] | P.breathe;
       P.rfin = p["rfin"] | P.rfin; P.rfout = p["rfout"] | P.rfout; P.rwidth = p["rwidth"] | P.rwidth; P.rgap = p["rgap"] | P.rgap;
@@ -553,7 +581,7 @@ class Lichtnest : public Usermod {
       for (uint8_t i = 0; i < n; i++) { JsonArray a = cols.createNestedArray(); a.add(cR(P.fcols[i])); a.add(cG(P.fcols[i])); a.add(cB(P.fcols[i])); }
       JsonArray cw = p.createNestedArray("cw");
       for (uint8_t i = 0; i < n; i++) cw.add(P.fcw[i]);
-      p["speed"] = P.speed; p["width"] = P.width; p["angle"] = P.angle; p["pmode"] = P.pmode;
+      p["speed"] = P.speed; p["width"] = P.width; p["angle"] = P.angle; p["pmode"] = P.pmode; p["origin"] = P.origin;
       p["hz"] = P.hz; p["duty"] = P.duty; p["mode"] = P.mode;
       p["tail"] = P.tail; p["dir"] = P.dir; p["tempo"] = P.tempo; p["breathe"] = P.breathe;
       p["rfin"] = P.rfin; p["rfout"] = P.rfout; p["rwidth"] = P.rwidth; p["rgap"] = P.rgap;
@@ -635,12 +663,12 @@ class Lichtnest : public Usermod {
       return _stepCount > 0;
     }
 
-    // load tube geometry from the UI's plan file so effects work after reboot
+    // load tube geometry + named markers from the UI's plan file so effects work after reboot
     void loadGeometryFile() {
       if (!WLED_FS.exists("/lichtnest_plan.json")) return;
       File f = WLED_FS.open("/lichtnest_plan.json", "r");
       if (!f) return;
-      StaticJsonDocument<4096> doc;
+      StaticJsonDocument<6144> doc;
       if (deserializeJson(doc, f) == DeserializationError::Ok) {
         JsonObject tubes = doc["tubes"];
         if (!tubes.isNull()) {
@@ -654,6 +682,17 @@ class Lichtnest : public Usermod {
             geoCount++;
           }
           computeCenter();
+        }
+        JsonObject points = doc["points"];
+        if (!points.isNull()) {
+          pointCount = 0;
+          for (JsonPair kv : points) {
+            if (pointCount >= ZV_MAXPTS) break;
+            JsonObject c = kv.value().as<JsonObject>();
+            pointId[pointCount] = atoi(kv.key().c_str());
+            pointX[pointCount] = c["x"] | 0.5f; pointY[pointCount] = c["y"] | 0.5f;
+            pointCount++;
+          }
         }
       }
       f.close();

@@ -10,6 +10,7 @@ export const EFFECTS = [
       { key: 'grad', type: 'gradient', name: 'Farbverlauf' },
       { key: 'pmode', type: 'select', name: 'Modus', options: [{ v: 0, l: 'Linear' }, { v: 1, l: 'Radial' }] },
       { key: 'angle', type: 'range', name: 'Richtung', min: 0, max: 360, unit: '°', def: 25, show: (p) => (p.pmode || 0) === 0 },
+      { key: 'origin', type: 'marker', name: 'Ursprung', show: (p) => (p.pmode || 0) === 1 },
       { key: 'count', type: 'range', name: 'Anzahl', min: 1, max: 20, def: 3 },
       { key: 'interval', type: 'range', name: 'Abstand', min: 1, max: 50, mul: 0.1, unit: 's', def: 8 },
       { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90, unit: '%', def: 30 },

@@ -3,7 +3,7 @@
 // the tubes), rendered into a small buffer and smoothly upscaled. Reads the same
 // device-phase clock as the tube preview so it stays in lock-step.
 import { ref, watch, onMounted, onUnmounted } from 'vue'
-import { wled, lichtnest, plan, liveFxP } from '../wled.js'
+import { wled, lichtnest, plan, liveFxP, effectOrigin } from '../wled.js'
 import { fxColor, phaseRate, strobePhaseAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt } from '../fxsim.js'
 import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulseUmax } from '../impulse.js'
 
@@ -15,11 +15,11 @@ const efx = () => (props.fx != null ? props.fx : (props.local ? lichtnest.fx : l
 const ep = () => (props.p != null ? props.p : (props.local ? lichtnest.p : liveFxP().p))
 const edelay = () => (props.fx != null ? props.delay : (props.local ? 0 : (liveFxP().delay || 0)))
 const CORNERS = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }]
-// radial centre = centroid of the placed tubes (matches the firmware's computeCenter)
-function centre () {
-  let sx = 0, sy = 0, n = 0
-  for (const s of (wled.segments || [])) { const c = plan.tubes[s.id]; if (c) { sx += (c.x1 + c.x2) / 2; sy += (c.y1 + c.y2) / 2; n++ } }
-  return n ? [sx / n, sy / n] : [0.5, 0.5]
+// radial origin: a named marker if `p.origin` picks one, else the placed tubes' centroid
+function origin (p) {
+  const list = []
+  for (const s of (wled.segments || [])) { const c = plan.tubes[s.id]; if (c) list.push(c) }
+  return effectOrigin(p, list)
 }
 let lph = 0, lts = 0, lelapsed = 0
 const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1 ? strobeDuration(p) : fx === 3 ? solidDuration(p) : Math.max(0.1, props.timeline))
@@ -65,7 +65,7 @@ function draw () {
   const N = Math.max(1, wled.segments.length)                  // real tube count (strobe is per-tube)
   const on = wled.on
   const fx = efx(), pp = ep()
-  const [cx, cy] = centre()
+  const [cx, cy] = origin(pp)
   const umax = fx === 0 ? impulseUmax(pp, CORNERS, cx, cy) : 1
   const { elapsed, phase: t, wait } = frame(fx, pp, umax)
   const positions = fx === 0 ? impulsePositions(pp, elapsed) : null

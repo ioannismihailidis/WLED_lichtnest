@@ -160,7 +160,7 @@ function saveProject () {
     try {
       localStorage.setItem(PROJECT_KEY, JSON.stringify({
         on: wled.on, bri: wled.bri, segments: wled.segments, ports: wled.info.ports,
-        plan: { photo: plan.photo, photoData: plan.photoData, tubes: plan.tubes, ports: plan.ports, portMax: plan.portMax },
+        plan: { photo: plan.photo, photoData: plan.photoData, tubes: plan.tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax },
         playlists: playlists.list, lichtnest: { fx: lichtnest.fx, p: lichtnest.p },
       }))
     } catch (e) { /* localStorage quota — photo too big? */ }
@@ -180,7 +180,7 @@ export function enterOffline () {
   recomputeLeds()
   const pp = p.plan || {}
   plan.photo = !!pp.photo; plan.photoData = pp.photoData || null
-  plan.tubes = pp.tubes || {}; plan.ports = pp.ports || {}; plan.portMax = pp.portMax || {}
+  plan.tubes = pp.tubes || {}; plan.points = pp.points || {}; plan.ports = pp.ports || {}; plan.portMax = pp.portMax || {}
   plan.loaded = true; plan.rev++
   playlists.list = Array.isArray(p.playlists) ? p.playlists : []; playlists.loaded = true
   presets.loaded = true
@@ -350,8 +350,53 @@ export async function toggleTest (id) {
 
 // --- 2D plan (photo + per-tube endpoint layout, stored on the device FS) ----
 // Photo  -> /plan.jpg            (client-compressed JPEG, uploaded via /upload)
-// Layout -> /lichtnest_plan.json { photo: bool, tubes: { <segId>: {x1,y1,x2,y2} } }
-export const plan = reactive({ loaded: false, photo: false, photoData: null, rev: 0, tubes: {}, ports: {}, portMax: {} })
+// Layout -> /lichtnest_plan.json { photo: bool, tubes: { <segId>: {x1,y1,x2,y2} },
+//                                   points: { <id>: {name,x,y} } }
+// `points` are named markers placed on the 2D plan (§ Marker) — e.g. a tree, a door —
+// that spatial effects (radial "Impuls") can pick as their origin instead of the
+// automatic tube centroid. Referenced from an effect's params as `origin: <id>`.
+export const plan = reactive({ loaded: false, photo: false, photoData: null, rev: 0, tubes: {}, points: {}, ports: {}, portMax: {} })
+
+// resolve a spatial effect's origin: a named marker if `p.origin` points at one,
+// else the centroid of the given tube list (mirrors the firmware's computeCenter).
+// `tubeList` = array of {x1,y1,x2,y2} (e.g. tubeGeometry() or the plan's tube items).
+export function effectOrigin (p, tubeList) {
+  let cx = 0.5, cy = 0.5
+  const list = tubeList || []
+  if (list.length) {
+    let sx = 0, sy = 0
+    for (const t of list) { sx += (t.x1 + t.x2) / 2; sy += (t.y1 + t.y2) / 2 }
+    cx = sx / list.length; cy = sy / list.length
+  }
+  const m = (p && p.origin != null && p.origin !== 255) ? plan.points[p.origin] : null
+  if (m) { cx = m.x; cy = m.y }
+  return [cx, cy]
+}
+
+// markers = named points on the 2D plan (see `plan.points` above)
+export const markers = {
+  nextId () { const ids = Object.keys(plan.points).map(Number); let i = 0; while (ids.includes(i)) i++; return i },
+  add (x = 0.5, y = 0.5, name = '') {
+    const id = this.nextId()
+    plan.points = { ...plan.points, [id]: { name: name || ('Marker ' + (id + 1)), x, y } }
+    savePlan()
+    return id
+  },
+  rename (id, name) {
+    if (!plan.points[id]) return
+    plan.points = { ...plan.points, [id]: { ...plan.points[id], name: name || plan.points[id].name } }
+    savePlan()
+  },
+  remove (id) {
+    if (!plan.points[id]) return
+    const rest = { ...plan.points }; delete rest[id]; plan.points = rest
+    savePlan()
+  },
+}
+// geometry of every named marker, in the shape the firmware expects for "pts"
+export function pointGeometry () {
+  return Object.keys(plan.points).map((id) => { const m = plan.points[id]; return { id: +id, x: m.x, y: m.y } })
+}
 
 // theoretical max LEDs per port (UI/planning cap; configurable in Settings). The
 // actually-driven LEDs come from the tubes' total, not from the WLED bus length.
@@ -363,7 +408,7 @@ export async function loadPlan () {
   if (wled.offline) { plan.loaded = true; return }   // already hydrated by enterOffline()
   try {
     const r = await fetch(httpUrl('/lichtnest_plan.json?v=' + Date.now()))
-    if (r.ok) { const d = await r.json(); plan.photo = !!d.photo; plan.tubes = d.tubes || {}; plan.ports = d.ports || {}; plan.portMax = d.portMax || {}; plan.rev++ }
+    if (r.ok) { const d = await r.json(); plan.photo = !!d.photo; plan.tubes = d.tubes || {}; plan.points = d.points || {}; plan.ports = d.ports || {}; plan.portMax = d.portMax || {}; plan.rev++ }
   } catch (e) { /* no plan yet */ }
   plan.loaded = true
 }
@@ -373,11 +418,11 @@ export function savePlan () {
   if (wled.offline) { saveProject(); return }
   if (planTimer) clearTimeout(planTimer)
   planTimer = setTimeout(() => {
-    const body = JSON.stringify({ photo: plan.photo, tubes: plan.tubes, ports: plan.ports, portMax: plan.portMax })
+    const body = JSON.stringify({ photo: plan.photo, tubes: plan.tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax })
     const fd = new FormData()
     fd.append('file', new Blob([body], { type: 'application/json' }), 'lichtnest_plan.json')
     fetch(httpUrl('/upload'), { method: 'POST', body: fd }).catch(() => {})
-    postState({ lichtnest: { geo: tubeGeometry() } })   // push positions to the live effect (no fx -> playlist keeps running)
+    postState({ lichtnest: { geo: tubeGeometry(), pts: pointGeometry() } })   // push positions to the live effect (no fx -> playlist keeps running)
   }, 600)
 }
 
@@ -469,8 +514,8 @@ export function stepDurationMs (it) {
   if (it.fx === 3) return delayMs + Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
   if (it.fx !== 0) return delayMs + Math.max(1, it.dur || 10) * 1000
   const g = tubeGeometry()
-  let cx = 0.5, cy = 0.5; const pts = []
-  if (g.length) { let sx = 0, sy = 0; for (const t of g) { sx += (t.x1 + t.x2) / 2; sy += (t.y1 + t.y2) / 2; pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 }) } cx = sx / g.length; cy = sy / g.length }
+  const [cx, cy] = effectOrigin(p, g)
+  const pts = []; for (const t of g) pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 })
   return delayMs + Math.max(200, impulseDuration(p, impulseUmax(p, pts, cx, cy)) * 1000)
 }
 function offApplyStep (pl, idx) {
