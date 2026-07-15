@@ -437,7 +437,11 @@ bool handleFileRead(AsyncWebServerRequest* request, String path){
   }
   #endif
   if(WLED_FS.exists(path) || WLED_FS.exists(path + ".gz")) {
-    request->send(request->beginResponse(WLED_FS, path, {}, request->hasArg(F("download")), {}));
+    AsyncWebServerResponse* response = request->beginResponse(WLED_FS, path, {}, request->hasArg(F("download")), {});
+    // FS files (custom UI, playlists, plan) change via /upload at any time — force browsers
+    // to revalidate instead of heuristically serving a stale copy (no Cache-Control = heuristic caching)
+    response->addHeader(F("Cache-Control"), F("no-cache"));
+    request->send(response);
     return true;
   }
   return false;
