@@ -9,7 +9,8 @@
 // (`npm run dev`) point it at the device with ?host=http://4.3.2.1 (remembered
 // in localStorage, same idea as WLED's file mode).
 import { reactive } from 'vue'
-import { phaseRate } from './fxsim.js'
+import { phaseRate, strobeDuration, solidDuration } from './fxsim.js'
+import { impulseUmax, impulseDuration } from './impulse.js'
 
 function normHost (h) {
   if (!h) return ''
@@ -115,9 +116,14 @@ function applyState (s) {
   }
   if (s.lichtnest) {
     if (typeof s.lichtnest.ph === 'number') syncDevicePhase(s.lichtnest.ph)
-    if (typeof s.lichtnest.fx === 'number') lichtnest.fx = s.lichtnest.fx
-    if (s.lichtnest.p) lichtnest.p = { ...lichtnest.p, ...s.lichtnest.p }
     const q = s.lichtnest.pl
+    // mirror the device's params into the editor pool ONLY in manual mode — while a
+    // playlist plays, the device reports the *step's* params and must not clobber the editor
+    const playing = q ? !!q.active : wled.pl.active
+    if (!playing) {
+      if (typeof s.lichtnest.fx === 'number') lichtnest.fx = s.lichtnest.fx
+      if (s.lichtnest.p) lichtnest.p = { ...lichtnest.p, ...s.lichtnest.p }
+    }
     if (q) {
       wled.pl.active = !!q.active
       wled.pl.loop = !!q.loop
@@ -454,6 +460,17 @@ async function flushPlaylists () {
 let offTimer = null
 const offItems = (pl) => (pl ? (pl.items || []).filter((it) => it.fx != null) : [])
 const offFind = () => playlists.list.find((p) => p.id === wled.pl.id)
+// step length in ms: impulse steps auto-derive from Anzahl×Abstand+Auslaufzeit, else the set duration
+export function stepDurationMs (it) {
+  const p = it.p || {}
+  if (it.fx === 1) return Math.max(200, strobeDuration(p) * 1000)   // strobe: ends at the last keyframe
+  if (it.fx === 3) return Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
+  if (it.fx !== 0) return Math.max(1, it.dur || 10) * 1000
+  const g = tubeGeometry()
+  let cx = 0.5, cy = 0.5; const pts = []
+  if (g.length) { let sx = 0, sy = 0; for (const t of g) { sx += (t.x1 + t.x2) / 2; sy += (t.y1 + t.y2) / 2; pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 }) } cx = sx / g.length; cy = sy / g.length }
+  return Math.max(200, impulseDuration(p, impulseUmax(p, pts, cx, cy)) * 1000)
+}
 function offApplyStep (pl, idx) {
   const items = offItems(pl); if (!items.length) { wled.pl.active = false; return }
   idx = ((idx % items.length) + items.length) % items.length
@@ -462,7 +479,7 @@ function offApplyStep (pl, idx) {
   wled.pl.active = true; wled.pl.id = pl.id; wled.pl.name = pl.name
   wled.pl.idx = idx; wled.pl.total = items.length; wled.pl.fx = it.fx
   wled.pl.nextFx = items[(idx + 1) % items.length].fx
-  wled.pl.elapsedMs = 0; wled.pl.durMs = Math.max(1, it.dur || 10) * 1000; wled.pl.syncAt = Date.now()
+  wled.pl.elapsedMs = 0; wled.pl.durMs = stepDurationMs(it); wled.pl.syncAt = Date.now()
   if (offTimer) clearTimeout(offTimer)
   offTimer = setTimeout(() => offApplyStep(pl, playback.loop ? wled.pl.idx : wled.pl.idx + 1), wled.pl.durMs)
 }
@@ -505,6 +522,16 @@ export function playlistProgress (now) {
 
 // --- our own effects (rendered by the lichtnest usermod) --------------------
 export const lichtnest = reactive({ fx: 3, p: {} })
+// what the device is showing RIGHT NOW: the playing step (full params from the
+// playlist file) while a playlist runs, else the manual effect (editor pool)
+export function liveFxP () {
+  if (wled.pl.active) {
+    const pl = playlists.list.find((x) => x.id === wled.pl.id)
+    const it = pl && (pl.items || [])[wled.pl.idx]
+    if (it && it.fx != null) return { fx: it.fx, p: it.p || {} }
+  }
+  return { fx: lichtnest.fx, p: lichtnest.p }
+}
 export function tubeGeometry () {
   return wled.segments.slice().sort((a, b) => a.start - b.start).map((s) => {
     const c = plan.tubes[s.id] || { x1: 0.12, y1: 0.4, x2: 0.5, y2: 0.4 }

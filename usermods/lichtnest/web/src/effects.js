@@ -3,27 +3,29 @@
 // Param keys + types mirror the firmware's shared parameter pool.
 export const EFFECTS = [
   {
-    id: 0, key: 'pulse', name: 'Puls',
-    desc: 'Farb-Bänder pulsen aus Schwarz — linear entlang einer Richtung oder radial aus der Mitte.',
-    preview: 'repeating-linear-gradient(90deg,#0d0f13 0 6%,#ff5a3c 11%,#7b3cff 17%,#27c5ff 23%,#0d0f13 30% 44%)',
+    id: 0, key: 'pulse', name: 'Impuls',
+    desc: 'Einzelne Farb-Impulse werden nacheinander losgeschickt — der Schritt startet und endet schwarz.',
+    preview: 'repeating-linear-gradient(90deg,#0d0f13 0 10%,#ff5a3c 15%,#27c5ff 20%,#0d0f13 26% 50%)',
     params: [
       { key: 'grad', type: 'gradient', name: 'Farbverlauf' },
       { key: 'pmode', type: 'select', name: 'Modus', options: [{ v: 0, l: 'Linear' }, { v: 1, l: 'Radial' }] },
-      { key: 'angle', type: 'range', name: 'Richtung', min: 0, max: 360, unit: '°', show: (p) => (p.pmode || 0) === 0 },
-      { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90, unit: '%' },
-      { key: 'hz', type: 'range', name: 'Frequenz', min: 1, max: 20 },
-      { key: 'speed', type: 'range', name: 'Geschwindigkeit', min: 0, max: 100, unit: '%' },
+      { key: 'angle', type: 'range', name: 'Richtung', min: 0, max: 360, unit: '°', def: 25, show: (p) => (p.pmode || 0) === 0 },
+      { key: 'count', type: 'range', name: 'Anzahl', min: 1, max: 20, def: 3 },
+      { key: 'interval', type: 'range', name: 'Abstand', min: 1, max: 50, mul: 0.1, unit: 's', def: 8 },
+      { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90, unit: '%', def: 30 },
+      { key: 'speed', type: 'range', name: 'Geschwindigkeit', min: 0, max: 100, unit: '%', def: 42 },
     ],
   },
   {
     id: 1, key: 'strobe', name: 'Tube-Strobe',
-    desc: 'Einzelne Tubes blitzen rhythmisch im Takt.',
+    desc: 'Tubes blitzen im Takt — die Frequenz folgt einer Keyframe-Liste (Zeitpunkt + Hz).',
     preview: 'repeating-linear-gradient(90deg,#fff 0 8px,#0d0f13 8px 22px)',
     params: [
-      { key: 'color', type: 'color', name: 'Blitzfarbe' },
-      { key: 'hz', type: 'range', name: 'Frequenz', min: 1, max: 20, unit: 'Hz' },
-      { key: 'duty', type: 'range', name: 'Pulsbreite', min: 5, max: 95, unit: '%' },
-      { key: 'mode', type: 'select', name: 'Modus', options: [{ v: 0, l: 'Alle' }, { v: 1, l: 'Wechsel' }, { v: 2, l: 'Reihum' }] },
+      { key: 'scols', type: 'colorlist', name: 'Blitzfarben', def: [[255, 255, 255], [39, 197, 255]] },
+      { key: 'cpar', type: 'range', name: 'Farben parallel', min: 1, max: 8, def: 1 },
+      { key: 'hzKeys', type: 'keyframes', name: 'Frequenz-Verlauf', vMin: 1, vMax: 20, vUnit: 'Hz', def: [{ t: 0, v: 2 }, { t: 2, v: 10 }] },
+      { key: 'duty', type: 'range', name: 'Pulsbreite', min: 5, max: 95, unit: '%', def: 30 },
+      { key: 'mode', type: 'select', name: 'Modus', options: [{ v: 0, l: 'Alle' }, { v: 1, l: 'Wechsel' }, { v: 2, l: 'Reihum' }, { v: 3, l: 'Zufall' }] },
     ],
   },
   {
@@ -39,12 +41,11 @@ export const EFFECTS = [
   },
   {
     id: 3, key: 'solid', name: 'Solid / Atmen',
-    desc: 'Statische Farbe, optional sanft pulsierend.',
-    preview: 'linear-gradient(90deg,#27c5ff,#27c5ff)',
+    desc: 'Farbe und Atem-Tempo laufen über Keyframes — beides über die Zeit einstellbar.',
+    preview: 'linear-gradient(90deg,#27c5ff,#7b3cff,#ff5a3c)',
     params: [
-      { key: 'color', type: 'color', name: 'Farbe' },
+      { key: 'keys', type: 'keyframes', name: 'Zeit · Tempo · Farbe', vMin: 0.1, vMax: 5, vStep: 0.1, vUnit: ' Hz', label: 'Tempo', withColor: true, def: [{ t: 0, v: 0.3, c: [39, 197, 255] }, { t: 4, v: 0.3, c: [255, 90, 60] }] },
       { key: 'breathe', type: 'toggle', name: 'Atmen' },
-      { key: 'tempo', type: 'range', name: 'Atem-Tempo', min: 0, max: 100, unit: '%' },
     ],
   },
 ]

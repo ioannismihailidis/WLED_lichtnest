@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { wled, playlists, playlistProgress, playback, prevStep, nextStep, setLoop } from '../wled.js'
+import { wled, playlists, playlistProgress, playback, prevStep, nextStep, setLoop, stepDurationMs } from '../wled.js'
 import { effectById } from '../effects.js'
 
 const now = ref(Date.now())
@@ -16,9 +16,10 @@ const steps = computed(() => {
 })
 const segs = computed(() => {
   const s = steps.value
-  const total = s.reduce((a, b) => a + Math.max(1, b.dur || 10), 0) || 1
+  const dur = (it) => Math.max(0.2, stepDurationMs(it) / 1000)   // effective length (impulse/strobe auto-derive)
+  const total = s.reduce((a, b) => a + dur(b), 0) || 1
   let acc = 0
-  return s.map((it, i) => { const w = Math.max(1, it.dur || 10) / total * 100; const left = acc; acc += w; return { i, w, left, preview: effectById(it.fx).preview } })
+  return s.map((it, i) => { const w = dur(it) / total * 100; const left = acc; acc += w; return { i, w, left, preview: effectById(it.fx).preview } })
 })
 // playhead position in duration-space (aligns with the duration-proportional segments)
 const playhead = computed(() => {

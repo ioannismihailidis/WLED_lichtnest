@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { wled, actions, lichtnest } from '../wled.js'
+import { wled, actions, liveFxP } from '../wled.js'
 import { effectById } from '../effects.js'
 import MiniPlan from '../components/MiniPlan.vue'
 import PlaylistPlayer from '../components/PlaylistPlayer.vue'
@@ -8,14 +8,14 @@ import PlaylistPlayer from '../components/PlaylistPlayer.vue'
 const emit = defineEmits(['navigate'])
 
 const briPct = computed(() => Math.round((wled.bri / 255) * 100))
-const eff = computed(() => effectById(lichtnest.fx))
+const eff = computed(() => effectById(liveFxP().fx))   // playing step while a playlist runs
 const fx = computed(() => eff.value.name)
 const ledCount = computed(() => wled.info.leds?.count ?? 0)
 const fps = computed(() => wled.info.leds?.fps ?? 0)
 const power = computed(() => wled.info.leds?.pwr ?? 0)
 
 const paramSummary = computed(() => {
-  const p = lichtnest.p; const k = eff.value.key
+  const p = liveFxP().p; const k = eff.value.key
   if (k === 'pulse') return p.pmode ? `${p.speed ?? 0}% · ${p.hz ?? 0} Hz · radial` : `${p.speed ?? 0}% · ${p.hz ?? 0} Hz · ${p.angle ?? 0}°`
   if (k === 'strobe') return `${p.hz ?? 0} Hz · ${['Alle', 'Wechsel', 'Reihum'][p.mode ?? 0]}`
   if (k === 'schwarm') return `${p.speed ?? 0}% · ${p.dir ? 'Rückwärts' : 'Vorwärts'}`

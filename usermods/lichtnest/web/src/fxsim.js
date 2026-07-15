@@ -16,7 +16,7 @@ export const fadeCw = (p) => { const c = fadeCols(p); return (p.cw && p.cw.lengt
 // dynamic N-colour gradient: each colour is a solid band of its own width, blended at
 // the boundaries (half the smaller neighbour). Equal widths ⇒ smooth; a wide colour ⇒
 // a wide solid band. Mirrors the firmware's gradN.
-function gradN (ph, cols, cw) {
+export function gradN (ph, cols, cw) {
   const n = cols.length
   if (n === 0) return [0, 0, 0]
   if (n === 1) return cols[0]
@@ -42,6 +42,121 @@ export function phaseRate (fx, p, N) {
   if (fx === 1) return Math.max(1, p.hz || 6)
   if (fx === 2) return ((p.speed || 0) / 100) * 0.5 * (N || 1)
   return 0.3 + ((p.tempo ?? 35) / 100) * 2
+}
+// linear interpolation over keyframes [{ t, v }] (t in seconds), clamped at the ends
+export function sampleCurve (keys, t) {
+  if (!keys || !keys.length) return 0
+  if (t <= keys[0].t) return keys[0].v
+  const last = keys[keys.length - 1]
+  if (t >= last.t) return last.v
+  for (let i = 1; i < keys.length; i++) { const a = keys[i - 1], b = keys[i]; if (t <= b.t) { const s = b.t - a.t; const f = s > 0 ? (t - a.t) / s : 0; return a.v + (b.v - a.v) * f } }
+  return last.v
+}
+// strobe frequency follows a keyframe list (Zeitpunkt + Hz); the step ends at the last keyframe
+const DEF_HZKEYS = [{ t: 0, v: 2 }, { t: 2, v: 10 }]
+export const strobeKeys = (p) => (p.hzKeys && p.hzKeys.length ? p.hzKeys.slice().sort((a, b) => a.t - b.t) : DEF_HZKEYS)
+export const strobeRateAt = (p, elapsed) => Math.max(1, sampleCurve(strobeKeys(p), elapsed))
+export const strobeDuration = (p) => { const k = strobeKeys(p); return Math.max(0.5, k[k.length - 1].t) }
+// integral of a piecewise-linear keyframe list [{t,v}] from 0..elapsed. Deterministic in
+// `elapsed`, so the preview can sync exactly to the running step. Used for any rate-over-time.
+export function curvePhaseAt (keys, elapsed) {
+  if (!keys || !keys.length || elapsed <= 0) return 0
+  let ph = 0, t0 = 0, v0 = keys[0].v
+  for (let i = 0; i < keys.length; i++) {
+    const t1 = keys[i].t, v1 = keys[i].v
+    if (t1 <= t0) { v0 = v1; continue }
+    if (elapsed < t1) { const v = v0 + (v1 - v0) * ((elapsed - t0) / (t1 - t0)); return ph + (elapsed - t0) * (v0 + v) / 2 }
+    ph += (t1 - t0) * (v0 + v1) / 2; t0 = t1; v0 = v1
+  }
+  return ph + (elapsed - t0) * v0   // after the last keyframe: hold the last value
+}
+export const strobePhaseAt = (p, elapsed) => curvePhaseAt(strobeKeys(p), elapsed)
+
+// Solid/Atmen: ONE keyframe list [{ t, v(Hz), c:[r,g,b] }] drives both the breathe rate
+// and the colour over time. Phase in radians → sin() per breath; colour interpolated.
+const DEF_SOLIDKEYS = [{ t: 0, v: 0.3, c: [39, 197, 255] }, { t: 4, v: 0.3, c: [255, 90, 60] }]
+export const solidKeys = (p) => (p.keys && p.keys.length ? p.keys.slice().sort((a, b) => a.t - b.t) : DEF_SOLIDKEYS)
+export const solidPhaseAt = (p, elapsed) => 2 * Math.PI * curvePhaseAt(solidKeys(p), elapsed)
+export const solidDuration = (p) => { const k = solidKeys(p); return Math.max(0.5, k[k.length - 1].t) }
+// interpolate the colour of a keyframe list (reads .c) at time t
+export function sampleColorAt (keys, t) {
+  if (!keys || !keys.length) return [255, 255, 255]
+  if (t <= keys[0].t) return keys[0].c
+  const last = keys[keys.length - 1]; if (t >= last.t) return last.c
+  for (let i = 1; i < keys.length; i++) {
+    const a = keys[i - 1], b = keys[i]
+    if (t <= b.t) { const s = b.t - a.t, f = s > 0 ? (t - a.t) / s : 0; return [a.c[0] + (b.c[0] - a.c[0]) * f, a.c[1] + (b.c[1] - a.c[1]) * f, a.c[2] + (b.c[2] - a.c[2]) * f] }
+  }
+  return last.c
+}
+export const solidColorAt = (p, elapsed) => sampleColorAt(solidKeys(p), elapsed)
+// strobe colours: a palette (scols) with `cpar` of them shown in parallel across the tubes;
+// the visible window of `cpar` colours slides through the palette each flash.
+// Fallback matches the effects.js default so an unedited palette still shows all its colours.
+const DEF_SCOLS = [[255, 255, 255], [39, 197, 255]]
+export const strobeCols = (p) => (p.scols && p.scols.length ? p.scols : DEF_SCOLS)
+// `cpar` = how many colours are shown in parallel = how many tubes are lit at once
+// (except "Alle", where every tube is lit). Alle spreads the palette across all tubes;
+// Wechsel lights cpar interleaved tubes that shift each flash; Reihum lights a block of
+// cpar consecutive tubes that sweeps. Returns [0,0,0] for tubes that aren't lit this flash.
+// deterministic 32-bit hash — MUST match the firmware's zvHash bit-for-bit, so the
+// "Zufall" mode picks the same tubes in the preview and on the device
+function zvHash (a, b) {
+  let x = ((Math.imul(a, 0x9E3779B1) ^ Math.imul(b, 0x85EBCA6B)) >>> 0)
+  x ^= x >>> 16; x = Math.imul(x, 0x7FEB352D) >>> 0
+  x ^= x >>> 15; x = Math.imul(x, 0x846CA68B) >>> 0
+  x ^= x >>> 16
+  return x >>> 0
+}
+// preview-local random seed — the device rolls its own per playback (they may diverge)
+const SIM_SEED = (Math.random() * 0xFFFFFFFF) >>> 0
+// hash-shuffled tube permutation for round r (Fisher-Yates, seeded)
+function strobePerm (r, N) {
+  const a = []
+  for (let i = 0; i < N; i++) a[i] = i
+  for (let i = N - 1; i >= 1; i--) {
+    const j = zvHash((SIM_SEED + r) >>> 0, i) % (i + 1)
+    const t = a[i]; a[i] = a[j]; a[j] = t
+  }
+  return a
+}
+export function strobeColor (p, tubeIdx, tubeTotal, flash) {
+  const list = strobeCols(p); const M = list.length
+  const N = Math.max(1, tubeTotal || 1)
+  const P = Math.max(1, Math.min(M, N, p.cpar || 1))
+  const mode = p.mode || 0
+  if (mode === 0) return list[(((tubeIdx % P) + flash) % M + M) % M]   // Alle: all tubes lit
+  let lit, rank
+  if (mode === 3) {                                                    // Zufall: P hash-picked tubes per flash
+    // rounds of R disjoint groups from a hash-shuffled permutation → a tube can never
+    // flash twice in a row (boundary fix-up swaps conflicts away; guaranteed when N ≥ 2P)
+    const R = Math.max(1, Math.floor(N / P))
+    const f = flash >>> 0
+    const r = Math.floor(f / R), g = f % R
+    const A = strobePerm(r, N)
+    // boundary fix-up: group 0 must avoid the previous round's last group. Applied for
+    // EVERY flash of the round (same deterministic result) so the groups stay disjoint.
+    // Swap partners never come from the last group, so the next round can rely on it.
+    if (r > 0 && N > P) {
+      const prev = strobePerm(r - 1, N).slice((R - 1) * P, (R - 1) * P + P)
+      const lastLo = (R - 1) * P, lastHi = R * P                        // protected region
+      for (let k = 0; k < P; k++) {
+        if (!prev.includes(A[k])) continue
+        for (let m = P; m < N; m++) {
+          if (R > 1 && m >= lastLo && m < lastHi) continue
+          if (!prev.includes(A[m])) { const t = A[k]; A[k] = A[m]; A[m] = t; break }
+        }
+      }
+    }
+    lit = false; rank = 0
+    for (let k = 0; k < P; k++) if (A[g * P + k] === tubeIdx) { lit = true; rank = k }
+  } else {
+    const numG = Math.max(1, Math.ceil(N / P))
+    if (mode === 2) { const block = Math.floor(tubeIdx / P); lit = block === (flash % numG); rank = tubeIdx % P }   // Reihum: sweeping block
+    else { lit = (tubeIdx % numG) === (flash % numG); rank = Math.floor(tubeIdx / numG) }                          // Wechsel: interleaved
+  }
+  if (!lit) return [0, 0, 0]
+  return list[(((rank % M) + flash) % M + M) % M]
 }
 
 // fx: 0 fade, 1 strobe, 2 schwarm, 3 solid, 4 radial. p: param pool. (x,y) normalised 0..1.
@@ -74,13 +189,8 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
     }
     case 1: {
       const flash = Math.floor(phase); const inFrac = phase - flash
-      const window = inFrac < ((p.duty || 30) / 100)
-      const mode = p.mode || 0
-      let on
-      if (mode === 0) on = window
-      else if (mode === 1) on = window && ((tubeIdx + flash) & 1) === 0
-      else on = window && (flash % (tubeTotal || 1)) === tubeIdx
-      return on ? col : [0, 0, 0]
+      if (inFrac >= (p.duty || 30) / 100) return [0, 0, 0]   // off part of the flash cycle
+      return strobeColor(p, tubeIdx, tubeTotal, flash)       // handles which tubes are lit + their colour
     }
     case 2: {
       const N = chainTotal || 1

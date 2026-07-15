@@ -4,6 +4,8 @@ import { lichtnest, fxActions, rgbToHex, hexToRgb } from '../wled.js'
 import { EFFECTS, effectById } from '../effects.js'
 import { fadeCols, fadeCw, gradientCss } from '../fxsim.js'
 import GradientEditor from '../components/GradientEditor.vue'
+import KeyframeList from '../components/KeyframeList.vue'
+import ColorList from '../components/ColorList.vue'
 import MiniPlan from '../components/MiniPlan.vue'
 import TexturePreview from '../components/TexturePreview.vue'
 
@@ -17,7 +19,8 @@ function open (id) { editId.value = id; fxActions.setEffect(id); view.value = 'e
 function back () { view.value = 'list' }
 
 // param value helpers (current values come from the device via state.lichtnest.p)
-function rangeVal (p) { const v = lichtnest.p[p.key]; return typeof v === 'number' ? v : (p.min ?? 0) }
+function rangeVal (p) { const v = lichtnest.p[p.key]; return typeof v === 'number' ? v : (p.def ?? p.min ?? 0) }
+function dispVal (p) { const v = rangeVal(p); return p.mul ? (v * p.mul).toFixed(1) : v }
 function selVal (p) { const v = lichtnest.p[p.key]; return v != null ? v : p.options[0].v }
 const colHex = (k, d) => rgbToHex(lichtnest.p[k] || d)
 function colVal (p) { return colHex(p.key, [255, 255, 255]) }
@@ -32,6 +35,9 @@ function setToggle (p) { fxActions.setParam(p.key, !lichtnest.p[p.key]) }
 const gradCols = computed(() => fadeCols(lichtnest.p))
 const gradCw = computed(() => fadeCw(lichtnest.p))
 function setGrad (v) { fxActions.setParams(v) }
+// keyframe list params (e.g. strobe frequency over time)
+const keysVal = (p) => lichtnest.p[p.key] || p.def || []
+function setKeys (p, arr) { fxActions.setParam(p.key, arr) }
 
 function previewBg (e) {
   if (e.key === 'pulse') return gradientCss(gradCols.value, gradCw.value)
@@ -40,6 +46,8 @@ function previewBg (e) {
   return colHex('color', [39, 197, 255])
 }
 const isActive = (id) => lichtnest.fx === id
+// restart the preview; if this effect is the active one, also re-trigger it on the device
+function restartPreview () { pvRestart.value++; if (isActive(editId.value)) fxActions.setEffect(editId.value) }
 </script>
 
 <template>
@@ -65,7 +73,7 @@ const isActive = (id) => lichtnest.fx === id
       <div class="bigprev">
         <MiniPlan v-if="previewMode === 'tubes'" local :restart-key="pvRestart" class="pvcanvas" />
         <TexturePreview v-else local :restart-key="pvRestart" class="pvcanvas" />
-        <button class="pvrestart" title="Animation neu starten" @click="pvRestart++">
+        <button class="pvrestart" title="Animation neu starten" @click="restartPreview()">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4" /><path d="M3 4.5V10h5.5" /></svg>
         </button>
         <div class="pvtoggle">
@@ -81,12 +89,14 @@ const isActive = (id) => lichtnest.fx === id
       <div v-for="p in edit.params.filter(pp => !pp.show || pp.show(lichtnest.p))" :key="p.key" class="panel pad ctl">
         <div class="row">
           <span class="clbl">{{ p.name }}</span>
-          <span v-if="p.type === 'range'" class="mono cval">{{ rangeVal(p) }}{{ p.unit || '' }}</span>
+          <span v-if="p.type === 'range'" class="mono cval">{{ dispVal(p) }}{{ p.unit || '' }}</span>
           <span v-else-if="p.type === 'color'" class="mono cval">{{ colVal(p).toUpperCase() }}</span>
         </div>
         <input v-if="p.type === 'range'" type="range" :min="p.min" :max="p.max" :value="rangeVal(p)" @input="setRange(p, $event)" style="width:100%;height:24px">
         <input v-else-if="p.type === 'color'" type="color" :value="colVal(p)" @input="setColor(p, $event)" class="color">
         <GradientEditor v-else-if="p.type === 'gradient'" :cols="gradCols" :cw="gradCw" @update="setGrad" />
+        <KeyframeList v-else-if="p.type === 'keyframes'" :model-value="keysVal(p)" :v-min="p.vMin" :v-max="p.vMax" :v-step="p.vStep || 1" :v-unit="p.vUnit || ''" :label="p.label || 'Frequenz'" :with-color="p.withColor || false" @update="setKeys(p, $event)" />
+        <ColorList v-else-if="p.type === 'colorlist'" :model-value="keysVal(p)" @update="setKeys(p, $event)" />
         <div v-else-if="p.type === 'select'" class="seg">
           <button v-for="o in p.options" :key="o.v" :class="{ on: selVal(p) === o.v }" @click="setSel(p, o.v)">{{ o.l }}</button>
         </div>

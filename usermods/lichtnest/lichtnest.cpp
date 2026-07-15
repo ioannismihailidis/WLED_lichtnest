@@ -28,20 +28,29 @@
 #define ZV_MAXSTEPS 32
 
 #define ZV_MAXCOL 8
+#define ZV_MAXKF  8      // keyframes per list (strobe hz over time / solid rate+colour over time)
+#define ZV_MAXPAL 8      // strobe palette colours
+// one keyframe: time (s), value, colour (colour only used by the solid)
+struct KF { float t = 0; float v = 0; uint32_t c = 0xFFFFFF; };
+
 // one effect + its full parameter set (union over all effects)
 struct FxParams {
-  uint8_t  fx = 3;                                          // 0 fade,1 strobe,2 schwarm,3 solid,4 radial
-  // fade: dynamic colour gradient — fcount colours, each with its own band width
+  uint8_t  fx = 3;                                          // 0 impulse,1 strobe,2 schwarm,3 solid
+  // impulse: colour gradient painted across each band — fcount colours + per-colour width
   uint8_t  fcount = 3;
   uint32_t fcols[ZV_MAXCOL] = { 0xFF5A3C, 0x7B3CFF, 0x27C5FF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF };
   uint8_t  fcw[ZV_MAXCOL]   = { 100, 100, 100, 100, 100, 100, 100, 100 };
-  uint32_t col = 0x27C5FF;                                 // single-colour effects
-  uint8_t  speed = 42, width = 120, angle = 25;            // pulse: speed + linear direction (width unused)
-  uint8_t  pmode = 0;                                      // pulse mode: 0 linear, 1 radial
-  uint8_t  hz = 6, duty = 30, mode = 1;                    // pulse Frequenz; strobe duty + mode (0 all,1 alt,2 seq)
-  uint8_t  tail = 22, dir = 0, tempo = 35;                 // schwarm / solid
+  uint32_t col = 0x27C5FF;                                 // schwarm colour
+  uint8_t  speed = 42, width = 120, angle = 25;            // impulse: travel speed + linear direction
+  uint8_t  pmode = 0;                                      // impulse mode: 0 linear, 1 radial
+  uint8_t  hz = 6, duty = 30, mode = 1;                    // strobe duty + mode (0 all,1 alt,2 seq)
+  uint8_t  tail = 22, dir = 0, tempo = 35;                 // schwarm
   bool     breathe = true;                                 // solid
-  uint8_t  rfin = 20, rfout = 20, rwidth = 30, rgap = 30;  // rwidth = pulse "Breite"; rfin/rfout/rgap now unused
+  uint8_t  rfin = 20, rfout = 20, rwidth = 30, rgap = 30;  // rwidth = impulse band "Breite"
+  uint8_t  count = 3, interval = 8;                        // impulse: number of impulses + spacing (deciseconds)
+  uint8_t  cpar = 1;                                       // strobe: colours/tubes shown in parallel
+  uint8_t  scount = 0; uint32_t scols[ZV_MAXPAL] = {0};    // strobe palette
+  uint8_t  kcount = 0; KF keys[ZV_MAXKF];                  // strobe (t,hz) / solid (t,rate,colour) over time
 };
 
 // one playlist step
@@ -84,10 +93,14 @@ class Lichtnest : public Usermod {
     uint8_t  _trType   = 0;
     FxParams _trFrom;          // outgoing params
 
-    // accumulated phase per effect type — integrating the rate param over time so a
-    // speed/hz/tempo change speeds up the internal clock instead of jumping the phase
-    float    _ph[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    uint32_t _phLastMs = 0;
+    // effects render deterministically from the step's elapsed time (matches the web sim),
+    // so they auto-advance and stay in lock-step with the UI preview.
+    uint32_t _manualStart = 0;         // activation time of the manual effect (its timeline)
+    // strobe "Zufall" state: current + previous flash's tube pick (no immediate repeats).
+    // The previous pick stays addressable by its flash no., so transition crossfades that
+    // render two strobes with different clocks don't re-roll per pixel.
+    uint32_t _zufFlash = 0xFFFFFFFF, _zufPrevFlash = 0xFFFFFFFF;
+    uint8_t  _zufSel[ZV_MAXPAL], _zufPrev[ZV_MAXPAL]; uint8_t _zufSelN = 0, _zufPrevN = 0;
     float    _cx = 0.5f, _cy = 0.5f;   // radial centre = centroid of the tube geometry
 
     // recompute the radial centre (average tube midpoint) after geometry changes
@@ -138,67 +151,153 @@ class Lichtnest : public Usermod {
       return RGBW32((uint8_t)lerpf(cR(a), cR(b), t), (uint8_t)lerpf(cG(a), cG(b), t), (uint8_t)lerpf(cB(a), cB(b), t), 0);
     }
 
-    // per-effect rate (phase units per second) derived from the rate parameter;
-    // integrating this over time gives a phase that never jumps when the param changes
-    static float phaseRate(const FxParams& P, uint16_t N) {
-      switch (P.fx) {
-        case 0:  return (P.hz < 1 ? 1.0f : (float)P.hz) * 0.15f;    // pulse: emission rate (Frequenz)
-        case 1:  return (P.hz < 1 ? 1.0f : (float)P.hz);
-        case 2:  return (P.speed / 100.0f) * 0.5f * (N ? N : 1);
-        default: return 0.3f + P.tempo / 100.0f * 2.0f;            // solid
-      }
+    // --- keyframe curves (t, v[, c]) — mirror the web fxsim ------------------
+    static float sampleKV(const KF* k, uint8_t n, float t) {
+      if (n == 0) return 0;
+      if (t <= k[0].t) return k[0].v;
+      if (t >= k[n - 1].t) return k[n - 1].v;
+      for (uint8_t i = 1; i < n; i++) if (t <= k[i].t) { float s = k[i].t - k[i - 1].t; float f = s > 0 ? (t - k[i - 1].t) / s : 0; return k[i - 1].v + (k[i].v - k[i - 1].v) * f; }
+      return k[n - 1].v;
     }
-    void advancePhase(const FxParams& P, float dt, uint16_t N) { _ph[P.fx & 7] += dt * phaseRate(P, N); }
+    static float curvePhase(const KF* k, uint8_t n, float t) {   // integral of v from 0..t
+      if (n == 0 || t <= 0) return 0;
+      float ph = 0, t0 = 0, v0 = k[0].v;
+      for (uint8_t i = 0; i < n; i++) { float t1 = k[i].t, v1 = k[i].v; if (t1 <= t0) { v0 = v1; continue; } if (t < t1) { float v = v0 + (v1 - v0) * ((t - t0) / (t1 - t0)); return ph + (t - t0) * (v0 + v) / 2; } ph += (t1 - t0) * (v0 + v1) / 2; t0 = t1; v0 = v1; }
+      return ph + (t - t0) * v0;
+    }
+    static uint32_t sampleKC(const KF* k, uint8_t n, float t) {
+      if (n == 0) return 0xFFFFFF;
+      if (t <= k[0].t) return k[0].c;
+      if (t >= k[n - 1].t) return k[n - 1].c;
+      for (uint8_t i = 1; i < n; i++) if (t <= k[i].t) { float s = k[i].t - k[i - 1].t; float f = s > 0 ? (t - k[i - 1].t) / s : 0; return blendCol(k[i - 1].c, k[i].c, f); }
+      return k[n - 1].c;
+    }
 
-    // `phase` is the accumulated phase for this effect (already integrates the rate param)
-    uint32_t computeColor(const FxParams& P, float phase, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal) {
+    // --- impulse geometry ---------------------------------------------------
+    float pulseDist(const FxParams& P, float x, float y) {
+      if (P.pmode == 1) { float dx = x - _cx, dy = y - _cy; return sqrtf(dx * dx + dy * dy); }
+      float ax = cosf(P.angle * 3.14159265f / 180.0f), ay = sinf(P.angle * 3.14159265f / 180.0f);
+      float u0 = (ax < 0 ? ax : 0) + (ay < 0 ? ay : 0);
+      return x * ax + y * ay - u0;
+    }
+    float pulseUmax(const FxParams& P) {
+      float m = 0.5f;
+      for (uint8_t g = 0; g < geoCount; g++) { float d1 = pulseDist(P, gx1[g], gy1[g]); if (d1 > m) m = d1; float d2 = pulseDist(P, gx2[g], gy2[g]); if (d2 > m) m = d2; }
+      return m;
+    }
+
+    // --- strobe palette + parallel colours ----------------------------------
+    // "Zufall" mode: truly random tube pick per flash, remembered so a tube can NEVER
+    // flash twice in a row (as far as the tube count allows). The web preview uses its
+    // own seeded randomness — device and preview diverge by design here.
+    void zufRoll(uint8_t N, uint8_t Pn, uint32_t f) {
+      _zufPrevFlash = _zufFlash; _zufPrevN = _zufSelN;
+      for (uint8_t i = 0; i < _zufSelN; i++) _zufPrev[i] = _zufSel[i];
+      uint8_t fresh[ZV_MAXGEO], used[ZV_MAXPAL]; uint8_t nf = 0, nu = 0;
+      for (uint8_t t = 0; t < N; t++) {                       // split tubes: not-lit-last-flash vs lit
+        bool prev = false;
+        for (uint8_t j = 0; j < _zufPrevN; j++) if (_zufPrev[j] == t) { prev = true; break; }
+        if (prev) { if (nu < ZV_MAXPAL) used[nu++] = t; }
+        else fresh[nf++] = t;
+      }
+      _zufSelN = 0;
+      for (uint8_t k = 0; k < Pn; k++) {                      // prefer fresh tubes; only reuse if we must
+        if (nf > 0)      { uint8_t p = esp_random() % nf; _zufSel[_zufSelN++] = fresh[p]; fresh[p] = fresh[--nf]; }
+        else if (nu > 0) { uint8_t p = esp_random() % nu; _zufSel[_zufSelN++] = used[p];  used[p]  = used[--nu]; }
+      }
+      _zufFlash = f;
+    }
+    // cpar colours/tubes in parallel: Alle lights all tubes, Wechsel/Reihum/Zufall light cpar tubes.
+    uint32_t strobeColor(const FxParams& P, uint8_t tubeIdx, uint8_t tubeTotal, long flash) {
+      static const uint32_t DEF[2] = { 0xFFFFFF, 0x27C5FF };   // fallback palette = web DEF_SCOLS (white, blue)
+      uint8_t M = P.scount ? P.scount : 2;
+      uint8_t N = tubeTotal < 1 ? 1 : tubeTotal; if (N > ZV_MAXGEO) N = ZV_MAXGEO;
+      uint8_t Pn = P.cpar < 1 ? 1 : P.cpar; if (Pn > M) Pn = M; if (Pn > N) Pn = N;
+      long idx;
+      if (P.mode == 0) { idx = (long)(tubeIdx % Pn) + flash; }                                 // Alle
+      else if (P.mode == 3) {                                                                  // Zufall: Pn random tubes per flash
+        const uint8_t* sel; uint8_t selN;
+        uint32_t f = (uint32_t)flash;
+        if (f == _zufFlash)          { sel = _zufSel;  selN = _zufSelN; }
+        else if (f == _zufPrevFlash) { sel = _zufPrev; selN = _zufPrevN; }   // outgoing strobe during a crossfade
+        else { zufRoll(N, Pn, f); sel = _zufSel; selN = _zufSelN; }          // roll once per flash (per-pixel calls reuse)
+        bool lit = false; long rank = 0;
+        for (uint8_t k = 0; k < selN; k++) if (sel[k] == tubeIdx) { lit = true; rank = k; }
+        if (!lit) return 0;
+        idx = rank + flash;
+      }
+      else {
+        uint8_t numG = (N + Pn - 1) / Pn; if (numG < 1) numG = 1;
+        bool lit; long rank;
+        if (P.mode == 2) { lit = (tubeIdx / Pn) == (uint8_t)(flash % numG); rank = tubeIdx % Pn; }    // Reihum
+        else             { lit = (tubeIdx % numG) == (uint8_t)(flash % numG); rank = tubeIdx / numG; } // Wechsel
+        if (!lit) return 0;
+        idx = rank + flash;
+      }
+      idx = ((idx % M) + M) % M;
+      return P.scount ? P.scols[idx] : DEF[idx];
+    }
+
+    // --- effect step durations (auto-advance) -------------------------------
+    static float strobeDur(const FxParams& P) { float t = P.kcount ? P.keys[P.kcount - 1].t : 2.0f; return t < 0.5f ? 0.5f : t; }
+    static float solidDur(const FxParams& P)  { float t = P.kcount ? P.keys[P.kcount - 1].t : 4.0f; return t < 0.5f ? 0.5f : t; }
+    float impulseDur(const FxParams& P) {
+      float Nn = P.count < 1 ? 1 : P.count;
+      float iv = P.interval * 0.1f; if (iv < 0.05f) iv = 0.05f;
+      float v = (P.speed / 100.0f) * 0.6f; if (v < 0.001f) v = 0.001f;
+      float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
+      return (Nn - 1) * iv + (pulseUmax(P) + w) / v + 0.2f;
+    }
+    float stepSeconds(const FxParams& P) {   // 0 → use the playlist file's duration (schwarm etc.)
+      if (P.fx == 0) return impulseDur(P);
+      if (P.fx == 1) return strobeDur(P);
+      if (P.fx == 3) return solidDur(P);
+      return 0.0f;
+    }
+
+    // render one pixel of effect P at `elapsed` seconds into its step (deterministic; mirrors fxsim)
+    uint32_t computeColor(const FxParams& P, float elapsed, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal) {
       switch (P.fx) {
-        case 0: { // Puls — colour bands emitted from black; linear along a direction or radial from the centre.
-          // Frequenz = how often a new band is emitted; Geschwindigkeit = how fast it travels.
-          if (P.speed == 0) return 0;                            // no travel → nothing is emitted
-          float u, u0;
-          if (P.pmode == 1) {                                    // radial: distance from the centre, origin = centre
-            float dx = x - _cx, dy = y - _cy;
-            u = sqrtf(dx * dx + dy * dy); u0 = 0.0f;
-          } else {                                               // linear: projection along the direction, origin = near edge
-            float ax = cosf(P.angle * 3.14159265f / 180.0f), ay = sinf(P.angle * 3.14159265f / 180.0f);
-            u = x * ax + y * ay; u0 = (ax < 0 ? ax : 0) + (ay < 0 ? ay : 0);
+        case 0: { // Impuls — `count` colour bands launched every `interval`s, travelling out of black
+          if (P.speed == 0) return 0;
+          float d = pulseDist(P, x, y);
+          float v = (P.speed / 100.0f) * 0.6f;
+          float iv = P.interval * 0.1f; if (iv < 0.05f) iv = 0.05f;
+          float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
+          uint8_t Nn = P.count < 1 ? 1 : P.count;
+          float bestg = 2.0f;
+          for (uint8_t k = 0; k < Nn; k++) {                     // frontmost band covering this pixel
+            float tk = k * iv; if (elapsed < tk) continue;
+            float g = (v * (elapsed - tk) - d) / w;
+            if (g >= 0 && g <= 1.0f && g < bestg) bestg = g;
           }
-          float v = (P.speed / 100.0f) * 0.6f;                   // travel speed (proj per second-equiv)
-          float R = (P.hz < 1 ? 1.0f : (float)P.hz) * 0.15f;     // emission rate (= phaseRate); phase counts emissions
-          float L = v / R;                                       // spacing between successive bands
-          float s = phase - (u - u0) / L;                        // emission index of the band at this point
-          float f = s - floorf(s);                               // 0..1 within one band's cycle
-          float duty = P.rwidth / 100.0f;                        // Breite = lit fraction of each cycle (rest is gap)
-          if (duty < 0.02f) duty = 0.02f; else if (duty > 0.98f) duty = 0.98f;
-          uint32_t c = (f < duty) ? gradN(P, f / duty) : 0;      // gradient across the band, else gap (black)
-          float front = u0 - 0.04f + phase * L;                  // first band's leading edge (= u0 + v*t)
-          float rev = (front - u) / 0.06f + 0.5f;                // start-black reveal: bands stream out from the origin
-          if (rev < 0) rev = 0; else if (rev > 1) rev = 1;
-          return scaleCol(c, rev);
+          if (bestg > 1.0f) return 0;
+          return gradN(P, bestg);                                // gradient across the band (black→colour→black)
         }
-        case 1: { // Tube-Strobe (phase = elapsed flash cycles)
+        case 1: { // Tube-Strobe — frequency follows the keyframes; cpar colours across the tubes
+          KF defk[2]; const KF* K = P.keys; uint8_t n = P.kcount;
+          if (!n) { defk[0].t = 0; defk[0].v = 2; defk[1].t = 2; defk[1].v = 10; K = defk; n = 2; }   // = web DEF_HZKEYS
+          float phase = curvePhase(K, n, elapsed);
           long flash = (long)floorf(phase);
-          float inFrac = phase - (float)flash;            // 0..1 within the cycle
-          bool window = inFrac < (P.duty / 100.0f);
-          bool on;
-          if (P.mode == 0) on = window;
-          else if (P.mode == 1) on = window && (((tubeIdx + flash) & 1) == 0);
-          else on = window && ((flash % (tubeTotal ? tubeTotal : 1)) == tubeIdx);
-          return on ? P.col : 0;
+          if ((phase - (float)flash) >= (P.duty / 100.0f)) return 0;   // off part of the flash cycle
+          return strobeColor(P, tubeIdx, tubeTotal, flash);
         }
         case 2: { // Schwarm
           float N = chainTotal ? chainTotal : 1;
+          float phase = (P.speed / 100.0f) * 0.5f * N * elapsed;
           float pos = fmodf(phase, N); if (pos < 0) pos += N;
           float ci = P.dir ? (N - 1 - chainIdx) : chainIdx;
           float d = ci - pos; if (d < 0) d += N;
           float tl = (P.tail / 100.0f) * N; if (tl < 1) tl = 1;
           return scaleCol(P.col, expf(-d / tl));
         }
-        default: { // Solid / Atmen
+        default: { // Solid / Atmen — colour and breathe rate follow the keyframes over time
+          KF defk[2]; const KF* K = P.keys; uint8_t n = P.kcount;
+          if (!n) { defk[0].t = 0; defk[0].v = 0.3f; defk[0].c = 0x27C5FF; defk[1].t = 4; defk[1].v = 0.3f; defk[1].c = 0xFF5A3C; K = defk; n = 2; }   // = web DEF_SOLIDKEYS
+          uint32_t col = sampleKC(K, n, elapsed);
           float b = 1.0f;
-          if (P.breathe) b = 0.25f + 0.75f * (0.5f + 0.5f * sinf(phase));
-          return scaleCol(P.col, b);
+          if (P.breathe) { float ph = 6.2831853f * curvePhase(K, n, elapsed); b = 0.25f + 0.75f * (0.5f + 0.5f * sinf(ph)); }
+          return scaleCol(col, b);
         }
       }
     }
@@ -218,7 +317,9 @@ class Lichtnest : public Usermod {
       if (!_plActive || _stepCount == 0) return;
       uint32_t nowMs = millis();
       if (_trActive && (_trDurMs == 0 || nowMs - _trStart >= _trDurMs)) _trActive = false;
-      uint32_t durMs = _steps[_plIdx].durMs; if (durMs < 200) durMs = 200;
+      float sec = stepSeconds(_steps[_plIdx].p);   // impulse/strobe/solid auto-derive; else the file duration
+      uint32_t durMs = sec > 0.05f ? (uint32_t)(sec * 1000.0f) : _steps[_plIdx].durMs;
+      if (durMs < 200) durMs = 200;
       if (nowMs - _plStepStart >= durMs) jumpTo(_plLoop ? _plIdx : _plIdx + 1, true);
     }
 
@@ -227,9 +328,6 @@ class Lichtnest : public Usermod {
       if (!enabled || geoCount == 0) return;
       uint16_t chainTotal = strip.getLengthTotal();
       uint32_t nowMs = millis();
-      float dt = (_phLastMs == 0) ? 0.0f : (nowMs - _phLastMs) / 1000.0f;
-      if (dt > 0.5f) dt = 0.0f;                  // ignore big gaps (first frame / paused)
-      _phLastMs = nowMs;
 
       bool tr = _trActive; float trProg = 1.0f;
       if (tr) {
@@ -238,10 +336,11 @@ class Lichtnest : public Usermod {
         else trProg = (float)el / (float)_trDurMs;
       }
       FxParams& to = activeParams();
-      advancePhase(to, dt, chainTotal);
-      if (tr && _trFrom.fx != to.fx) advancePhase(_trFrom, dt, chainTotal);
-      float phTo = _ph[to.fx & 7];
-      float phFrom = tr ? _ph[_trFrom.fx & 7] : 0.0f;
+      // elapsed seconds into the current step (or the manual effect's looping timeline)
+      float elTo;
+      if (_plActive && _stepCount > 0) elTo = (nowMs - _plStepStart) / 1000.0f;
+      else { elTo = (nowMs - _manualStart) / 1000.0f; float D = stepSeconds(to); if (D > 0.05f) elTo = fmodf(elTo, D); }
+      float elFrom = tr ? stepSeconds(_trFrom) : 0.0f;   // outgoing effect rendered at its end (near black)
 
       for (uint8_t g = 0; g < geoCount; g++) {
         if (geoId[g] >= strip.getSegmentsNum()) continue;
@@ -255,15 +354,15 @@ class Lichtnest : public Usermod {
           uint32_t c;
           if (tr) {
             if (_trType == 1) {                                   // Schwarzblende: dim out then in
-              if (trProg < 0.5f) c = scaleCol(computeColor(_trFrom, phFrom, x, y, i, chainTotal, g, geoCount), 1.0f - trProg * 2.0f);
-              else               c = scaleCol(computeColor(to,      phTo,   x, y, i, chainTotal, g, geoCount), (trProg - 0.5f) * 2.0f);
+              if (trProg < 0.5f) c = scaleCol(computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount), 1.0f - trProg * 2.0f);
+              else               c = scaleCol(computeColor(to,      elTo,   x, y, i, chainTotal, g, geoCount), (trProg - 0.5f) * 2.0f);
             } else {                                              // Fade: crossfade two renders
-              uint32_t a = computeColor(_trFrom, phFrom, x, y, i, chainTotal, g, geoCount);
-              uint32_t b = computeColor(to,      phTo,   x, y, i, chainTotal, g, geoCount);
+              uint32_t a = computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount);
+              uint32_t b = computeColor(to,      elTo,   x, y, i, chainTotal, g, geoCount);
               c = blendCol(a, b, trProg);
             }
           } else {
-            c = computeColor(to, phTo, x, y, i, chainTotal, g, geoCount);
+            c = computeColor(to, elTo, x, y, i, chainTotal, g, geoCount);
           }
           strip.setPixelColor(i, c);
         }
@@ -292,7 +391,8 @@ class Lichtnest : public Usermod {
       if (o.isNull()) o = root.createNestedObject(F("lichtnest"));
       FxParams& A = activeParams();
       o["fx"] = A.fx;
-      o["ph"] = _ph[A.fx & 7];             // accumulated phase, so the UI preview stays phase-synced & jump-free
+      uint32_t elMs = (_plActive && _stepCount > 0) ? (millis() - _plStepStart) : (millis() - _manualStart);
+      o["ph"] = elMs / 1000.0f;            // seconds into the current step (effects render from elapsed)
       JsonObject p = o.createNestedObject("p");
       writeParams(p, A);
       // live playback state for the UI's player
@@ -304,7 +404,9 @@ class Lichtnest : public Usermod {
         pl["idx"] = _plIdx; pl["total"] = _stepCount;
         pl["fx"]  = _steps[_plIdx].p.fx;
         pl["nextFx"] = _steps[(_plIdx + 1) % _stepCount].p.fx;
-        uint32_t durMs = _steps[_plIdx].durMs; uint32_t el = millis() - _plStepStart;
+        float sec = stepSeconds(_steps[_plIdx].p);
+        uint32_t durMs = sec > 0.05f ? (uint32_t)(sec * 1000.0f) : _steps[_plIdx].durMs;   // auto-duration
+        uint32_t el = millis() - _plStepStart;
         pl["remaining"] = (durMs > el) ? (uint16_t)((durMs - el + 999) / 1000) : 0;
         pl["elapsedMs"] = (el < durMs) ? el : durMs;
         pl["durMs"] = durMs;
@@ -333,7 +435,8 @@ class Lichtnest : public Usermod {
         _plActive = false; _trActive = false;
         _manual.fx = o["fx"] | _manual.fx;
         parseParams(o["p"], _manual);
-        if (_manual.fx == 0) _ph[0] = 0;   // pulse always starts from black on activation
+        _manualStart = millis();            // restart the manual effect's timeline
+        _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;   // fresh Zufall-strobe state
       } else if (o.containsKey("p")) {
         parseParams(o["p"], activeParams());
       }
@@ -415,6 +518,26 @@ class Lichtnest : public Usermod {
       P.hz = p["hz"] | P.hz; P.duty = p["duty"] | P.duty; P.mode = p["mode"] | P.mode;
       P.tail = p["tail"] | P.tail; P.dir = p["dir"] | P.dir; P.tempo = p["tempo"] | P.tempo; P.breathe = p["breathe"] | P.breathe;
       P.rfin = p["rfin"] | P.rfin; P.rfout = p["rfout"] | P.rfout; P.rwidth = p["rwidth"] | P.rwidth; P.rgap = p["rgap"] | P.rgap;
+      P.count = p["count"] | P.count; P.interval = p["interval"] | P.interval; P.cpar = p["cpar"] | P.cpar;
+      JsonArray sc = p["scols"];                             // strobe palette
+      if (!sc.isNull()) { P.scount = 0; for (JsonVariant v : sc) { if (P.scount >= ZV_MAXPAL) break; if (v.is<JsonArray>() && v.size() >= 3) P.scols[P.scount++] = RGBW32((uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], 0); } }
+      // keyframes: strobe (fx1) uses hzKeys (t,v); solid (fx3) uses keys (t,v,c). Parse ONLY the
+      // field that belongs to this effect — a step's `p` may carry the other one as leftover bloat
+      // (addItem copies the whole param pool), and it must not clobber the effect's own curve.
+      bool solidKf = (P.fx == 3);
+      JsonArray kk = p[solidKf ? "keys" : "hzKeys"];
+      if (!kk.isNull()) {
+        P.kcount = 0;
+        for (JsonObject kf : kk) {
+          if (P.kcount >= ZV_MAXKF) break;
+          KF& k = P.keys[P.kcount++];
+          k.t = kf["t"] | 0.0f; k.v = kf["v"] | 0.0f;
+          if (solidKf) { JsonArray cc = kf["c"]; k.c = (!cc.isNull() && cc.size() >= 3) ? RGBW32((uint8_t)cc[0], (uint8_t)cc[1], (uint8_t)cc[2], 0) : 0xFFFFFF; }
+          else k.c = 0xFFFFFF;
+        }
+        // keep keyframes in time order (the web sim sorts on read; mirror it so curves match)
+        for (uint8_t i = 1; i < P.kcount; i++) { KF kf = P.keys[i]; int8_t j = (int8_t)i - 1; while (j >= 0 && P.keys[j].t > kf.t) { P.keys[j + 1] = P.keys[j]; j--; } P.keys[j + 1] = kf; }
+      }
     }
     static void writeParams(JsonObject& p, const FxParams& P) {
       addCol(p, "color", P.col);
@@ -427,6 +550,19 @@ class Lichtnest : public Usermod {
       p["hz"] = P.hz; p["duty"] = P.duty; p["mode"] = P.mode;
       p["tail"] = P.tail; p["dir"] = P.dir; p["tempo"] = P.tempo; p["breathe"] = P.breathe;
       p["rfin"] = P.rfin; p["rfout"] = P.rfout; p["rwidth"] = P.rwidth; p["rgap"] = P.rgap;
+      p["count"] = P.count; p["interval"] = P.interval; p["cpar"] = P.cpar;
+      if (P.scount) {                                       // strobe palette
+        JsonArray sc = p.createNestedArray("scols");
+        for (uint8_t i = 0; i < P.scount; i++) { JsonArray a = sc.createNestedArray(); a.add(cR(P.scols[i])); a.add(cG(P.scols[i])); a.add(cB(P.scols[i])); }
+      }
+      if (P.kcount) {                                       // keyframes under the fx's own field name
+        JsonArray kk = p.createNestedArray(P.fx == 3 ? "keys" : "hzKeys");
+        for (uint8_t i = 0; i < P.kcount; i++) {
+          JsonObject k = kk.createNestedObject();
+          k["t"] = P.keys[i].t; k["v"] = P.keys[i].v;
+          if (P.fx == 3) { JsonArray c = k.createNestedArray("c"); c.add(cR(P.keys[i].c)); c.add(cG(P.keys[i].c)); c.add(cB(P.keys[i].c)); }
+        }
+      }
     }
 
     // --- playlist engine helpers ---
@@ -441,8 +577,8 @@ class Lichtnest : public Usermod {
       } else {
         _trActive = false;
       }
-      _plIdx = (uint8_t)idx; _plStepStart = millis();
-      if (_steps[idx].p.fx == 0) _ph[0] = 0;   // pulse always starts from black when the step begins
+      _plIdx = (uint8_t)idx; _plStepStart = millis();   // elapsed = 0 → effects start from black
+      _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;   // fresh Zufall-strobe state per step
     }
 
     bool startPlaylist(const char* id, int fromIdx) {
@@ -458,7 +594,8 @@ class Lichtnest : public Usermod {
       File f = WLED_FS.open("/lichtnest_playlists.json", "r");
       if (!f) return false;
       size_t sz = f.size();
-      DynamicJsonDocument doc(sz + 2048);
+      size_t cap = sz * 4 + 3072; if (cap > 40960) cap = 40960;   // node-dense params need ~3-4× the byte size
+      DynamicJsonDocument doc(cap);
       DeserializationError err = deserializeJson(doc, f);
       f.close();
       if (err) return false;
@@ -517,7 +654,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.7.0";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.8.8";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);

@@ -1,11 +1,13 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { playlists, loadPlaylists, savePlaylists, playPlaylist, stopPlaylist, isPlaying, playlistProgress, fxActions, lichtnest, rgbToHex, hexToRgb } from '../wled.js'
+import { playlists, loadPlaylists, savePlaylists, playPlaylist, stopPlaylist, isPlaying, playlistProgress, stepDurationMs, fxActions, lichtnest, rgbToHex, hexToRgb } from '../wled.js'
 import { EFFECTS, effectById } from '../effects.js'
 import { fadeCols, fadeCw } from '../fxsim.js'
 import { confirmDialog } from '../confirm.js'
 import PlaylistPlayer from '../components/PlaylistPlayer.vue'
 import GradientEditor from '../components/GradientEditor.vue'
+import KeyframeList from '../components/KeyframeList.vue'
+import ColorList from '../components/ColorList.vue'
 import MiniPlan from '../components/MiniPlan.vue'
 import TexturePreview from '../components/TexturePreview.vue'
 
@@ -13,6 +15,7 @@ const view = ref('list')
 const editId = ref(null)
 const expanded = ref(null) // uid of the expanded step
 const stepPvMode = ref('texture') // step preview: 'tubes' | 'texture'
+const ovPvMode = ref('tubes')     // overall (now-playing) preview: 'tubes' | 'texture'
 const stepRestart = ref(0)        // bump to replay the step preview from animation start
 const now = ref(Date.now())
 let timer = null
@@ -21,10 +24,12 @@ onUnmounted(() => clearInterval(timer))
 
 const open = computed(() => playlists.list.find((p) => p.id === editId.value) || null)
 const prog = computed(() => (open.value && isPlaying(open.value.id)) ? playlistProgress(now.value) : null)
+// the step actually playing right now — use its full params for the overall preview
+const curStep = computed(() => (open.value && prog.value) ? open.value.items[prog.value.idx] : null)
 
 function uid () { return 'i' + Date.now().toString(36) + Math.floor(Math.random() * 1e4) }
 function newPid () { return 'pl' + Date.now().toString(36) }
-function totalDur (pl) { return (pl.items || []).reduce((s, it) => s + (it.dur || 0), 0) }
+function totalDur (pl) { return (pl.items || []).reduce((s, it) => s + stepDurationMs(it) / 1000, 0) }
 function meta (pl) { return `${(pl.items || []).length} Schritte · ${Math.round(totalDur(pl))}s` }
 
 // ---- playlist CRUD ----
@@ -38,12 +43,27 @@ function rename (e) { if (open.value) { open.value.name = e.target.value; savePl
 function setDefault (pl) { playlists.list.forEach((p) => { p.default = (p.id === pl.id) ? !p.default : false }); savePlaylists() }
 
 // ---- item CRUD ----
-function addItem (fx) { if (!open.value) return; open.value.items.push({ uid: uid(), fx, p: { ...lichtnest.p }, dur: 30, trType: 'fade', trDur: 1 }); savePlaylists() }
+// only the params this effect actually uses, with defaults baked in — keeps the file
+// small and guarantees device + preview render the step identically even for untouched params
+function stepParams (fx) {
+  const eff = effectById(fx)
+  const pool = lichtnest.p, out = {}
+  for (const pr of (eff.params || [])) {
+    if (pr.type === 'gradient') { out.cols = fadeCols(pool); out.cw = fadeCw(pool); continue }
+    let v = pool[pr.key]
+    if (v == null) v = pr.def != null ? pr.def : (pr.options ? pr.options[0].v : undefined)
+    if (v == null) { if (pr.type === 'toggle') v = true; else if (pr.type === 'color') v = [39, 197, 255] }
+    if (v !== undefined) out[pr.key] = v
+  }
+  return JSON.parse(JSON.stringify(out))   // deep copy — steps must not share arrays with the editor pool
+}
+function addItem (fx) { if (!open.value) return; open.value.items.push({ uid: uid(), fx, p: stepParams(fx), dur: 30, trType: 'fade', trDur: 1 }); savePlaylists() }
 async function removeItem (it) {
   if (!(await confirmDialog({ title: 'Schritt entfernen?', body: `${effectById(it.fx).name} wird aus der Playlist entfernt.`, confirmLabel: 'Entfernen' }))) return
   open.value.items = open.value.items.filter((x) => x.uid !== it.uid); savePlaylists()
 }
 function bumpDur (it, d) { it.dur = Math.max(1, (it.dur || 10) + d); savePlaylists() }
+const autoDur = (it) => (stepDurationMs(it) / 1000).toFixed(1)   // impulse: auto-derived step length
 function setTr (it, type) { it.trType = type; savePlaylists() }
 function bumpTrDur (it, d) { it.trDur = Math.max(0, +(((it.trDur || 0) + d)).toFixed(1)); savePlaylists() }
 
@@ -61,7 +81,10 @@ function setGradStep (it, v) {
   if (isCurrent(it)) fxActions.setStepParams(v)
   savePlaylists()
 }
-const rangeVal = (it, p) => { const v = it.p[p.key]; return typeof v === 'number' ? v : (p.min ?? 0) }
+const keysValStep = (it, p) => it.p[p.key] || p.def || []
+const setKeysStep = (it, p, arr) => setParam(it, p.key, arr)
+const rangeVal = (it, p) => { const v = it.p[p.key]; return typeof v === 'number' ? v : (p.def ?? p.min ?? 0) }
+const dispVal = (it, p) => { const v = rangeVal(it, p); return p.mul ? (v * p.mul).toFixed(1) : v }
 const selVal = (it, p) => { const v = it.p[p.key]; return v != null ? v : p.options[0].v }
 const colHex = (it, k) => rgbToHex(it.p[k] || [255, 255, 255])
 const toggleVal = (it, p) => !!it.p[p.key]
@@ -70,6 +93,8 @@ const toggleVal = (it, p) => !!it.p[p.key]
 async function play (pl) { await playPlaylist(pl) }
 async function stop () { await stopPlaylist() }
 function playFrom (i) { playPlaylist(open.value, i); expanded.value = open.value.items[i]?.uid }
+// restart the step preview; if this step is the one currently playing, also restart it on the device
+function restartStep (it, i) { stepRestart.value++; if (isCurrent(it)) playFrom(i) }
 
 // ---- drag reorder ----
 const drag = reactive({ id: null, startIndex: 0, target: 0, dy: 0, h: 64 })
@@ -192,6 +217,15 @@ function confirmImport () {
 
       <!-- now playing -->
       <PlaylistPlayer v-if="prog" style="margin-bottom:10px" />
+      <!-- overall preview of the currently playing animation (synced to the running step) -->
+      <div v-if="prog" class="ovprev">
+        <MiniPlan v-if="ovPvMode === 'tubes'" :fx="curStep?.fx" :p="curStep?.p" class="ovcanvas" />
+        <TexturePreview v-else :fx="curStep?.fx" :p="curStep?.p" class="ovcanvas" />
+        <div class="pvtoggle2">
+          <button :class="{ on: ovPvMode === 'tubes' }" @click="ovPvMode = 'tubes'">Tubes</button>
+          <button :class="{ on: ovPvMode === 'texture' }" @click="ovPvMode = 'texture'">Textur</button>
+        </div>
+      </div>
       <div class="meta mono">{{ meta(open) }} · Live-Änderungen wirken sofort</div>
 
       <!-- steps -->
@@ -201,7 +235,8 @@ function confirmImport () {
           <span class="idx mono">{{ String(i + 1).padStart(2, '0') }}</span>
           <span class="prev" :style="{ background: effectById(it.fx).preview }" />
           <button class="iname" @click="expanded = expanded === it.uid ? null : it.uid">{{ effectById(it.fx).name }}</button>
-          <span class="dur mono">
+          <span v-if="it.fx === 0 || it.fx === 1 || it.fx === 3" class="dur mono auto" :title="it.fx === 0 ? 'Dauer läuft automatisch aus (Anzahl × Abstand + Auslaufzeit)' : 'Dauer endet beim letzten Keyframe'">~{{ autoDur(it) }}s</span>
+          <span v-else class="dur mono">
             <button @click="bumpDur(it, -5)">−</button><b>{{ it.dur }}s</b><button @click="bumpDur(it, 5)">+</button>
           </span>
           <button class="pstep" :class="{ on: isCurrent(it) }" title="Ab hier abspielen" @click="playFrom(i)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z" /></svg></button>
@@ -211,9 +246,9 @@ function confirmImport () {
         <!-- expanded: transition + live params -->
         <div v-if="expanded === it.uid" class="iexp">
           <div class="steppv">
-            <MiniPlan v-if="stepPvMode === 'tubes'" :fx="it.fx" :p="it.p" local :restart-key="stepRestart" class="spvcanvas" />
-            <TexturePreview v-else :fx="it.fx" :p="it.p" local :restart-key="stepRestart" class="spvcanvas" />
-            <button class="pvrestart2" title="Animation neu starten" @click="stepRestart++">
+            <MiniPlan v-if="stepPvMode === 'tubes'" :fx="it.fx" :p="it.p" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
+            <TexturePreview v-else :fx="it.fx" :p="it.p" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
+            <button class="pvrestart2" title="Animation neu starten" @click="restartStep(it, i)">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4" /><path d="M3 4.5V10h5.5" /></svg>
             </button>
             <div class="pvtoggle2">
@@ -234,10 +269,12 @@ function confirmImport () {
           </div>
           <div class="plbl mono">PARAMETER<span v-if="isCurrent(it)" class="livetag"> · LIVE</span></div>
           <div v-for="p in effectById(it.fx).params.filter(pp => !pp.show || pp.show(it.p))" :key="p.key" class="ctl">
-            <div class="crow"><span class="cl">{{ p.name }}</span><span v-if="p.type === 'range'" class="cv mono">{{ rangeVal(it, p) }}{{ p.unit || '' }}</span></div>
+            <div class="crow"><span class="cl">{{ p.name }}</span><span v-if="p.type === 'range'" class="cv mono">{{ dispVal(it, p) }}{{ p.unit || '' }}</span></div>
             <input v-if="p.type === 'range'" type="range" :min="p.min" :max="p.max" :value="rangeVal(it, p)" @input="setParam(it, p.key, +$event.target.value)" style="width:100%;height:22px">
             <input v-else-if="p.type === 'color'" type="color" :value="colHex(it, p.key)" @input="setParam(it, p.key, hexToRgb($event.target.value))" class="color">
             <GradientEditor v-else-if="p.type === 'gradient'" :cols="gradColsOf(it)" :cw="gradCwOf(it)" @update="setGradStep(it, $event)" />
+            <KeyframeList v-else-if="p.type === 'keyframes'" :model-value="keysValStep(it, p)" :v-min="p.vMin" :v-max="p.vMax" :v-step="p.vStep || 1" :v-unit="p.vUnit || ''" :label="p.label || 'Frequenz'" :with-color="p.withColor || false" @update="setKeysStep(it, p, $event)" />
+            <ColorList v-else-if="p.type === 'colorlist'" :model-value="keysValStep(it, p)" @update="setKeysStep(it, p, $event)" />
             <div v-else-if="p.type === 'select'" class="seg">
               <button v-for="o in p.options" :key="o.v" :class="{ on: selVal(it, p) === o.v }" @click="setParam(it, p.key, o.v)">{{ o.l }}</button>
             </div>
@@ -312,12 +349,15 @@ function confirmImport () {
 .dur { display: flex; align-items: center; gap: 5px; flex: none; }
 .dur button { width: 24px; height: 24px; border-radius: 7px; background: var(--inset); border: 1px solid var(--line); color: var(--text2); font-size: 14px; font-weight: 700; cursor: pointer; }
 .dur b { font-size: 12px; color: var(--text); min-width: 30px; text-align: center; }
+.dur.auto { font-size: 12px; color: var(--accent); font-weight: 600; }
 .pstep { flex: none; width: 28px; height: 28px; border-radius: 8px; background: var(--inset); border: 1px solid var(--line); color: var(--accent); cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .pstep.on { background: var(--accent); color: #1a1206; border-color: transparent; }
 
 .iexp { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.06); }
 .steppv { position: relative; height: 110px; border-radius: 12px; overflow: hidden; background: var(--inset); border: 1px solid var(--line); margin-bottom: 12px; }
 .spvcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ovprev { position: relative; height: 150px; border-radius: 16px; overflow: hidden; background: var(--inset); border: 1px solid var(--line2); margin-bottom: 10px; }
+.ovcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .pvtoggle2 { position: absolute; top: 6px; right: 6px; display: flex; gap: 2px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 8px; padding: 2px; z-index: 2; }
 .pvtoggle2 button { border: none; background: transparent; color: var(--muted2); font-size: 10px; font-weight: 700; padding: 3px 7px; border-radius: 5px; cursor: pointer; }
 .pvtoggle2 button.on { background: var(--accent); color: #1a1206; }
