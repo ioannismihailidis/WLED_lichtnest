@@ -57,7 +57,7 @@ function stepParams (fx) {
   }
   return JSON.parse(JSON.stringify(out))   // deep copy — steps must not share arrays with the editor pool
 }
-function addItem (fx) { if (!open.value) return; open.value.items.push({ uid: uid(), fx, p: stepParams(fx), dur: 30, trType: 'fade', trDur: 1 }); savePlaylists() }
+function addItem (fx) { if (!open.value) return; open.value.items.push({ uid: uid(), fx, p: stepParams(fx), name: '', note: '', delay: 0, dur: 30, trType: 'fade', trDur: 0 }); savePlaylists() }
 async function removeItem (it) {
   if (!(await confirmDialog({ title: 'Schritt entfernen?', body: `${effectById(it.fx).name} wird aus der Playlist entfernt.`, confirmLabel: 'Entfernen' }))) return
   open.value.items = open.value.items.filter((x) => x.uid !== it.uid); savePlaylists()
@@ -66,6 +66,10 @@ function bumpDur (it, d) { it.dur = Math.max(1, (it.dur || 10) + d); savePlaylis
 const autoDur = (it) => (stepDurationMs(it) / 1000).toFixed(1)   // impulse: auto-derived step length
 function setTr (it, type) { it.trType = type; savePlaylists() }
 function bumpTrDur (it, d) { it.trDur = Math.max(0, +(((it.trDur || 0) + d)).toFixed(1)); savePlaylists() }
+function bumpDelay (it, d) { it.delay = Math.max(0, +(((it.delay || 0) + d)).toFixed(1)); savePlaylists() }
+function setStepName (it, v) { it.name = v; savePlaylists() }
+function setStepNote (it, v) { it.note = v; savePlaylists() }
+const stepTitle = (it) => (it.name && it.name.trim()) ? it.name : effectById(it.fx).name
 
 // ---- live param editing of a step (applies live if it's the current playing step) ----
 function isCurrent (it) { return prog.value && open.value.items[prog.value.idx] && open.value.items[prog.value.idx].uid === it.uid }
@@ -219,8 +223,8 @@ function confirmImport () {
       <PlaylistPlayer v-if="prog" style="margin-bottom:10px" />
       <!-- overall preview of the currently playing animation (synced to the running step) -->
       <div v-if="prog" class="ovprev">
-        <MiniPlan v-if="ovPvMode === 'tubes'" :fx="curStep?.fx" :p="curStep?.p" class="ovcanvas" />
-        <TexturePreview v-else :fx="curStep?.fx" :p="curStep?.p" class="ovcanvas" />
+        <MiniPlan v-if="ovPvMode === 'tubes'" :fx="curStep?.fx" :p="curStep?.p" :delay="curStep?.delay || 0" class="ovcanvas" />
+        <TexturePreview v-else :fx="curStep?.fx" :p="curStep?.p" :delay="curStep?.delay || 0" class="ovcanvas" />
         <div class="pvtoggle2">
           <button :class="{ on: ovPvMode === 'tubes' }" @click="ovPvMode = 'tubes'">Tubes</button>
           <button :class="{ on: ovPvMode === 'texture' }" @click="ovPvMode = 'texture'">Textur</button>
@@ -234,7 +238,8 @@ function confirmImport () {
           <div class="grip" @pointerdown="startDrag(it, i, $event)" title="Ziehen zum Sortieren"><svg width="12" height="18" viewBox="0 0 10 16"><g fill="currentColor"><circle cx="3" cy="3" r="1.3" /><circle cx="7" cy="3" r="1.3" /><circle cx="3" cy="8" r="1.3" /><circle cx="7" cy="8" r="1.3" /><circle cx="3" cy="13" r="1.3" /><circle cx="7" cy="13" r="1.3" /></g></svg></div>
           <span class="idx mono">{{ String(i + 1).padStart(2, '0') }}</span>
           <span class="prev" :style="{ background: effectById(it.fx).preview }" />
-          <button class="iname" @click="expanded = expanded === it.uid ? null : it.uid">{{ effectById(it.fx).name }}</button>
+          <button class="iname" @click="expanded = expanded === it.uid ? null : it.uid">{{ stepTitle(it) }}<span v-if="it.name && it.name.trim()" class="ifx mono"> · {{ effectById(it.fx).name }}</span></button>
+          <span v-if="it.delay > 0" class="dur mono wait" title="Pause vor dem Effekt">⏸ {{ it.delay }}s</span>
           <span v-if="it.fx === 0 || it.fx === 1 || it.fx === 3" class="dur mono auto" :title="it.fx === 0 ? 'Dauer läuft automatisch aus (Anzahl × Abstand + Auslaufzeit)' : 'Dauer endet beim letzten Keyframe'">~{{ autoDur(it) }}s</span>
           <span v-else class="dur mono">
             <button @click="bumpDur(it, -5)">−</button><b>{{ it.dur }}s</b><button @click="bumpDur(it, 5)">+</button>
@@ -242,12 +247,13 @@ function confirmImport () {
           <button class="pstep" :class="{ on: isCurrent(it) }" title="Ab hier abspielen" @click="playFrom(i)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z" /></svg></button>
           <button class="ic del sm" @click="removeItem(it)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M9 7V5h6v2M7 7l1 12h8l1-12" /></svg></button>
         </div>
+        <div v-if="it.note && it.note.trim() && expanded !== it.uid" class="inote mono">{{ it.note }}</div>
 
         <!-- expanded: transition + live params -->
         <div v-if="expanded === it.uid" class="iexp">
           <div class="steppv">
-            <MiniPlan v-if="stepPvMode === 'tubes'" :fx="it.fx" :p="it.p" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
-            <TexturePreview v-else :fx="it.fx" :p="it.p" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
+            <MiniPlan v-if="stepPvMode === 'tubes'" :fx="it.fx" :p="it.p" :delay="it.delay || 0" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
+            <TexturePreview v-else :fx="it.fx" :p="it.p" :delay="it.delay || 0" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
             <button class="pvrestart2" title="Animation neu starten" @click="restartStep(it, i)">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4" /><path d="M3 4.5V10h5.5" /></svg>
             </button>
@@ -255,6 +261,18 @@ function confirmImport () {
               <button :class="{ on: stepPvMode === 'tubes' }" @click="stepPvMode = 'tubes'">Tubes</button>
               <button :class="{ on: stepPvMode === 'texture' }" @click="stepPvMode = 'texture'">Textur</button>
             </div>
+          </div>
+          <div class="frow">
+            <span class="flbl">Name</span>
+            <input class="ftxt" type="text" :value="it.name || ''" :placeholder="effectById(it.fx).name" @change="setStepName(it, $event.target.value)">
+          </div>
+          <div class="frow">
+            <span class="flbl">Kommentar</span>
+            <input class="ftxt" type="text" :value="it.note || ''" placeholder="Notiz zu diesem Schritt…" @change="setStepNote(it, $event.target.value)">
+          </div>
+          <div class="frow">
+            <span class="flbl">Pause davor</span>
+            <span class="dur mono"><button @click="bumpDelay(it, -0.5)">−</button><b>{{ it.delay || 0 }}s</b><button @click="bumpDelay(it, 0.5)">+</button></span>
           </div>
           <div class="frow">
             <span class="flbl">Übergang</span>
@@ -350,6 +368,10 @@ function confirmImport () {
 .dur button { width: 24px; height: 24px; border-radius: 7px; background: var(--inset); border: 1px solid var(--line); color: var(--text2); font-size: 14px; font-weight: 700; cursor: pointer; }
 .dur b { font-size: 12px; color: var(--text); min-width: 30px; text-align: center; }
 .dur.auto { font-size: 12px; color: var(--accent); font-weight: 600; }
+.dur.wait { font-size: 12px; color: var(--text2); font-weight: 600; }
+.ifx { font-size: 11px; font-weight: 600; color: var(--muted2); }
+.inote { margin: 4px 2px 0 30px; font-size: 11.5px; color: var(--muted2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ftxt { flex: 1; min-width: 0; max-width: 62%; background: var(--inset); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font-size: 12.5px; color: var(--text); }
 .pstep { flex: none; width: 28px; height: 28px; border-radius: 8px; background: var(--inset); border: 1px solid var(--line); color: var(--accent); cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .pstep.on { background: var(--accent); color: #1a1206; border-color: transparent; }
 

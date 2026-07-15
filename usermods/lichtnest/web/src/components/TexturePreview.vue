@@ -9,10 +9,11 @@ import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulse
 
 // optional fx/p override (e.g. a playlist step); `local` free-runs its own clock;
 // `timeline` = step length (s) for non-impulse effects; bumping `restartKey` replays from 0
-const props = defineProps({ fx: { type: Number, default: null }, p: { type: Object, default: null }, local: { type: Boolean, default: false }, restartKey: { type: Number, default: 0 }, timeline: { type: Number, default: 8 } })
+const props = defineProps({ fx: { type: Number, default: null }, p: { type: Object, default: null }, delay: { type: Number, default: 0 }, local: { type: Boolean, default: false }, restartKey: { type: Number, default: 0 }, timeline: { type: Number, default: 8 } })
 // no props + non-local = live device mirror -> playing step (full file params) while a playlist runs
 const efx = () => (props.fx != null ? props.fx : (props.local ? lichtnest.fx : liveFxP().fx))
 const ep = () => (props.p != null ? props.p : (props.local ? lichtnest.p : liveFxP().p))
+const edelay = () => (props.fx != null ? props.delay : (props.local ? 0 : (liveFxP().delay || 0)))
 const CORNERS = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }]
 // radial centre = centroid of the placed tubes (matches the firmware's computeCenter)
 function centre () {
@@ -25,17 +26,21 @@ const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1
 function frame (fx, p, umax) {
   const now = performance.now(); let dt = lts ? (now - lts) / 1000 : 0; lts = now
   if (!(dt > 0 && dt < 1)) dt = 0
+  const delay = edelay()
   let elapsed
   if (!props.local && wled.pl.active && wled.pl.durMs > 0) {   // overall preview: follow the running step
     elapsed = Math.min(wled.pl.durMs, wled.pl.elapsedMs + (Date.now() - wled.pl.syncAt)) / 1000
   } else {
-    lelapsed = (lelapsed + dt) % stepDur(fx, p, umax); elapsed = lelapsed
+    lelapsed = (lelapsed + dt) % (delay + stepDur(fx, p, umax)); elapsed = lelapsed
   }
+  elapsed -= delay
+  const wait = elapsed < 0                                     // in the pause before the effect
+  if (wait) elapsed = 0
   let phase
   if (fx === 1) phase = strobePhaseAt(p, elapsed)
   else if (fx === 3) phase = solidPhaseAt(p, elapsed)
   else { lph += dt * phaseRate(fx, p, wled.info.leds?.count || 1); phase = lph }
-  return { elapsed, phase }
+  return { elapsed, phase, wait }
 }
 watch(() => props.restartKey, () => { lph = 0; lts = 0; lelapsed = 0 })
 
@@ -62,7 +67,7 @@ function draw () {
   const fx = efx(), pp = ep()
   const [cx, cy] = centre()
   const umax = fx === 0 ? impulseUmax(pp, CORNERS, cx, cy) : 1
-  const { elapsed, phase: t } = frame(fx, pp, umax)
+  const { elapsed, phase: t, wait } = frame(fx, pp, umax)
   const positions = fx === 0 ? impulsePositions(pp, elapsed) : null
   const rp = fx === 3 ? { ...pp, color: solidColorAt(pp, elapsed) } : pp   // solid: colour over time
   const img = bctx.createImageData(bw, bh)
@@ -71,7 +76,7 @@ function draw () {
       const x = (gx + 0.5) / bw, y = (gy + 0.5) / bh
       const idx = Math.round(x * (total - 1))                    // virtual chain index for schwarm
       const tubeIdx = Math.min(N - 1, Math.floor(x * N))         // map x to a real tube (strobe is per-tube)
-      const col = !on ? [22, 24, 28]
+      const col = (!on || wait) ? [22, 24, 28]
         : (fx === 0 ? impulseColorAt(positions, pp, impulseDist(pp, x, y, cx, cy)) : fxColor(fx, rp, x, y, idx, total, tubeIdx, N, t, cx, cy))
       const o = (gy * bw + gx) * 4
       img.data[o] = col[0] | 0; img.data[o + 1] = col[1] | 0; img.data[o + 2] = col[2] | 0; img.data[o + 3] = 255

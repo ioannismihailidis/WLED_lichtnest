@@ -6,29 +6,34 @@ import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulse
 
 // optional fx/p override (e.g. a playlist step); `local` free-runs its own clock;
 // `timeline` = step length (s) for non-impulse effects; bumping `restartKey` replays from 0
-const props = defineProps({ fx: { type: Number, default: null }, p: { type: Object, default: null }, local: { type: Boolean, default: false }, restartKey: { type: Number, default: 0 }, timeline: { type: Number, default: 8 } })
+const props = defineProps({ fx: { type: Number, default: null }, p: { type: Object, default: null }, delay: { type: Number, default: 0 }, local: { type: Boolean, default: false }, restartKey: { type: Number, default: 0 }, timeline: { type: Number, default: 8 } })
 // no props + non-local = live device mirror -> playing step (full file params) while a playlist runs
 const efx = () => (props.fx != null ? props.fx : (props.local ? lichtnest.fx : liveFxP().fx))
 const ep = () => (props.p != null ? props.p : (props.local ? lichtnest.p : liveFxP().p))
+const edelay = () => (props.fx != null ? props.delay : (props.local ? 0 : (liveFxP().delay || 0)))
 let lph = 0, lts = 0, lelapsed = 0
 // step length: impulse auto-derives from Anzahl×Abstand+Auslaufzeit, else the given timeline
 const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1 ? strobeDuration(p) : fx === 3 ? solidDuration(p) : Math.max(0.1, props.timeline))
 // elapsed since the (loop/step) start — playback-synced when this is the live overall preview;
-// impulse renders from positions(elapsed), strobe from strobePhaseAt(elapsed); both restart at 0
+// a step's pause (delay) renders dark, the effect starts at elapsed 0 after it
 function frame (fx, p, umax) {
   const now = performance.now(); let dt = lts ? (now - lts) / 1000 : 0; lts = now
   if (!(dt > 0 && dt < 1)) dt = 0
+  const delay = edelay()
   let elapsed
   if (!props.local && wled.pl.active && wled.pl.durMs > 0) {   // overall preview: follow the running step
     elapsed = Math.min(wled.pl.durMs, wled.pl.elapsedMs + (Date.now() - wled.pl.syncAt)) / 1000
   } else {
-    lelapsed = (lelapsed + dt) % stepDur(fx, p, umax); elapsed = lelapsed
+    lelapsed = (lelapsed + dt) % (delay + stepDur(fx, p, umax)); elapsed = lelapsed
   }
+  elapsed -= delay
+  const wait = elapsed < 0                                     // in the pause before the effect
+  if (wait) elapsed = 0
   let phase
   if (fx === 1) phase = strobePhaseAt(p, elapsed)
   else if (fx === 3) phase = solidPhaseAt(p, elapsed)
   else { lph += dt * phaseRate(fx, p, wled.info.leds?.count || 1); phase = lph }
-  return { elapsed, phase }
+  return { elapsed, phase, wait }
 }
 watch(() => props.restartKey, () => { lph = 0; lts = 0; lelapsed = 0 })
 
@@ -62,7 +67,7 @@ function draw () {
   const fx = efx(), p = ep()
   let umax = 1
   if (fx === 0) { const pts = []; for (const tb of list) pts.push({ x: tb.x1, y: tb.y1 }, { x: tb.x2, y: tb.y2 }); umax = impulseUmax(p, pts, cx, cy) }
-  const { elapsed, phase: t } = frame(fx, p, umax)
+  const { elapsed, phase: t, wait } = frame(fx, p, umax)
   const positions = fx === 0 ? impulsePositions(p, elapsed) : null
   const rp = fx === 3 ? { ...p, color: solidColorAt(p, elapsed) } : p   // solid: colour over time
   list.forEach((tube, ti) => {
@@ -70,7 +75,7 @@ function draw () {
     for (let i = 0; i < n; i++) {
       const f = n > 1 ? i / (n - 1) : 0
       const x = tube.x1 + (tube.x2 - tube.x1) * f, y = tube.y1 + (tube.y2 - tube.y1) * f
-      const col = !on ? [28, 30, 34]
+      const col = (!on || wait) ? [28, 30, 34]
         : (fx === 0 ? impulseColorAt(positions, p, impulseDist(p, x, y, cx, cy)) : fxColor(fx, rp, x, y, tube.start + i, total, ti, list.length, t, cx, cy))
       ctx.fillStyle = rgbCss(col)
       ctx.beginPath(); ctx.arc(ox + x * cw, oy + y * ch, 1.5, 0, 6.283); ctx.fill()

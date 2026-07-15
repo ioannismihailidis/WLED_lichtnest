@@ -57,6 +57,7 @@ struct FxParams {
 struct PlStep {
   FxParams p;
   uint32_t durMs   = 10000;
+  uint32_t delayMs = 0;        // pause (black) before the effect starts
   uint8_t  trType  = 0;        // 0 fade, 1 black (Schwarzblende)
   uint32_t trDurMs = 0;
 };
@@ -319,6 +320,7 @@ class Lichtnest : public Usermod {
       if (_trActive && (_trDurMs == 0 || nowMs - _trStart >= _trDurMs)) _trActive = false;
       float sec = stepSeconds(_steps[_plIdx].p);   // impulse/strobe/solid auto-derive; else the file duration
       uint32_t durMs = sec > 0.05f ? (uint32_t)(sec * 1000.0f) : _steps[_plIdx].durMs;
+      durMs += _steps[_plIdx].delayMs;             // pause before the effect counts into the step
       if (durMs < 200) durMs = 200;
       if (nowMs - _plStepStart >= durMs) jumpTo(_plLoop ? _plIdx : _plIdx + 1, true);
     }
@@ -336,9 +338,13 @@ class Lichtnest : public Usermod {
         else trProg = (float)el / (float)_trDurMs;
       }
       FxParams& to = activeParams();
-      // elapsed seconds into the current step (or the manual effect's looping timeline)
-      float elTo;
-      if (_plActive && _stepCount > 0) elTo = (nowMs - _plStepStart) / 1000.0f;
+      // elapsed seconds into the current step (or the manual effect's looping timeline);
+      // a step's pause (delay) renders black before the effect's own timeline starts
+      float elTo; bool toWait = false;
+      if (_plActive && _stepCount > 0) {
+        elTo = (nowMs - _plStepStart) / 1000.0f - _steps[_plIdx].delayMs / 1000.0f;
+        if (elTo < 0.0f) { toWait = true; elTo = 0.0f; }
+      }
       else { elTo = (nowMs - _manualStart) / 1000.0f; float D = stepSeconds(to); if (D > 0.05f) elTo = fmodf(elTo, D); }
       float elFrom = tr ? stepSeconds(_trFrom) : 0.0f;   // outgoing effect rendered at its end (near black)
 
@@ -352,17 +358,17 @@ class Lichtnest : public Usermod {
           float f = (len > 1) ? (float)(i - start) / (len - 1) : 0.0f;
           float x = lerpf(gx1[g], gx2[g], f), y = lerpf(gy1[g], gy2[g], f);
           uint32_t c;
+          uint32_t cTo = toWait ? 0 : computeColor(to, elTo, x, y, i, chainTotal, g, geoCount);   // pause -> black
           if (tr) {
             if (_trType == 1) {                                   // Schwarzblende: dim out then in
               if (trProg < 0.5f) c = scaleCol(computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount), 1.0f - trProg * 2.0f);
-              else               c = scaleCol(computeColor(to,      elTo,   x, y, i, chainTotal, g, geoCount), (trProg - 0.5f) * 2.0f);
+              else               c = scaleCol(cTo, (trProg - 0.5f) * 2.0f);
             } else {                                              // Fade: crossfade two renders
               uint32_t a = computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount);
-              uint32_t b = computeColor(to,      elTo,   x, y, i, chainTotal, g, geoCount);
-              c = blendCol(a, b, trProg);
+              c = blendCol(a, cTo, trProg);
             }
           } else {
-            c = computeColor(to, elTo, x, y, i, chainTotal, g, geoCount);
+            c = cTo;
           }
           strip.setPixelColor(i, c);
         }
@@ -406,6 +412,7 @@ class Lichtnest : public Usermod {
         pl["nextFx"] = _steps[(_plIdx + 1) % _stepCount].p.fx;
         float sec = stepSeconds(_steps[_plIdx].p);
         uint32_t durMs = sec > 0.05f ? (uint32_t)(sec * 1000.0f) : _steps[_plIdx].durMs;   // auto-duration
+        durMs += _steps[_plIdx].delayMs;
         uint32_t el = millis() - _plStepStart;
         pl["remaining"] = (durMs > el) ? (uint16_t)((durMs - el + 999) / 1000) : 0;
         pl["elapsedMs"] = (el < durMs) ? el : durMs;
@@ -619,6 +626,7 @@ class Lichtnest : public Usermod {
         s.p.fx = it["fx"] | 3;
         parseParams(it["p"], s.p);
         float durS = it["dur"] | 10.0f; s.durMs = (uint32_t)(durS * 1000.0f);
+        float delS = it["delay"] | 0.0f; s.delayMs = delS > 0 ? (uint32_t)(delS * 1000.0f) : 0;
         const char* tr = it["trType"] | "fade";
         s.trType = (strcmp(tr, "black") == 0) ? 1 : 0;
         float trS = it["trDur"] | 0.0f; s.trDurMs = (uint32_t)(trS * 1000.0f);
@@ -654,7 +662,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.8.8";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.8.9";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);

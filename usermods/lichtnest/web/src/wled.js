@@ -460,16 +460,18 @@ async function flushPlaylists () {
 let offTimer = null
 const offItems = (pl) => (pl ? (pl.items || []).filter((it) => it.fx != null) : [])
 const offFind = () => playlists.list.find((p) => p.id === wled.pl.id)
-// step length in ms: impulse steps auto-derive from Anzahl×Abstand+Auslaufzeit, else the set duration
+// step length in ms: pause (delay) + effect duration — impulse/strobe/solid auto-derive,
+// everything else uses the set duration
 export function stepDurationMs (it) {
   const p = it.p || {}
-  if (it.fx === 1) return Math.max(200, strobeDuration(p) * 1000)   // strobe: ends at the last keyframe
-  if (it.fx === 3) return Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
-  if (it.fx !== 0) return Math.max(1, it.dur || 10) * 1000
+  const delayMs = Math.max(0, (it.delay || 0) * 1000)
+  if (it.fx === 1) return delayMs + Math.max(200, strobeDuration(p) * 1000)   // strobe: ends at the last keyframe
+  if (it.fx === 3) return delayMs + Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
+  if (it.fx !== 0) return delayMs + Math.max(1, it.dur || 10) * 1000
   const g = tubeGeometry()
   let cx = 0.5, cy = 0.5; const pts = []
   if (g.length) { let sx = 0, sy = 0; for (const t of g) { sx += (t.x1 + t.x2) / 2; sy += (t.y1 + t.y2) / 2; pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 }) } cx = sx / g.length; cy = sy / g.length }
-  return Math.max(200, impulseDuration(p, impulseUmax(p, pts, cx, cy)) * 1000)
+  return delayMs + Math.max(200, impulseDuration(p, impulseUmax(p, pts, cx, cy)) * 1000)
 }
 function offApplyStep (pl, idx) {
   const items = offItems(pl); if (!items.length) { wled.pl.active = false; return }
@@ -528,9 +530,9 @@ export function liveFxP () {
   if (wled.pl.active) {
     const pl = playlists.list.find((x) => x.id === wled.pl.id)
     const it = pl && (pl.items || [])[wled.pl.idx]
-    if (it && it.fx != null) return { fx: it.fx, p: it.p || {} }
+    if (it && it.fx != null) return { fx: it.fx, p: it.p || {}, delay: it.delay || 0 }
   }
-  return { fx: lichtnest.fx, p: lichtnest.p }
+  return { fx: lichtnest.fx, p: lichtnest.p, delay: 0 }
 }
 export function tubeGeometry () {
   return wled.segments.slice().sort((a, b) => a.start - b.start).map((s) => {
