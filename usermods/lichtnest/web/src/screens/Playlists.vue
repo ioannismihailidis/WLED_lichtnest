@@ -210,7 +210,7 @@ function confirmImport () {
     <template v-else-if="open">
       <button class="link" @click="view = 'list'; expanded = null"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>Alle Playlists</button>
       <div class="ehd">
-        <input class="plname" :value="open.name" @change="rename" placeholder="Playlist-Name" />
+        <input class="plname" :value="open.name" @input="rename" placeholder="Playlist-Name" />
         <button class="ic" :class="{ on: open.default }" title="Beim Start abspielen" @click="setDefault(open)"><svg width="16" height="16" viewBox="0 0 24 24" :fill="open.default ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.9 21l1.2-6.8-5-4.9 6.9-1z" /></svg></button>
         <button class="ic del" title="Löschen" @click="delPlaylist(open)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M9 7V5h6v2M7 7l1 12h8l1-12" /></svg></button>
         <button class="play" :class="{ on: isPlaying(open.id) }" @click="isPlaying(open.id) ? stop() : play(open)">
@@ -264,11 +264,11 @@ function confirmImport () {
           </div>
           <div class="frow">
             <span class="flbl">Name</span>
-            <input class="ftxt" type="text" :value="it.name || ''" :placeholder="effectById(it.fx).name" @change="setStepName(it, $event.target.value)">
+            <input class="ftxt" type="text" :value="it.name || ''" :placeholder="effectById(it.fx).name" @input="setStepName(it, $event.target.value)">
           </div>
           <div class="frow">
             <span class="flbl">Kommentar</span>
-            <input class="ftxt" type="text" :value="it.note || ''" placeholder="Notiz zu diesem Schritt…" @change="setStepNote(it, $event.target.value)">
+            <input class="ftxt" type="text" :value="it.note || ''" placeholder="Notiz zu diesem Schritt…" @input="setStepNote(it, $event.target.value)">
           </div>
           <div class="frow">
             <span class="flbl">Pause davor</span>
