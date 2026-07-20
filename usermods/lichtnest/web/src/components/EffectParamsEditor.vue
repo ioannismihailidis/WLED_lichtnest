@@ -4,8 +4,8 @@
 // switch over param types. Fully controlled: reads from `values` (the flat param pool —
 // lichtnest.p, a playlist step's `p`, or a layer's `p`) and emits a merge-patch on every
 // change; the caller decides how to persist it (live-post, playlist step, layer).
-import { computed, onMounted } from 'vue'
-import { rgbToHex, hexToRgb, plan, wled, loadFxLists } from '../wled.js'
+import { computed } from 'vue'
+import { rgbToHex, hexToRgb, plan } from '../wled.js'
 import { goPlan } from '../nav.js'
 import { fadeCols, fadeCw } from '../fxsim.js'
 import { PARAM_GROUPS } from '../effects.js'
@@ -15,12 +15,6 @@ import ColorList from './ColorList.vue'
 import PalettePicker from './PalettePicker.vue'
 import AdsEnvelopeEditor from './AdsEnvelopeEditor.vue'
 import FxTimeline from './FxTimeline.vue'
-
-// WLED effect/palette dropdowns need the name lists — fetch on mount if still empty
-onMounted(() => {
-  if (wled.offline) return
-  if (!wled.effects.length || !wled.palettes.length) loadFxLists()
-})
 
 const props = defineProps({
   params: { type: Array, default: () => [] },   // already filtered by `.show(values)`
@@ -62,9 +56,6 @@ function setMarker (p, e) { const v = e.target.value; emit('update', { [p.key]: 
 function setToggle (p) { emit('update', { [p.key]: !props.values[p.key] }) }
 function setGrad (v) { emit('update', v) }
 function setKeys (p, arr) { emit('update', { [p.key]: arr }) }
-function listVal (p) { const v = props.values[p.key]; return v != null ? v : (p.def ?? 0) }
-function setList (p, e) { emit('update', { [p.key]: +e.target.value }) }
-
 // Circular direction dial — 0° = right (matches cos/sin beam math in fxsim / firmware)
 function setAngle (p, deg) {
   const max = p.max ?? 360, min = p.min ?? 0
@@ -160,18 +151,6 @@ const ANGLE_PRESETS = [
           <option v-for="(m, id) in plan.points" :key="id" :value="id">{{ m.name }}</option>
         </select>
         <button class="mklink" type="button" @click="goPlan({ placeMarker: true })">Im 2D-Plan Marker setzen →</button>
-      </template>
-      <template v-else-if="p.type === 'wledeffect'">
-        <select class="mksel" :value="listVal(p)" @change="setList(p, $event)" :disabled="!wled.effects.length">
-          <option v-if="!wled.effects.length" :value="listVal(p)">{{ wled.offline ? 'Offline — Gerät verbinden' : 'Lade Effekte…' }}</option>
-          <option v-for="(name, i) in wled.effects" :key="i" :value="i">{{ i }} · {{ name }}</option>
-        </select>
-      </template>
-      <template v-else-if="p.type === 'wledpalette'">
-        <select class="mksel" :value="listVal(p)" @change="setList(p, $event)" :disabled="!wled.palettes.length">
-          <option v-if="!wled.palettes.length" :value="listVal(p)">{{ wled.offline ? 'Offline — Gerät verbinden' : 'Lade Paletten…' }}</option>
-          <option v-for="(name, i) in wled.palettes" :key="i" :value="i">{{ i }} · {{ name }}</option>
-        </select>
       </template>
     </div>
   </template>

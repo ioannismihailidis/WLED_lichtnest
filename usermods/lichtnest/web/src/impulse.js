@@ -21,6 +21,20 @@ export function ease01 (t, mode) {
   return t
 }
 
+/** Map phase onto 0..span — wrap (loop) or triangle (ping-pong). */
+export function travelPos (phase, span, bounce) {
+  if (span < 1e-6) return 0
+  if (!bounce) {
+    let t = phase % span
+    if (t < 0) t += span
+    return t
+  }
+  const cycle = 2 * span
+  let t = phase % cycle
+  if (t < 0) t += cycle
+  return t < span ? t : (2 * span - t)
+}
+
 // Distance of a pixel from the emission origin.
 // pmode 0 linear / 1 radial (2D) / 2 LED chain (normalized 0..1).
 export function impulseDist (p, x, y, cx, cy, chainIdx = 0, chainTotal = 1) {
@@ -52,7 +66,9 @@ export function impulsePositions (p, elapsed) {
 }
 
 // how long the whole burst takes: last launch + time for it to travel off the field
+// bounce → continuous travel (0 = free-run, mirrors firmware stepSeconds)
 export function impulseDuration (p, umax) {
+  if (p.bounce) return 0
   const N = impulseCount(p), iv = impulseInterval(p), v = Math.max(0.001, impulseSpeed(p)), w = impulseWidth(p)
   return (N - 1) * iv + (umax + w) / v + 0.2
 }
@@ -61,11 +77,13 @@ export function impulseDuration (p, umax) {
 export function impulseColorAt (positions, p, d, umax = 1) {
   const w = impulseWidth(p)
   const travel = Math.max(0.001, umax + w)
-  const ease = p.mode || 0
+  const bounce = !!p.bounce
+  const ease = bounce ? 0 : (p.mode || 0)
   let bestg = 2
   for (const raw of positions) {
     let pos = raw
-    if (ease) {
+    if (bounce) pos = travelPos(raw, travel, true)
+    else if (ease) {
       const t = raw / travel
       pos = ease01(t > 1 ? 1 : t, ease) * travel
     }

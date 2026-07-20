@@ -51,7 +51,7 @@ function frame (fx, p, umax) {
   let phase
   if (fx === 1) phase = strobePhaseAt(p, elapsed)
   else if (fx === 3) phase = solidPhaseAt(p, elapsed)
-  else if (fx === 2 || fx === 5 || fx === 9 || fx === 10 || fx === 11 || fx === 12 || fx === 13 || fx === 14 || fx === 15) phase = elapsed * phaseRate(fx, p, wled.info.leds?.count || 1)
+  else if (fx === 2 || fx === 9 || fx === 11 || fx === 12 || fx === 14) phase = elapsed * phaseRate(fx, p, wled.info.leds?.count || 1)
   else { lph += dt * phaseRate(fx, p, wled.info.leds?.count || 1); phase = lph }
   return { elapsed, phase, wait }
 }

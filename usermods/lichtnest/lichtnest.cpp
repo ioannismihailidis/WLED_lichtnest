@@ -4,11 +4,10 @@
  * Zugvögel "Lichtnest" usermod.
  *
  * - Exposes the physical LED outputs ("ports") to the custom UI (/json/info).
- * - Hosts our OWN spatial effect engine (§4.3/§6 of SPEC.md): named base
- *   effects (fx 0..3 and 5..14), each with named parameters, rendered per-LED
- *   using the tube geometry (each LED's 2D position interpolated between the
- *   tube endpoints). fx 15 ("WLED") is a pass-through: stock segment FX run and
- *   the overlay does not overwrite them.
+ * - Hosts our OWN spatial effect engine (docs/generators.md): named base
+ *   effects (fx 0..3, 8, 9, 11, 12, 14), each with named parameters, rendered
+ *   per-LED using the tube geometry (each LED's 2D position interpolated
+ *   between the tube endpoints). Removed: 5 mpulse, 6/7, 10 chase, 13 scanner, 15 WLED.
  * - "fx": 4 ("Kombiniert") composites an ordered stack of up to ZV_MAXLAYERS
  *   base-effect LAYERS instead of one flat param set: each layer is a full
  *   effect (any base fx + its own params), optionally masked to a soft-edged
@@ -59,13 +58,13 @@ struct KF { float t = 0; float v = 0; uint32_t c = 0xFFFFFF; };
 
 // one effect + its full parameter set (union over all effects)
 struct FxParams {
-  uint8_t  fx = 3;                                          // 0..5,8..14 base; 2=neon; 6/7 removed; 4=layered; 15=WLED
+  uint8_t  fx = 3;                                          // generators 0..3,8,9,11,12,14; 4=layered; 5/6/7/10/13/15 removed
   // impulse: colour gradient painted across each band — fcount colours + per-colour width
   uint8_t  fcount = 3;
   uint32_t fcols[ZV_MAXCOL] = { 0xFF5A3C, 0x7B3CFF, 0x27C5FF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF };
   uint8_t  fcw[ZV_MAXCOL]   = { 100, 100, 100, 100, 100, 100, 100, 100 };
   uint32_t col = 0x27C5FF;                                 // schwarm colour
-  uint8_t  speed = 42, width = 120;                        // impulse: travel speed
+  uint8_t  speed = 42, width = 0;                          // width reused as bounce: 0=loop, 1=ping-pong (wire: bounce)
   uint16_t angle = 25;                                     // direction degrees 0..360 (beam / sweep / split)
   uint8_t  pmode = 0;                                      // impulse mode: 0 linear, 1 radial
   uint8_t  origin = 255;                                   // spatial origin marker (255 = auto: centroid / near-edge)
@@ -601,7 +600,7 @@ class Lichtnest : public Usermod {
         float mask = layerMask(L, x, y);
         if (mask <= 0.0f) continue;
         float elapsed = frozen ? natural : ((natural > 0.05f) ? fmodf(baseElapsed, natural) : baseElapsed);
-        // Layer marker doubles as the spatial origin for Impuls/Fill/Marker Pulse/Split/
+        // Layer marker doubles as the spatial origin for Impuls/Fill/Spot/Wave/Noise/
         // Wave/Spotlight (any effect that honours P.origin) — mirrors web resolveMarker.
         // Without this, a layer Marker only drove the radius mask and Impuls ignored it.
         uint8_t savedOrigin = L.p.origin;
@@ -683,7 +682,8 @@ class Lichtnest : public Usermod {
     // path; a layered step's own duration handling lives in handleOverlayDraw/loop() via
     // activeLayers()/renderStack().
     float stepSeconds(const FxParams& P) {
-      if (P.fx == 0) return impulseDur(P);
+      // bounce (width≠0): continuous travel — no natural end, use playlist `dur`
+      if (P.fx == 0) return P.width ? 0.0f : impulseDur(P);
       if (P.fx == 1) return strobeDur(P);
       if (P.fx == 3) return solidDur(P);
       if (P.fx == 8) return fillDur(P);
@@ -699,6 +699,18 @@ class Lichtnest : public Usermod {
     void markerXY(const FxParams& P, float& ox, float& oy) const {
       ox = _cx; oy = _cy;
       if (P.origin != 255) pointPosition(P.origin, ox, oy);
+    }
+
+    // map phase onto 0..span: wrap (loop) or triangle (ping-pong / hin und zurück)
+    static float travelPos(float phase, float span, bool bounce) {
+      if (span < 1e-6f) return 0.0f;
+      if (!bounce) {
+        float t = fmodf(phase, span); if (t < 0) t += span;
+        return t;
+      }
+      float cycle = 2.0f * span;
+      float t = fmodf(phase, cycle); if (t < 0) t += cycle;
+      return (t < span) ? t : (2.0f * span - t);
     }
 
     // render one pixel of effect P at `elapsed` seconds into its step (deterministic; mirrors fxsim)
@@ -720,15 +732,21 @@ class Lichtnest : public Usermod {
           float iv = P.interval * 0.1f; if (iv < 0.05f) iv = 0.05f;
           float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
           float travel = umax + w; if (travel < 0.001f) travel = 0.001f;
+          bool bounce = P.width != 0;
           uint8_t Nn = P.count < 1 ? 1 : P.count;
           float bestg = 2.0f;
           for (uint8_t k = 0; k < Nn; k++) {
             float tk = k * iv; if (elapsed < tk) continue;
             float raw = v * (elapsed - tk);
-            float pos = raw;
-            if (P.mode) {
-              float te = raw / travel; if (te > 1.0f) te = 1.0f;
-              pos = ease01(te, P.mode) * travel;
+            float pos;
+            if (bounce) {
+              pos = travelPos(raw, travel, true);
+            } else {
+              pos = raw;
+              if (P.mode) {
+                float te = raw / travel; if (te > 1.0f) te = 1.0f;
+                pos = ease01(te, P.mode) * travel;
+              }
             }
             float g = (pos - d) / w;
             if (g >= 0 && g <= 1.0f && g < bestg) bestg = g;
@@ -785,26 +803,7 @@ class Lichtnest : public Usermod {
           if (P.breathe) { float ph = 6.2831853f * curvePhase(K, n, elapsed); b = 0.25f + 0.75f * (0.5f + 0.5f * sinf(ph)); }
           return scaleCol(col, b);
         }
-        case 5: { // Marker Pulse — soft disc; ADSR shapes each pulse cycle
-          float ox, oy; markerXY(P, ox, oy);
-          float dx = x - ox, dy = y - oy;
-          float d = sqrtf(dx * dx + dy * dy);
-          float rad = P.rwidth / 100.0f; if (rad < 0.05f) rad = 0.05f;
-          float soft = P.tail / 100.0f; if (soft < 0.01f) soft = 0.01f;
-          float mask = 1.0f;
-          if (d >= rad) mask = 0.0f;
-          else if (d > rad - soft) mask = (rad - d) / soft;
-          if (mask <= 0.0f) return 0;
-          float f = 0.2f + (P.speed / 100.0f) * 2.0f;
-          float phase = f * elapsed;
-          float tIn = phase - floorf(phase); if (tIn < 0) tIn += 1.0f;
-          float A = P.rfin * 0.1f, Dec = P.rgap * 0.1f, Rel = P.rfout * 0.1f;
-          float Sus = P.tempo / 100.0f; if (Sus < 0) Sus = 0; if (Sus > 1) Sus = 1;
-          float note = A + Dec + Rel + 0.15f; if (note < 0.2f) note = 0.2f;
-          float b = envelopeAt(tIn * note, A, Dec, Sus, Rel);
-          if (b <= 0.0f) return 0;
-          return scaleCol(effectCol(P, d / rad), mask * b);
-        }
+        case 5: // removed Marker Pulse
         case 6: // removed Split Zones
         case 7: // removed Gradient Sweep
           return 0;
@@ -848,20 +847,8 @@ class Lichtnest : public Usermod {
           ph -= floorf(ph);
           return scaleCol(gradN(P, ph), intens);
         }
-        case 10: { // Tube Chase — head travels tube-by-tube with exponential tail
-          float N = tubeTotal < 1 ? 1.0f : (float)tubeTotal;
-          float phase = (P.speed / 100.0f) * 0.5f * elapsed;
-          float pos = fmodf(phase * N, N); if (pos < 0) pos += N;
-          float ci = P.dir ? (N - 1 - tubeIdx) : tubeIdx;
-          float d = ci - pos; if (d < 0) d += N;
-          float tl = (P.tail / 100.0f) * N; if (tl < 1) tl = 1;
-          float u = d / tl; if (u > 1.0f) u = 1.0f;
-          float A = P.rfin * 0.1f, Dec = P.rgap * 0.1f, Rel = P.rfout * 0.1f;
-          float S = P.tempo / 100.0f; if (S < 0) S = 0; if (S > 1) S = 1;
-          float env = envelopeUnit(u, A, Dec, S, Rel);
-          if (env <= 0.0f) return 0;
-          return scaleCol(effectCol(P, u), expf(-d / tl) * env);
-        }
+        case 10: // removed Tube Chase
+          return 0;
         case 11: { // Spotlight — directed soft cone; speed = rotation (°/s)
           float ox, oy; markerXY(P, ox, oy);
           float dx = x - ox, dy = y - oy;
@@ -906,34 +893,8 @@ class Lichtnest : public Usermod {
           uint32_t h1 = zvHash((uint32_t)chainIdx, cycle);
           return scaleCol(gradN(P, (h1 & 255u) / 255.0f), bri);
         }
-        case 13: { // Scanner — ping-pong along whole chain (pmode 0) or per tube (pmode 1)
-          float span = 1.0f;
-          float u;
-          if (P.pmode == 1) {
-            if (tubeIdx >= geoCount || geoId[tubeIdx] >= strip.getSegmentsNum()) return 0;
-            Segment& seg = strip.getSegment(geoId[tubeIdx]);
-            uint16_t start = seg.start, stop = seg.stop;
-            uint16_t len = (stop > start) ? (stop - start) : 1;
-            u = (len > 1) ? (float)(chainIdx - start) / (float)(len - 1) : 0.0f;
-          } else {
-            float N = chainTotal ? (float)chainTotal : 1.0f;
-            u = (N > 1.0f) ? (float)chainIdx / (N - 1.0f) : 0.0f;
-          }
-          float rate = (P.speed / 100.0f) * 0.4f;
-          float cycle = 2.0f * span;
-          float t = fmodf(rate * elapsed, cycle); if (t < 0) t += cycle;
-          float pos = (t < span) ? t : (2.0f * span - t);
-          if (P.dir) pos = span - pos;
-          float half = P.rwidth / 200.0f; if (half < 0.015f) half = 0.015f;
-          float d = fabsf(u - pos);
-          if (d >= half) return 0;
-          float bri = 1.0f - d / half; bri *= bri;
-          float A = P.rfin * 0.1f, Dec = P.rgap * 0.1f, Rel = P.rfout * 0.1f;
-          float S = P.tempo / 100.0f; if (S < 0) S = 0; if (S > 1) S = 1;
-          bri *= envelopeUnit(d / half, A, Dec, S, Rel);
-          if (bri <= 0.0f) return 0;
-          return scaleCol(effectCol(P, d / half), bri);
-        }
+        case 13: // removed Scanner
+          return 0;
         case 14: { // Noise / Drift — types via mode; optional attract/repel via dir + duty
           float sc = 1.0f + (P.rwidth / 100.0f) * 6.0f;          // spatial scale 1..7
           float drift = (P.speed / 100.0f) * 0.25f * elapsed;
@@ -960,8 +921,6 @@ class Lichtnest : public Usermod {
           float n = sampleNoise(P.mode, nx, ny);
           return gradN(P, n);
         }
-        case 15: // WLED pass-through — overlay must not paint; pixels come from segment FX
-          return 0;
         default:
           return 0;
       }
@@ -977,28 +936,6 @@ class Lichtnest : public Usermod {
     FxParams& activeParams() { return (_plActive && _stepCount > 0) ? _steps[activeStepIdx()].p : _manual; }
     // count>0 -> the active step/manual effect is "Kombiniert" (rendered via renderStack)
     LayerStack& activeLayers() { return (_plActive && _stepCount > 0) ? _steps[activeStepIdx()].ls : _manualLayers; }
-
-    // push WLED pass-through params onto every placed tube segment (mode/speed/intensity/palette/color)
-    // Wire keys: wfx→mode, sx→speed, ix→duty, pal→hz (shared pool, no new DRAM fields)
-    void applyWledPassThrough(const FxParams& P) {
-      for (uint8_t g = 0; g < geoCount; g++) {
-        if (geoId[g] >= strip.getSegmentsNum()) continue;
-        Segment& seg = strip.getSegment(geoId[g]);
-        if (!seg.isActive()) continue;
-        seg.setMode(P.mode, false);
-        seg.speed = P.speed;
-        seg.intensity = P.duty;
-        seg.palette = P.hz;
-        seg.setColor(0, P.col);
-      }
-    }
-    void syncWledPassThrough() {
-      LayerStack& AL = activeLayers();
-      if (AL.count > 0) return;
-      FxParams& A = activeParams();
-      if (A.fx != 15) return;
-      applyWledPassThrough(A);
-    }
 
   public:
     static const char UI_VERSION[];
@@ -1018,7 +955,6 @@ class Lichtnest : public Usermod {
     }
 
     // render our effect over all placed tubes, overriding the stock FX
-    // (except fx 15 "WLED" pass-through, which leaves the segment FX buffer alone)
     void handleOverlayDraw() override {
       if (!enabled || geoCount == 0) return;
       uint16_t chainTotal = strip.getLengthTotal();
@@ -1033,8 +969,6 @@ class Lichtnest : public Usermod {
       FxParams& to = activeParams();
       LayerStack& toLS = activeLayers();
       bool toLayered = toLS.count > 0;                     // "Kombiniert" — composite instead of one computeColor()
-      bool toPass = !toLayered && to.fx == 15;              // WLED pass-through: do not overwrite
-      bool fromPass = tr && _trFromLayers.count == 0 && _trFrom.fx == 15;
       // elapsed seconds into the current step (or the manual effect's looping timeline);
       // a step's pause (delay) renders black before the effect's own timeline starts.
       // Layered stacks keep the RAW (unwrapped) elapsed — each layer loops/gates on its
@@ -1047,12 +981,10 @@ class Lichtnest : public Usermod {
         if (elToRaw < 0.0f) { toWait = true; elToRaw = 0.0f; }
       }
       else { elToRaw = (nowMs - _manualStart) / 1000.0f; }
-      // steady pass-through (or WLED→WLED): leave stock FX as painted
-      if (toPass && !toWait && (!tr || fromPass)) return;
       float elTo = elToRaw;
       if (!toLayered) { float D = stepSeconds(to); if (D > 0.05f) elTo = fmodf(elToRaw, D); }
       bool fromLayered = tr && _trFromLayers.count > 0;
-      float elFrom = (tr && !fromLayered && !fromPass) ? stepSeconds(_trFrom) : 0.0f;   // outgoing effect rendered at its end (near black)
+      float elFrom = (tr && !fromLayered) ? stepSeconds(_trFrom) : 0.0f;   // outgoing effect rendered at its end (near black)
 
       for (uint8_t g = 0; g < geoCount; g++) {
         if (geoId[g] >= strip.getSegmentsNum()) continue;
@@ -1066,13 +998,11 @@ class Lichtnest : public Usermod {
           uint32_t c;
           uint32_t cTo;
           if (toWait) cTo = 0;                                                          // pause -> black
-          else if (toPass) cTo = strip.getPixelColor(i);                                // stock FX already in the buffer
           else if (toLayered) cTo = renderStack(toLS, elToRaw, false, x, y, i, chainTotal, g, geoCount);
           else cTo = computeColor(to, elTo, x, y, i, chainTotal, g, geoCount);
           if (tr) {
-            uint32_t a = fromPass ? strip.getPixelColor(i)
-                       : fromLayered ? renderStack(_trFromLayers, 0.0f, true, x, y, i, chainTotal, g, geoCount)
-                                      : computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount);
+            uint32_t a = fromLayered ? renderStack(_trFromLayers, 0.0f, true, x, y, i, chainTotal, g, geoCount)
+                                     : computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount);
             c = applyTransition(a, cTo, trProg, x, y, i, g);
           } else {
             c = cTo;
@@ -1203,8 +1133,6 @@ class Lichtnest : public Usermod {
         }
       }
 
-      // after fx/p/geo updates: push stock FX onto tubes when WLED pass-through is active
-      syncWledPassThrough();
     }
 
     void addToConfig(JsonObject& root) override {
@@ -1268,16 +1196,12 @@ class Lichtnest : public Usermod {
       JsonArray cw = p["cw"];
       if (!cw.isNull()) { uint8_t n = 0; for (JsonVariant v : cw) { if (n >= ZV_MAXCOL) break; int w = v | 100; P.fcw[n++] = (uint8_t)(w < 1 ? 1 : (w > 255 ? 255 : w)); } }
       P.speed = p["speed"] | P.speed; P.width = p["width"] | P.width; P.angle = p["angle"] | P.angle;
+      if (!p["bounce"].isNull()) P.width = p["bounce"] | (uint8_t)0;   // travel mode → width slot
       P.pmode = p["pmode"] | P.pmode; P.origin = p["origin"] | P.origin;
       P.hz = p["hz"] | P.hz; P.duty = p["duty"] | P.duty; P.mode = p["mode"] | P.mode;
       P.tail = p["tail"] | P.tail; P.dir = p["dir"] | P.dir; P.tempo = p["tempo"] | P.tempo; P.breathe = p["breathe"] | P.breathe;
       P.rfin = p["rfin"] | P.rfin; P.rfout = p["rfout"] | P.rfout; P.rwidth = p["rwidth"] | P.rwidth; P.rgap = p["rgap"] | P.rgap;
       P.count = p["count"] | P.count; P.interval = p["interval"] | P.interval; P.cpar = p["cpar"] | P.cpar;
-      // WLED pass-through aliases (fx 15): wfx→mode, sx→speed, ix→duty, pal→hz
-      if (!p["wfx"].isNull()) P.mode = p["wfx"] | P.mode;
-      if (!p["sx"].isNull())  P.speed = p["sx"] | P.speed;
-      if (!p["ix"].isNull())  P.duty = p["ix"] | P.duty;
-      if (!p["pal"].isNull()) P.hz = p["pal"] | P.hz;
       JsonArray sc = p["scols"];                             // strobe palette
       if (!sc.isNull()) { P.scount = 0; for (JsonVariant v : sc) { if (P.scount >= ZV_MAXPAL) break; if (v.is<JsonArray>() && v.size() >= 3) P.scols[P.scount++] = RGBW32((uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], 0); } }
       // keyframes: strobe (fx1) uses hzKeys (t,v); solid (fx3) uses keys (t,v,c). Parse ONLY the
@@ -1305,14 +1229,11 @@ class Lichtnest : public Usermod {
       for (uint8_t i = 0; i < n; i++) { JsonArray a = cols.createNestedArray(); a.add(cR(P.fcols[i])); a.add(cG(P.fcols[i])); a.add(cB(P.fcols[i])); }
       JsonArray cw = p.createNestedArray("cw");
       for (uint8_t i = 0; i < n; i++) cw.add(P.fcw[i]);
-      p["speed"] = P.speed; p["width"] = P.width; p["angle"] = P.angle; p["pmode"] = P.pmode; p["origin"] = P.origin;
+      p["speed"] = P.speed; p["width"] = P.width; p["bounce"] = P.width; p["angle"] = P.angle; p["pmode"] = P.pmode; p["origin"] = P.origin;
       p["hz"] = P.hz; p["duty"] = P.duty; p["mode"] = P.mode;
       p["tail"] = P.tail; p["dir"] = P.dir; p["tempo"] = P.tempo; p["breathe"] = P.breathe;
       p["rfin"] = P.rfin; p["rfout"] = P.rfout; p["rwidth"] = P.rwidth; p["rgap"] = P.rgap;
       p["count"] = P.count; p["interval"] = P.interval; p["cpar"] = P.cpar;
-      if (P.fx == 15) {                                     // WLED pass-through aliases for the UI
-        p["wfx"] = P.mode; p["sx"] = P.speed; p["ix"] = P.duty; p["pal"] = P.hz;
-      }
       if (P.scount) {                                       // strobe palette
         JsonArray sc = p.createNestedArray("scols");
         for (uint8_t i = 0; i < P.scount; i++) { JsonArray a = sc.createNestedArray(); a.add(cR(P.scols[i])); a.add(cG(P.scols[i])); a.add(cB(P.scols[i])); }
@@ -1408,7 +1329,6 @@ class Lichtnest : public Usermod {
       _plIdx = (uint8_t)idx;
       _plStepStart = millis();
       _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;
-      syncWledPassThrough();
     }
     // play transition row trIdx, blending fromEffect → destination effect after the row
     void enterTransition(int fromEffectIdx, int trIdx) {
@@ -1440,7 +1360,6 @@ class Lichtnest : public Usermod {
       _plIdx = (uint8_t)trIdx;
       _plStepStart = millis();
       _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;
-      syncWledPassThrough();
     }
     // advance after the current row finishes (or on next): effect→transition→effect, or hard cut
     void advancePlaylist() {
@@ -1463,7 +1382,6 @@ class Lichtnest : public Usermod {
         if (_trType == TR_CASCADE) buildTubeOrder();
         _plIdx = (uint8_t)n; _plStepStart = millis();
         _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;
-        syncWledPassThrough();
       } else enterEffect(n);
     }
     // jump to an absolute playlist index (play-from); transition rows start their blend

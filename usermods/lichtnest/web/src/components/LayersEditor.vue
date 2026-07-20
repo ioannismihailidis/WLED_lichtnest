@@ -103,7 +103,6 @@ function rowStyle (uidVal, index) {
         </div>
         <button class="mklink" type="button" @click="goPlan({ placeMarker: true })">Im 2D-Plan Marker setzen →</button>
         <p v-if="l.fx === 0 || l.fx === 8 || l.fx === 9" class="mkhint">{{ l.fx === 0 ? 'Impuls' : l.fx === 8 ? 'Fill' : 'Welle' }} startet an diesem Marker (radial: Mittelpunkt, linear: Wellenfront). Radius begrenzt zusätzlich die Zone.</p>
-        <p v-else-if="l.fx === 5" class="mkhint">Marker Pulse leuchtet um diesen Marker. Radius begrenzt zusätzlich die Zone.</p>
         <p v-else-if="l.fx === 14" class="mkhint">Noise nutzt diesen Marker als Anzieh-/Abstoßpunkt (Feld-Modus unter Parameter).</p>
         <p v-else-if="l.fx === 11" class="mkhint">Spotlight strahlt von diesem Marker. Richtung und Öffnung unter Parameter.</p>
         <div class="frow">

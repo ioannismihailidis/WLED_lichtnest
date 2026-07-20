@@ -55,14 +55,10 @@ export function phaseRate (fx, p, N) {
   if (fx === 0) return ((p.speed ?? 42) / 100) * 0.6
   if (fx === 1) return Math.max(1, p.hz || 6)
   if (fx === 2) return 1                                          // Neon: phase = elapsed (s)
-  if (fx === 5) return 0.2 + ((p.speed ?? 42) / 100) * 2          // Marker Pulse Hz
   if (fx === 9) return ((p.speed ?? 36) / 100) * 0.5               // Welle travel
-  if (fx === 10) return ((p.speed ?? 42) / 100) * 0.5              // Tube Chase (× tubeCount in fxColor)
   if (fx === 11) return ((p.speed ?? 0) / 100) * 90                // Spotlight rotation (°/s)
   if (fx === 12) return 1                                          // Twinkle: phase = elapsed (s); speed/duty inside fx
-  if (fx === 13) return ((p.speed ?? 36) / 100) * 0.4              // Scanner bar travel
   if (fx === 14) return ((p.speed ?? 22) / 100) * 0.25             // Noise drift
-  if (fx === 15) return 0.4 + ((p.sx ?? 128) / 255) * 1.2         // WLED placeholder drift
   return 0.3 + ((p.speed ?? 35) / 100) * 2
 }
 // smooth 2D value-noise (0..1) — lattice + fade must match firmware valueNoise2
@@ -275,26 +271,11 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       if (bri <= 0) return [0, 0, 0]
       return scale(effectCol(p, bri), bri)
     }
-    case 5: { // Marker Pulse — soft disc around (cx,cy); ADSR shapes each pulse cycle
-      const dx = x - cx, dy = y - cy
-      const d = Math.sqrt(dx * dx + dy * dy)
-      const rad = Math.max(0.05, (p.rwidth ?? 35) / 100)
-      const soft = Math.max(0.01, (p.tail ?? 20) / 100)
-      let mask = 1
-      if (d >= rad) mask = 0
-      else if (d > rad - soft) mask = (rad - d) / soft
-      if (mask <= 0) return [0, 0, 0]
-      const { A, D, S, R } = adsrParts(p)
-      let tIn = phase - Math.floor(phase)
-      if (tIn < 0) tIn += 1
-      // map cycle fraction to seconds via a 1s note length scaled by ADSR sum
-      const note = Math.max(0.2, A + D + R + 0.15)
-      const b = envelopeAt(tIn * note, A, D, S, R)
-      if (b <= 0) return [0, 0, 0]
-      return scale(effectCol(p, d / rad), mask * b)
-    }
+    case 5: // removed Marker Pulse
     case 6: // removed Split Zones
     case 7: // removed Gradient Sweep
+    case 10: // removed Tube Chase
+    case 13: // removed Scanner
       return [0, 0, 0]
     case 9: { // Welle — phase = rate*t; intensity + colour from sin wave along pulseDist
       let d
@@ -314,18 +295,6 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       const intens = 0.5 + 0.5 * Math.sin(2 * Math.PI * ph)
       ph -= Math.floor(ph)
       return scale(gradN(ph, fadeCols(p), fadeCw(p)), intens)
-    }
-    case 10: { // Tube Chase — phase = rate*t; head sweeps tube indices
-      const N = Math.max(1, tubeTotal || 1)
-      let pos = ((phase * N) % N + N) % N
-      const ci = p.dir ? (N - 1 - tubeIdx) : tubeIdx
-      let d = ci - pos; if (d < 0) d += N
-      let tl = ((p.tail ?? 28) / 100) * N; if (tl < 1) tl = 1
-      const u = Math.min(1, d / tl)
-      const { A, D, S, R } = adsrParts(p)
-      const env = envelopeUnit(u, A, D, S, R)
-      if (env <= 0) return [0, 0, 0]
-      return scale(effectCol(p, u), Math.exp(-d / tl) * env)
     }
     case 11: { // Spotlight — soft cone; phase = rotation degrees when speed > 0
       const dx = x - cx, dy = y - cy
@@ -369,29 +338,6 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       const h1 = zvHash(chainIdx >>> 0, cycle >>> 0)
       return scale(gradN((h1 & 255) / 255, fadeCols(p), fadeCw(p)), bri)
     }
-    case 13: { // Scanner — ping-pong along chain (pmode 0) or per tube (pmode 1)
-      const span = 1
-      let u
-      if ((p.pmode || 0) === 1) {
-        u = along != null ? along : 0
-      } else {
-        const N = Math.max(1, chainTotal || 1)
-        const ci = chainIdx
-        u = N > 1 ? ci / (N - 1) : 0
-      }
-      const cycle = 2 * span
-      let t = ((phase % cycle) + cycle) % cycle
-      let pos = t < span ? t : (2 * span - t)
-      if (p.dir) pos = span - pos
-      const half = Math.max(0.015, (p.rwidth ?? 10) / 200)
-      const d = Math.abs(u - pos)
-      if (d >= half) return [0, 0, 0]
-      let bri = 1 - d / half; bri *= bri
-      const { A, D, S, R } = adsrParts(p)
-      bri *= envelopeUnit(d / half, A, D, S, R)
-      if (bri <= 0) return [0, 0, 0]
-      return scale(effectCol(p, d / half), bri)
-    }
     case 14: { // Noise / Drift — types + optional attract/repel marker
       const sc = 1 + ((p.rwidth ?? 40) / 100) * 6
       let nx, ny
@@ -417,12 +363,6 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       }
       const n = sampleNoise(p.mode || 0, nx, ny)
       return gradN(n, fadeCols(p), fadeCw(p))
-    }
-    case 15: { // WLED pass-through — placeholder only (real FX runs on the device)
-      const c = col
-      const band = ((x * 8 + phase * 0.5) % 1)
-      const bri = band < 0.35 ? 0.15 + 0.85 * (1 - Math.abs(band - 0.175) / 0.175) : 0.08
-      return scale(c, bri)
     }
     case 3:
     default: {
@@ -607,9 +547,6 @@ export function effectListPreview (fx, p, layers) {
     const c = pool.color || (e.params || []).find((pr) => pr.type === 'color')?.def || [39, 197, 255]
     const hex = rgbCss(c)
     if (fx === 2) return `linear-gradient(90deg,#0d0f13,${hex} 40%,#fff 52%,${hex}88 70%,#0d0f13)` // neon
-    if (fx === 10) return `linear-gradient(90deg,#0d0f13 0 40%,${hex}55 55%,#fff 70%,#0d0f13 85%)` // chase
-    if (fx === 13) return `linear-gradient(90deg,#0d0f13 0 42%,#fff 48%,${hex} 52%,#0d0f13 58% 100%)`
-    if (fx === 15) return `repeating-linear-gradient(90deg,${hex} 0 6px,#0d0f13 6px 14px)`
     return hex
   }
 

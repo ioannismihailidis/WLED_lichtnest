@@ -661,6 +661,10 @@ export function resolveFxPreset (id) {
 /** Idempotent seed of Effekte 2.0 composition recipes (stable recipe-* ids). */
 export function ensureRecipePresets () {
   let n = 0
+  // drop obsolete Noise-based neon recipe — Neon is a real generator (fx 2) now
+  const before = fxPresets.list.length
+  fxPresets.list = fxPresets.list.filter((x) => x.id !== 'recipe-neon-flicker')
+  if (fxPresets.list.length !== before) n++
   for (const raw of recipePresetSeeds()) {
     if (fxPresets.list.some((x) => x.id === raw.id)) continue
     const entry = normalizeFxPreset(raw)
@@ -668,6 +672,12 @@ export function ensureRecipePresets () {
     entry.id = raw.id
     fxPresets.list.push(entry)
     n++
+  }
+  // refresh Scanner recipe if it still uses removed fx 13
+  const scan = fxPresets.list.find((x) => x.id === 'recipe-scanner')
+  if (scan && scan.fx === 13) {
+    const fresh = normalizeFxPreset(recipePresetSeeds().find((r) => r.id === 'recipe-scanner'))
+    if (fresh) { scan.fx = fresh.fx; scan.p = fresh.p; delete scan.layers; n++ }
   }
   if (n) savePlaylists()
   return n
@@ -882,6 +892,28 @@ export function scheduleElapsedMs (schedule, now = new Date()) {
   start.setHours(sc.hour, sc.minute, 0, 0)
   const elapsed = now.getTime() - start.getTime()
   return elapsed >= 0 ? elapsed : null
+}
+/** Prefer device wall clock when valid; else browser local time. null = schedule off or not yet due. */
+export function liveScheduleElapsedMs (schedule) {
+  const sc = normalizeSchedule(schedule)
+  if (!sc.enabled) return null
+  if (wled.clock.ok) {
+    const nowMs = ((wled.clock.h | 0) * 3600 + (wled.clock.m | 0) * 60 + (wled.clock.s | 0)) * 1000
+    const startMs = ((sc.hour | 0) * 3600 + (sc.minute | 0) * 60) * 1000
+    if (nowMs < startMs) return null
+    return nowMs - startMs
+  }
+  return scheduleElapsedMs(sc)
+}
+/** Seek playlist to the wall-clock position for its daily schedule (loop + atMs). */
+export async function syncPlaylistToSchedule (pl) {
+  if (!pl) return false
+  const sc = normalizeSchedule(pl.schedule)
+  if (!sc.enabled) return false
+  const elapsed = liveScheduleElapsedMs(sc)
+  if (elapsed == null) return false   // before today's start
+  setLoop(true)
+  return playPlaylist(pl, 0, { atMs: elapsed })
 }
 function offApplyStep (pl, idx, intoStepMs = 0) {
   const items = offItems(pl); if (!items.length) { wled.pl.active = false; return }

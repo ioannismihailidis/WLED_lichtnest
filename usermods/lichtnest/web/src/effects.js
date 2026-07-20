@@ -26,10 +26,6 @@ const EASE_OPTS = [
 export function COLOR_GRAD (opts = {}) {
   return { key: 'grad', type: 'gradient', name: 'Farbverlauf', group: 'farbe', ...opts }
 }
-/** @param {string} [name] @param {number[]} [def] @param {object} [opts] */
-export function COLOR_SOLID (name = 'Farbe', def = [39, 197, 255], opts = {}) {
-  return { key: 'color', type: 'color', name, group: 'farbe', def, ...opts }
-}
 /** @param {string} name @param {number[][]} def */
 export function COLOR_LIST (name, def) {
   return { key: 'scols', type: 'colorlist', name, group: 'farbe', def }
@@ -61,13 +57,17 @@ export function MOTION_SPEED (name = 'Geschwindigkeit', def = 42, opts = {}) {
 export function SOFT_EDGE (name = 'Weiche Kante', def = 18, opts = {}) {
   return { key: 'rwidth', type: 'range', name, min: 2, max: 50, unit: '%', def, group: 'raum', ...opts }
 }
-/** @param {string} [name] @param {number} [def] @param {object} [opts] */
-export function TAIL_LENGTH (name = 'Schweiflänge', def = 22, opts = {}) {
-  return { key: 'tail', type: 'range', name, min: 0, max: 100, unit: '%', def, group: 'raum', ...opts }
-}
 /** @param {string} [name] @param {object} [opts] */
 export function MOTION_DIR (name = 'Richtung', opts = {}) {
   return { key: 'dir', type: 'select', name, group: 'bewegung', options: DIR_OPTS, ...opts }
+}
+/** Loop vs ping-pong travel — wire key `bounce` (firmware stores in unused `width`). */
+export function MOTION_BOUNCE (def = 0, opts = {}) {
+  return {
+    key: 'bounce', type: 'select', name: 'Lauf', group: 'bewegung', def,
+    options: [{ v: 0, l: 'Schleife' }, { v: 1, l: 'Hin und zurück' }],
+    ...opts,
+  }
 }
 
 /**
@@ -82,7 +82,7 @@ export const EFFECTS = [
   {
     id: 0, key: 'pulse', name: 'Impuls', category: 'bewegung',
     desc: 'Einzelne Farb-Impulse werden nacheinander losgeschickt — über den Plan (2D) oder entlang der LED-Kette.',
-    tip: 'Kette + Schweif ≈ Chase; eng + Ping-Pong ≈ Scanner.',
+    tip: 'Kette + „Hin und zurück“ ≈ Scanner; eng + schnell für Bar-Looks.',
     preview: 'repeating-linear-gradient(90deg,#0d0f13 0 10%,#ff5a3c 15%,#27c5ff 20%,#0d0f13 26% 50%)',
     params: [
       COLOR_GRAD(),
@@ -93,7 +93,8 @@ export const EFFECTS = [
       SPATIAL_ANGLE({ show: (p) => (p.pmode || 0) === 0 }),
       SPATIAL_ORIGIN('Ursprung', { show: (p) => (p.pmode || 0) !== 2 }),
       MOTION_DIR('Laufrichtung', { show: (p) => (p.pmode || 0) === 2 }),
-      { key: 'mode', type: 'select', name: 'Easing', group: 'bewegung', options: EASE_OPTS },
+      MOTION_BOUNCE(0),
+      { key: 'mode', type: 'select', name: 'Easing', group: 'bewegung', options: EASE_OPTS, show: (p) => !(p.bounce) },
       { key: 'count', type: 'range', name: 'Anzahl', min: 1, max: 20, def: 3, group: 'bewegung' },
       { key: 'interval', type: 'range', name: 'Abstand', min: 1, max: 50, mul: 0.1, unit: 's', def: 8, group: 'bewegung' },
       { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90, unit: '%', def: 30, group: 'raum' },
@@ -115,16 +116,17 @@ export const EFFECTS = [
     ],
   },
   {
-    id: 2, key: 'neon', name: 'Neon-Flackern',
-    desc: 'Typisches Neon-Licht — unruhiges Flackern, hart oder weich ausgeblendet.',
+    id: 2, key: 'neon', name: 'Neon-Flackern', category: 'takt',
+    desc: 'Sonder-Strobe: imitiert das unruhige Flackern einer Neonröhre — zufällige Helligkeits-Einbrüche, hart oder weich.',
+    tip: 'Unruhe hoch = häufige Drops; Art „Hart“ für typisches Neon-Zucken.',
     preview: 'linear-gradient(90deg,#0d0f13,#39ff9a 35%,#fff 48%,#39ff9a88 62%,#0d0f13)',
     params: [
       COLOR_GRAD({ seedColor: [57, 255, 154] }),
       MOTION_SPEED('Flacker-Tempo', 48),
-      { key: 'duty', type: 'range', name: 'Unruhe', min: 0, max: 100, unit: '%', def: 35, group: 'bewegung' },
-      { key: 'rwidth', type: 'range', name: 'Amplitude', min: 10, max: 100, unit: '%', def: 70, group: 'raum' },
+      { key: 'duty', type: 'range', name: 'Unruhe', min: 0, max: 100, unit: '%', def: 35, group: 'takt' },
+      { key: 'rwidth', type: 'range', name: 'Amplitude', min: 10, max: 100, unit: '%', def: 70, group: 'takt' },
       {
-        key: 'mode', type: 'select', name: 'Art', group: 'bewegung',
+        key: 'mode', type: 'select', name: 'Art', group: 'takt',
         options: [{ v: 0, l: 'Hart' }, { v: 1, l: 'Fade' }],
       },
       ADSR_BLOCK({ rfin: 2, rgap: 0, tempo: 100, rfout: 4 }),
@@ -158,19 +160,6 @@ export const EFFECTS = [
     ],
   },
   {
-    id: 5, key: 'mpulse', name: 'Marker Pulse',
-    desc: 'Lokales Aufleuchten um einen Plan-Marker — pulsiert und klingt am Rand weich ab.',
-    preview: 'radial-gradient(circle,#27c5ff 0%,#27c5ff55 35%,#0d0f13 70%)',
-    params: [
-      COLOR_GRAD({ seedColor: [39, 197, 255] }),
-      SPATIAL_ORIGIN('Marker'),
-      MOTION_SPEED('Puls-Tempo', 42),
-      { key: 'rwidth', type: 'range', name: 'Radius', min: 5, max: 100, unit: '%', def: 35, group: 'raum' },
-      { key: 'tail', type: 'range', name: 'Weichheit', min: 1, max: 80, unit: '%', def: 20, group: 'raum' },
-      ADSR_BLOCK({ rfin: 2, rgap: 6, tempo: 40, rfout: 8 }),
-    ],
-  },
-  {
     id: 8, key: 'fill', name: 'Fill / Reveal', category: 'flaeche',
     desc: 'Eine Wellenfront füllt die Fläche — Helligkeit folgt ADSR (Attack → Decay → Sustain → Release).',
     tip: 'Radial am Marker + Twinkle darüber = Reveal-Look.',
@@ -193,18 +182,6 @@ export const EFFECTS = [
       ...SPATIAL_PLANE,
       { key: 'rwidth', type: 'range', name: 'Wellenlänge', min: 8, max: 100, unit: '%', def: 35, group: 'raum' },
       MOTION_SPEED('Geschwindigkeit', 36),
-    ],
-  },
-  {
-    id: 10, key: 'chase', name: 'Tube Chase',
-    desc: 'Licht springt Tube für Tube weiter — mit Schweif, vorwärts oder rückwärts.',
-    preview: 'linear-gradient(90deg,#0d0f13 0 40%,#27c5ff55 55%,#fff 70%,#0d0f13 85%)',
-    params: [
-      COLOR_GRAD({ seedColor: [39, 197, 255] }),
-      MOTION_SPEED(),
-      TAIL_LENGTH('Schweif', 28),
-      MOTION_DIR(),
-      ADSR_BLOCK({ rfin: 0, rgap: 0, tempo: 100, rfout: 10 }),
     ],
   },
   {
@@ -233,22 +210,6 @@ export const EFFECTS = [
       MOTION_SPEED('Geschwindigkeit', 40, { hint: 'höher = dichter / schneller' }),
       { key: 'duty', type: 'range', name: 'Dichte', min: 1, max: 80, unit: '%', def: 18, group: 'bewegung' },
       ADSR_BLOCK({ rfin: 2, rgap: 10, tempo: 0, rfout: 0 }),
-    ],
-  },
-  {
-    id: 13, key: 'scanner', name: 'Scanner',
-    desc: 'Eine schmale Lichtleiste wandert hin und zurück — über die gesamte LED-Kette oder pro Tube.',
-    preview: 'linear-gradient(90deg,#0d0f13 0 42%,#fff 48%,#27c5ff 52%,#0d0f13 58% 100%)',
-    params: [
-      COLOR_GRAD({ seedColor: [255, 60, 60] }),
-      {
-        key: 'pmode', type: 'select', name: 'Bereich', group: 'raum',
-        options: [{ v: 0, l: 'Gesamte Kette' }, { v: 1, l: 'Pro Tube' }],
-      },
-      MOTION_SPEED('Geschwindigkeit', 36),
-      { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 40, unit: '%', def: 10, group: 'raum' },
-      MOTION_DIR('Start'),
-      ADSR_BLOCK({ rfin: 2, rgap: 0, tempo: 100, rfout: 2 }),
     ],
   },
   {
@@ -293,8 +254,8 @@ export const V2_CATEGORIES = [
   { id: 'takt', name: 'Takt' },
 ]
 
-/** Eight base generators for Effekte 2.0 (docs/generators.md). */
-export const V2_GENERATOR_IDS = [3, 8, 9, 11, 14, 0, 12, 1]
+/** Base generators for Effekte 2.0 (docs/generators.md) — incl. Neon as takt special. */
+export const V2_GENERATOR_IDS = [3, 8, 9, 11, 14, 0, 12, 1, 2]
 export const V2_GENERATORS = V2_GENERATOR_IDS.map((id) => effectById(id)).filter(Boolean)
 
 /** Catalogue groups for Effekte 2.0 list view. */
@@ -305,9 +266,9 @@ export function v2CatalogueGroups () {
   })).filter((g) => g.effects.length)
 }
 
-// classic Effekte catalogue — compositor via presets / "Neuer Effekt"; no WLED passthrough
-export const STANDARD_EFFECTS = EFFECTS.filter((e) => e.id !== COMBINED_FX)
-// Kombiniert layer chips — only the eight V2 generators (demoted specials hidden)
+// UI catalogue / playlist add chips — generators only (no compositor, no demoted FX)
+export const STANDARD_EFFECTS = V2_GENERATORS
+// Kombiniert layer chips — same set
 export const BASE_EFFECTS = V2_GENERATORS
 // mirrors ZV_MAXLAYERS in lichtnest.cpp — each layer embeds a full param set, so the
 // firmware silently drops layers beyond this when a step is parsed; keep in sync
@@ -383,10 +344,7 @@ export function expandParamKeys (pr, src, out) {
  */
 export function recipePresetSeeds () {
   const pulseChase = {
-    ...defaultParams(0), pmode: 2, rwidth: 22, speed: 48, dir: 0, count: 4, interval: 6,
-  }
-  const pulseNarrow = {
-    ...defaultParams(0), pmode: 2, rwidth: 10, speed: 36, count: 1, interval: 1,
+    ...defaultParams(0), pmode: 2, rwidth: 22, speed: 48, dir: 0, count: 4, interval: 6, bounce: 0,
   }
   return [
     {
@@ -436,16 +394,13 @@ export function recipePresetSeeds () {
       ],
     },
     {
-      id: 'recipe-neon-flicker',
-      name: 'Neon (Rezept)',
-      fx: 14,
-      p: { ...defaultParams(14), mode: 3, speed: 55, rwidth: 70 },
-    },
-    {
       id: 'recipe-scanner',
       name: 'Scanner (Rezept)',
       fx: 0,
-      p: pulseNarrow,
+      p: {
+        ...defaultParams(0),
+        pmode: 2, bounce: 1, rwidth: 10, speed: 36, count: 1, interval: 1, dir: 0,
+      },
     },
   ]
 }

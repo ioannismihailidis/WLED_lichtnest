@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { wled, connectDevice, goOffline, playlists, palettes, fxPresets } from './wled.js'
 import { uiNav, sideNav, pickSideNav, requestSideList } from './nav.js'
-import { STANDARD_EFFECTS, SIDE_NEW_COMBO } from './effects.js'
+import { V2_GENERATORS, V2_CATEGORIES, SIDE_NEW_COMBO } from './effects.js'
 import { BUILTIN_PALETTES, palettePreviewCss } from './palettes.js'
 import Start from './screens/Start.vue'
 import Effekte from './screens/Effekte.vue'
@@ -38,16 +38,23 @@ function goNav (id) {
 /** Grouped sidebar lists: [{ section, items }]. Empty section = no label. */
 const sideGroups = computed(() => {
   if (sideNav.kind === 'effects') {
+    const groups = V2_CATEGORIES.map((cat) => ({
+      section: cat.name,
+      items: V2_GENERATORS.filter((e) => e.category === cat.id).map((e) => ({ id: e.id, label: e.name })),
+    })).filter((g) => g.items.length)
+    const recipes = fxPresets.list.filter((c) => String(c.id).startsWith('recipe-'))
+    const users = fxPresets.list.filter((c) => !String(c.id).startsWith('recipe-'))
     return [
+      ...groups,
       {
-        section: 'Standard',
-        items: STANDARD_EFFECTS.map((e) => ({ id: e.id, label: e.name })),
+        section: 'Rezepte',
+        items: recipes.map((c) => ({ id: c.id, label: c.name || 'Rezept' })),
       },
       {
         section: 'Gespeichert',
         items: [
-          ...fxPresets.list.map((c) => ({ id: c.id, label: c.name || 'Preset' })),
-          { id: SIDE_NEW_COMBO, label: 'Neuer Effekt' },
+          ...users.map((c) => ({ id: c.id, label: c.name || 'Preset' })),
+          { id: SIDE_NEW_COMBO, label: 'Neuer Look' },
         ],
       },
     ]
@@ -75,6 +82,7 @@ const screenComp = computed(() => {
   switch (screen.value) {
     case 'home': return Start
     case 'effects': return Effekte
+    case 'effects2': return Effekte   // legacy deep-link → same screen
     case 'tubes': return Tubes
     case 'palettes': return Farbpaletten
     case 'playlists': return Playlists

@@ -4,9 +4,10 @@ import {
   playlists, loadPlaylists, savePlaylists, playPlaylist, stopPlaylist, isPlaying, playlistProgress,
   stepDurationMs, fxActions, lichtnest, fxPresets, palettes, cloneLayers, saveFxPreset,
   materializePreset, resolveFxPreset, detachPreset, importFxPresets, playlistsDocument, isTrItem,
-  normalizePlaylistItems, migrateFxPresets, normalizeSchedule, wled,
+  normalizePlaylistItems, migrateFxPresets, normalizeSchedule, wled, syncPlaylistToSchedule,
+  liveScheduleElapsedMs,
 } from '../wled.js'
-import { EFFECTS, effectById, COMBINED_FX } from '../effects.js'
+import { STANDARD_EFFECTS, effectById, COMBINED_FX } from '../effects.js'
 import { fadeCols, fadeCw } from '../fxsim.js'
 import { confirmDialog, noticeDialog } from '../confirm.js'
 import { sideNav, publishSideNav, clearSideNav, consumeSidePick, consumeSideList } from '../nav.js'
@@ -95,6 +96,18 @@ const clockHint = computed(() => {
   }
   return 'Uhrzeit unsicher — unter /classic → Zeit prüfen (NTP oder Browser-Sync)'
 })
+const canSyncLive = computed(() => {
+  now.value // re-check when the start minute arrives
+  const pl = open.value
+  if (!pl || !normalizeSchedule(pl.schedule).enabled) return false
+  if (!(pl.items || []).some((it) => !isTrItem(it) && it.fx != null)) return false
+  return liveScheduleElapsedMs(pl.schedule) != null
+})
+async function syncLive (pl) {
+  if (!(await syncPlaylistToSchedule(pl || open.value))) {
+    await noticeDialog({ title: 'Noch nicht fällig', body: 'Die Startzeit heute liegt noch in der Zukunft.' })
+  }
+}
 
 // ---- playlist CRUD ----
 function addPlaylist () {
@@ -436,6 +449,13 @@ function confirmImport () {
           :value="scheduleTimeValue(open)"
           @change="setScheduleTime(open, $event.target.value)"
         >
+        <button
+          v-if="ensureSchedule(open).enabled"
+          class="synclive"
+          :disabled="!canSyncLive"
+          title="Zur aktuellen Uhrzeit-Position in der Playlist springen"
+          @click="syncLive(open)"
+        >Zur Live-Position</button>
         <span v-if="ensureSchedule(open).enabled && clockHint" class="schedhint mono" :class="{ warn: !wled.clock.ok && !wled.offline }">{{ clockHint }}</span>
       </div>
 
@@ -555,7 +575,7 @@ function confirmImport () {
             <button v-if="fxPresets.list.length" :class="{ on: addSheet === 'preset' }" @click="addSheet = 'preset'">Preset</button>
           </div>
           <div v-if="addSheet === 'fx'" class="chips">
-            <button v-for="e in EFFECTS" :key="e.id" class="chip" @click="addItem(e.id)">
+            <button v-for="e in STANDARD_EFFECTS" :key="e.id" class="chip" @click="addItem(e.id)">
               <span class="cprev" :style="{ background: e.preview }" />{{ e.name }} <span class="plus">+</span>
             </button>
           </div>
@@ -633,6 +653,8 @@ function confirmImport () {
 .schedrow input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 .schedtime { height: 34px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--inset); color: var(--text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .schedtime:disabled { opacity: .45; }
+.synclive { height: 34px; padding: 0 12px; border-radius: 9px; border: 1px solid rgba(240,162,60,.45); background: rgba(240,162,60,.14); color: var(--accent); font-size: 12px; font-weight: 800; cursor: pointer; }
+.synclive:disabled { opacity: .4; cursor: default; }
 .schedhint { font-size: 11px; color: var(--muted); flex: 1 1 100%; }
 .schedhint.warn { color: #e0a04f; }
 

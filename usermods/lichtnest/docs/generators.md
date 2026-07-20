@@ -5,7 +5,7 @@ vocabulary, and powerful looks via **Kombiniert** layer stacks. Oriented toward
 MadMapper materials + TouchDesigner generators + Resolume layer UX.
 
 Implementation: [`web/src/effects.js`](../web/src/effects.js), screen
-[`web/src/screens/EffekteV2.vue`](../web/src/screens/EffekteV2.vue). Firmware
+[`web/src/screens/Effekte.vue`](../web/src/screens/Effekte.vue). Firmware
 math lives in [`lichtnest.cpp`](../lichtnest.cpp).
 
 ---
@@ -15,13 +15,12 @@ math lives in [`lichtnest.cpp`](../lichtnest.cpp).
 1. A **generator** is a pure image function: colour × space × time.
 2. **Layer ops** (mask, blend, mute, schedule) live on the Kombiniert stack, not
    inside generator params.
-3. Special looks (neon flicker, tube chase, scanner, marker pulse) are
-   **recipes / presets** on top of generators — not required long-term FX IDs.
-4. **No WLED passthrough** (removed fx 15). Stock WLED segment FX are out of
-   the Lichtnest effect model.
+3. Special looks (chase / scanner) are recipes on Pulse (+ bounce), not FX IDs.
+   Neon flicker is a first-class takt generator.
+4. **Removed FX IDs:** 5 Marker Pulse, 10 Chase, 13 Scanner, 15 WLED (and 6/7).
 
 ```
-Solid | Ramp | Wave | Spot | Noise | Pulse | Twinkle | Strobe
+Solid | Ramp | Wave | Spot | Noise | Pulse | Twinkle | Strobe | Neon
                               ↓
                     Kombiniert (≤4 layers)
                     marker · radius · falloff
@@ -40,12 +39,17 @@ Stable wire keys (shared pool on firmware). Same semantics ⇒ same key and widg
 | --- | --- | --- |
 | Farbe | `grad` → `cols`/`cw`, `color`, `scols` | Gradient, solid, colour list |
 | Raum | `pmode`, `angle`, `origin`, `rwidth`, `tail` | Linear / radial / chain, direction, marker, width/opening, soft/tail |
-| Bewegung | `speed`, `dir`, `mode` (easing/shape) | Tempo, direction, curve |
+| Bewegung | `speed`, `dir`, `mode` (easing/shape), **`bounce`** | Tempo, direction, curve, **Schleife vs Hin und zurück** |
 | Hülle | `adsr` → `rfin`, `rgap`, `tempo`, `rfout` | Attack / decay / sustain / release |
-| Takt | keyframes (`keys`, `hzKeys`), `duty` | Time curves, pulse width |
+| Takt | keyframes (`keys`, `hzKeys`), `duty` | Time curves, pulse width / neon unrest |
 | Mix (layer only) | `enabled`, `blend`, `radius`, `falloff`, `sched` | Compositing (+ future: opacity) |
 
-UI groups in the editor: `farbe` · `raum` · `bewegung` · `huelle` · `takt`.
+### `bounce` (Lauf)
+
+Wire key `bounce` (0 = Schleife, 1 = Hin und zurück). Firmware stores it in the
+unused `width` slot. Applies to travel effects:
+
+- **Impuls** — band oscillates instead of one-shot drain (Scanner-/Chase-Look)
 
 ### Rules
 
@@ -53,7 +57,6 @@ UI groups in the editor: `farbe` · `raum` · `bewegung` · `huelle` · `takt`.
 - In Kombiniert, the layer **marker** replaces per-effect `origin`.
 - Mix fields never duplicate generator params.
 - Panel order in layer expand: Effekt → Marker / Radius / Falloff → Blend → Zeitplan → PARAMETER groups.
-- Solo and layer editors share one param surface ([`EffectParamsEditor.vue`](../web/src/components/EffectParamsEditor.vue)).
 
 ---
 
@@ -66,55 +69,44 @@ UI groups in the editor: `farbe` · `raum` · `bewegung` · `huelle` · `takt`.
 | 3 | Welle | 9 | Raum | Continuous sine on linear/radial plane |
 | 4 | Spotlight | 11 | Raum | Directed cone from marker |
 | 5 | Noise / Drift | 14 | Raum | Value / FBM / Cellular / Hash + optional marker field |
-| 6 | Impuls (Pulse) | 0 | Bewegung | Discrete pulses on plane or LED chain |
+| 6 | Impuls (Pulse) | 0 | Bewegung | Discrete pulses on plane or LED chain (+ bounce) |
 | 7 | Twinkle | 12 | Bewegung | Stochastic pixels with ADSR |
 | 8 | Tube-Strobe | 1 | Takt | Timed flashes (Hz keys, duty, colour list) |
+| 9 | Neon-Flackern | 2 | Takt | Special strobe: neon-tube flicker (random brightness drops) |
 
-**Kombiniert** (fx 4) is the compositor, not a ninth generator in the catalogue
-sense. Entry point: “Neuer Look” / layer stack editor.
+**Kombiniert** (fx 4) is the compositor. Entry: “Neuer Look”.
+
+### Neon vs Strobe
+
+- **Strobe** — rhythmic on/off at controlled Hz (show flash).
+- **Neon** — continuous tube with irregular intensity collapses (lamp imitation),
+  hard or soft steps, unrest + amplitude. Not a Noise recipe.
 
 ### Making generators powerful
 
 | Generator | High-leverage knobs |
 | --- | --- |
-| Solid | Keyframe colour + breathe rate; black bookends for fades |
-| Ramp | `pmode` + soft edge + ADSR sustain for holds / reveals |
-| Wave | Wavelength × speed × plane; combine with Spot as mask |
-| Spot | Opening + soft + rotation speed 0 for static cones |
-| Noise | Type + grain + drift; marker attract/repel for zones |
-| Pulse | Count / interval / width / easing; `pmode=Kette` for chase-like runs |
-| Twinkle | Density + ADSR; cluster radius for local sparkle |
-| Strobe | Hz curve + duty + distribution (all / alternate / sequence / random) |
+| Solid | Keyframe colour + breathe rate |
+| Ramp | `pmode` + soft edge + ADSR |
+| Wave | Wavelength × speed × plane |
+| Spot | Opening + soft + rotation 0 = static |
+| Noise | Type + grain + drift; marker field |
+| Pulse | Count / interval / width; `bounce` for scanner-like runs |
+| Twinkle | Density + ADSR |
+| Strobe | Hz curve + duty + distribution |
+| Neon | Unruhe, Amplitude, Hart/Fade, Flacker-Tempo |
 
 ---
 
-## Demote → recipe
+## Former specials → recipe
 
-| Former special FX | Recipe on bases |
+| Former FX | Recipe |
 | --- | --- |
-| Neon-Flackern (2) | Noise or Solid + high `duty` / unrest + hard ADSR edges |
-| Tube Chase (10) | Pulse `pmode=Kette` + `tail` + speed |
-| Scanner (13) | Narrow Pulse/Ramp + ping-pong `dir` on chain/tube |
-| Marker Pulse (5) | Spot or Pulse radial + ADSR, small radius |
+| Tube Chase (10) | Pulse `pmode=Kette` (+ bounce optional) |
+| Scanner (13) | Pulse Kette + `bounce=1`, schmal (`recipe-scanner`) |
+| Marker Pulse (5) | Spot or Pulse radial + ADSR, small layer radius |
 
-These IDs may remain in firmware/`fxsim` for legacy playlists but are hidden
-from Effekte 2.0 catalogue and from Kombiniert layer chips (`BASE_EFFECTS`).
-
----
-
-## UI (Effekte 2.0)
-
-- Catalogue sections: **Fläche · Raum · Bewegung · Takt**, then **Gespeichert**
-  (presets) and **Neuer Look** (empty Kombiniert).
-- Layer header: preview swatch · name · mute · tags (schedule, radius).
-- One param surface for solo and per-layer params.
-- Preview: tubes / texture + plan markers (same components as classic Effekte).
-
-### Future (specified, not required now)
-
-- Layer **opacity**
-- Global / layer **BPM sync** and MadMapper-style `time_base` (speed without jump)
-- **Mirror** (space op) and **Hue / palette cycle** (colour op)
+Removed from firmware and web: 5, 10, 13 (plus earlier 6/7/15).
 
 ---
 
@@ -122,59 +114,20 @@ from Effekte 2.0 catalogue and from Kombiniert layer chips (`BASE_EFFECTS`).
 
 Max `MAX_LAYERS` = 4. Blend: 0 Add · 1 Max · 2 Screen.
 
-### Ambient Cloud
-
-| Layer | FX | Blend | Notes |
-| --- | --- | --- | --- |
-| 1 | Noise (14) | — | FBM, slow drift |
-| 2 | Solid (3) | Screen | Soft breathe |
-
-### Marker Reveal
-
-| Layer | FX | Blend | Notes |
-| --- | --- | --- | --- |
-| 1 | Ramp (8) | — | Radial @ marker |
-| 2 | Twinkle (12) | Add | Low density |
-
-### Show Opener
-
-| Layer | FX | Blend | Notes |
-| --- | --- | --- | --- |
-| 1 | Pulse (0) | — | Linear plane |
-| 2 | Strobe (1) | Add | Sched periodisch |
-| 3 | Spot (11) | Max | Accent cone |
-
-### Tube Run
-
-| Layer | FX | Blend | Notes |
-| --- | --- | --- | --- |
-| 1 | Pulse (0) | — | `pmode=Kette`, tail |
-| 2 | Wave (9) | Max | Slow, soft |
-
-### Soft Zone
-
-| Layer | FX | Blend | Notes |
-| --- | --- | --- | --- |
-| 1 | Spot (11) | — | Wide soft cone |
-| 2 | Noise (14) | Screen | Marker field attract |
-
-Seeded in the UI as recipe presets (stable ids `recipe-*`).
-
----
-
-## Removed: WLED passthrough
-
-fx 15 / key `wled` / wire aliases `wfx`, `sx`, `ix`, `pal` for pass-through —
-removed from web catalogue, layer picker, and firmware overlay pass-through path.
-Playlists that still reference fx 15 render black / no-op.
+Seeded as `recipe-*` presets (Ambient Cloud, Marker Reveal, Show Opener, Tube Run,
+Soft Zone, Scanner).
 
 ---
 
 ## Implementation checklist
 
-1. ~~Design doc~~ (this file)
-2. Effekte 2.0 catalogue + editor (`EffekteV2.vue`)
-3. Align param labels / groups; `V2_GENERATORS` + categories in `effects.js`
-4. Seed recipe presets
-5. Remove WLED passthrough (web + firmware)
-6. Later: demote migration (hide/delete special FX IDs), Mirror / Hue, BPM / opacity
+1. ~~Design doc~~
+2. ~~Effekte 2.0 catalogue + editor~~
+3. ~~`V2_GENERATORS` + categories~~
+4. ~~Recipe presets~~
+5. ~~Remove WLED passthrough~~
+6. ~~`bounce` travel mode on Pulse~~
+7. ~~Neon as takt generator (not Noise recipe)~~
+8. ~~Nav cutover — Effekte 2.0 is the only Effekte screen~~
+9. ~~Remove dormant FX 5/10/13 from firmware + web~~
+10. Later: Mirror / Hue, BPM / opacity

@@ -4,6 +4,7 @@
 // editing); the effect sorts by time when it samples. The step ends at the latest time.
 import { computed } from 'vue'
 import { rgbToHex, hexToRgb } from '../wled.js'
+import NumStepper from './NumStepper.vue'
 
 const props = defineProps({
   modelValue: { type: Array, default: () => [] },   // [{ t, v, c? }]
@@ -42,8 +43,15 @@ function remove (i) { if (rows.value.length <= 1) return; const a = clone(); a.s
   <div class="kf">
     <div class="head mono"><span class="ht">Zeit</span><span class="hv">{{ label }}</span><span v-if="withColor" class="hc">Farbe</span></div>
     <div v-for="(k, i) in rows" :key="i" class="row">
-      <input class="tin mono" type="number" min="0" step="0.1" :value="k.t" @input="setT(i, $event.target.value)">
-      <span class="us mono">s</span>
+      <NumStepper
+        class="tin"
+        compact
+        :model-value="k.t"
+        :min="0"
+        :step="0.1"
+        unit="s"
+        @update:model-value="setT(i, $event)"
+      />
       <input class="vr" type="range" :min="vMin" :max="vMax" :step="vStep" :value="k.v" @input="setV(i, $event.target.value)">
       <span class="vv mono">{{ disp(k.v) }}{{ vUnit }}</span>
       <label v-if="withColor" class="sw" :style="{ background: rgbToHex(k.c || [255, 255, 255]) }"><input type="color" :value="rgbToHex(k.c || [255, 255, 255])" @input="setC(i, $event.target.value)"></label>
@@ -61,19 +69,18 @@ function remove (i) { if (rows.value.length <= 1) return; const a = clone(); a.s
 <style scoped>
 .kf { display: flex; flex-direction: column; gap: 7px; }
 .head { display: flex; align-items: center; font-size: 10px; color: var(--muted2); padding: 0 2px; }
-.ht { width: 66px; }
+.ht { width: 128px; }
 .hv { flex: 1; }
 .hc { width: 66px; }
 .row { display: flex; align-items: center; gap: 8px; }
-.tin { width: 50px; height: 30px; flex: none; border-radius: 8px; border: 1px solid var(--line2); background: var(--inset); color: var(--text); font-size: 13px; text-align: right; padding: 0 6px; }
-.us { font-size: 11px; color: var(--muted2); margin-left: -4px; width: 8px; }
+.tin { flex: none; width: 128px; }
 .vr { flex: 1; min-width: 40px; height: 22px; }
 .vv { font-size: 11px; color: var(--accent); width: 40px; text-align: right; }
-.sw { width: 32px; height: 30px; flex: none; border-radius: 8px; border: 1px solid rgba(255,255,255,.25); cursor: pointer; overflow: hidden; position: relative; }
+.sw { width: 36px; height: 36px; flex: none; border-radius: 8px; border: 1px solid rgba(255,255,255,.25); cursor: pointer; overflow: hidden; position: relative; }
 .sw input { position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px); border: none; padding: 0; background: none; cursor: pointer; opacity: 0; }
-.rm { width: 28px; height: 28px; flex: none; border-radius: 8px; background: var(--inset); border: 1px solid var(--line); color: var(--muted2); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.rm { width: 36px; height: 36px; flex: none; border-radius: 8px; background: var(--inset); border: 1px solid var(--line); color: var(--muted2); cursor: pointer; display: flex; align-items: center; justify-content: center; touch-action: manipulation; }
 .rm:disabled { opacity: .3; cursor: default; }
 .rm:not(:disabled):hover { color: #e0614f; border-color: #e0614f; }
-.add { display: flex; align-items: center; justify-content: center; gap: 6px; height: 34px; border-radius: 9px; background: transparent; border: 1.5px dashed rgba(240,162,60,.4); color: var(--accent); font-size: 12px; font-weight: 700; cursor: pointer; }
+.add { display: flex; align-items: center; justify-content: center; gap: 6px; height: 40px; border-radius: 9px; background: transparent; border: 1.5px dashed rgba(240,162,60,.4); color: var(--accent); font-size: 12px; font-weight: 700; cursor: pointer; touch-action: manipulation; }
 .add:disabled { opacity: .35; cursor: default; }
 </style>

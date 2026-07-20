@@ -1,11 +1,14 @@
 <script setup>
+// Effekte — base generators (docs/generators.md) + Kombiniert / Rezepte.
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import {
   lichtnest, fxActions, fxLast, fxSnapshot, fxPresets, loadPlaylists,
   saveFxPreset, renameFxPreset, deleteFxPreset, updateFxPreset, importFxPresets,
-  materializePreset, cloneLayers, rememberDraft, wled, plan,
+  materializePreset, rememberDraft, ensureRecipePresets, wled, plan,
 } from '../wled.js'
-import { STANDARD_EFFECTS, effectById, WLED_PASS_FX, COMBINED_FX, SIDE_NEW_COMBO, effectUsesMarkers } from '../effects.js'
+import {
+  v2CatalogueGroups, effectById, COMBINED_FX, SIDE_NEW_COMBO, effectUsesMarkers,
+} from '../effects.js'
 import { effectListPreview } from '../fxsim.js'
 import { confirmDialog } from '../confirm.js'
 import { goPlan, sideNav, publishSideNav, clearSideNav, consumeSidePick, consumeSideList } from '../nav.js'
@@ -15,15 +18,17 @@ import PlanMarkers from '../components/PlanMarkers.vue'
 import EffectParamsEditor from '../components/EffectParamsEditor.vue'
 import LayersEditor from '../components/LayersEditor.vue'
 
+const SIDE_KIND = 'effects'
+
 const view = ref('list')
 const editMode = ref('standard') // 'standard' | 'preset' | 'new'
-const editId = ref(0)
+const editId = ref(3)
 const editPresetId = ref(null)
 const edit = computed(() => effectById(editId.value))
 const activePreset = computed(() => fxPresets.list.find((c) => c.id === editPresetId.value) || null)
 const draft = reactive({ p: {}, layers: [] })
+const catalogue = computed(() => v2CatalogueGroups())
 const hasTubes = computed(() => (wled.segments || []).length > 0)
-// Soft hint: tubes exist but nothing was placed on a photo yet (all default rows)
 const needsPlace = computed(() => {
   if (!hasTubes.value || plan.photo) return false
   const segs = wled.segments || []
@@ -35,13 +40,16 @@ const needsPlace = computed(() => {
     return Math.abs(c.x1 - 0.12) < 0.02 && Math.abs(c.y1 - row) < 0.02 && Math.abs(c.x2 - 0.52) < 0.02
   })
 })
-const previewMode = ref('tubes')   // 'tubes' | 'texture'
+const previewMode = ref('tubes')
 const pvRestart = ref(0)
 const saveOpen = ref(false)
 const saveName = ref('')
 const renameOpen = ref(false)
 const renameName = ref('')
 const importInput = ref(null)
+
+const recipePresets = computed(() => fxPresets.list.filter((c) => String(c.id).startsWith('recipe-')))
+const userPresets = computed(() => fxPresets.list.filter((c) => !String(c.id).startsWith('recipe-')))
 
 const sideActiveId = computed(() => {
   if (editMode.value === 'preset') return editPresetId.value
@@ -50,17 +58,20 @@ const sideActiveId = computed(() => {
 })
 const editorTitle = computed(() => {
   if (editMode.value === 'preset') return activePreset.value?.name || 'Preset'
-  if (editMode.value === 'new') return 'Neuer Effekt'
+  if (editMode.value === 'new') return 'Neuer Look'
   return edit.value.name
 })
 const editorDesc = computed(() => {
-  if (editMode.value === 'standard') return edit.value.desc
+  if (editMode.value === 'standard') {
+    const tip = edit.value.tip ? ` ${edit.value.tip}` : ''
+    return (edit.value.desc || '') + tip
+  }
   if (editMode.value === 'preset') {
     const p = activePreset.value
     if (p?.fx === COMBINED_FX) return `${metaPreset(p)} · tippen zum Umbenennen`
     return `${effectById(p?.fx).name} · tippen zum Umbenennen`
   }
-  return 'Mehrere Effekte übereinander — speichern, um ihn in der Liste und in Playlists zu nutzen.'
+  return 'Bis zu vier Generatoren übereinander — Marker, Blend und Zeitplan pro Ebene.'
 })
 const isLayered = computed(() => editMode.value === 'new' || editId.value === COMBINED_FX)
 const layerCount = computed(() => (draft.layers || []).length)
@@ -70,19 +81,21 @@ const canSave = computed(() => {
 })
 const showMarkers = computed(() => effectUsesMarkers(editId.value))
 
-onMounted(() => { loadPlaylists() })
-onUnmounted(() => clearSideNav('effects'))
+onMounted(async () => {
+  await loadPlaylists()
+  ensureRecipePresets()
+})
+onUnmounted(() => clearSideNav(SIDE_KIND))
 
-// Prefer texture when there are no tubes to draw on
 watch(hasTubes, (ok) => { if (!ok) previewMode.value = 'texture' }, { immediate: true })
 
 watch([view, sideActiveId], () => {
-  if (view.value === 'editor') publishSideNav('effects', sideActiveId.value)
-  else clearSideNav('effects')
+  if (view.value === 'editor') publishSideNav(SIDE_KIND, sideActiveId.value)
+  else clearSideNav(SIDE_KIND)
 }, { immediate: true })
 
 watch(() => sideNav.pickId, (id) => {
-  if (id == null || sideNav.kind !== 'effects') return
+  if (id == null || sideNav.kind !== SIDE_KIND) return
   const picked = consumeSidePick()
   if (picked == null) return
   if (picked === SIDE_NEW_COMBO) openNew()
@@ -93,7 +106,7 @@ watch(() => sideNav.pickId, (id) => {
   }
 })
 watch(() => sideNav.requestList, (v) => {
-  if (!v || sideNav.kind !== 'effects') return
+  if (!v || sideNav.kind !== SIDE_KIND) return
   if (consumeSideList()) back()
 })
 
@@ -153,14 +166,12 @@ function onLayersUpdate (arr) {
 async function applyEffect () {
   persistDraft()
   await fxActions.setEffect(editId.value)
-  // setEffect reloads from fxLast — keep draft in sync
   const snap = fxSnapshot(editId.value)
   draft.p = snap.p
   draft.layers = snap.layers
   pvRestart.value++
 }
 
-// list swatch: active effect uses live pool; others use their last saved config
 function previewBg (e) {
   void fxLast[e.id]
   if (lichtnest.fx === e.id) {
@@ -269,9 +280,12 @@ async function onImportPresets (ev) {
 <template>
   <div class="screen" style="padding:8px 20px 40px;max-width:680px;margin:0 auto">
 
-    <!-- LIST -->
     <template v-if="view === 'list'">
-      <div class="hd"><div class="eyebrow">EFFEKTE</div><div class="title">Effekte</div></div>
+      <div class="hd">
+        <div class="eyebrow">EFFEKTE</div>
+        <div class="title">Effekte</div>
+        <p class="intro">Basis-Generatoren — Looks entstehen durch Einstellen und Kombinieren.</p>
+      </div>
 
       <div class="iorow">
         <input ref="importInput" type="file" accept=".json,application/json" style="display:none" @change="onImportPresets">
@@ -283,19 +297,33 @@ async function onImportPresets (ev) {
         </button>
       </div>
 
-      <div class="sechd mono">STANDARD</div>
-      <button v-for="e in STANDARD_EFFECTS" :key="e.id" class="card" :class="{ active: isActive(e.id) }" @click="open(e.id)">
+      <template v-for="g in catalogue" :key="g.id">
+        <div class="sechd mono">{{ g.name.toUpperCase() }}</div>
+        <button v-for="e in g.effects" :key="e.id" class="card" :class="{ active: isActive(e.id) }" @click="open(e.id)">
+          <div class="ctop">
+            <span class="cname">{{ e.name }}</span>
+            <span v-if="isActive(e.id)" class="badge mono">AKTIV</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6" /></svg>
+          </div>
+          <span class="cdesc">{{ e.desc }}</span>
+          <span v-if="e.tip" class="ctip mono">{{ e.tip }}</span>
+          <span class="prev" :style="{ background: previewBg(e) }" />
+        </button>
+      </template>
+
+      <div class="sechd mono" style="margin-top:22px">REZEPTE</div>
+      <button v-for="c in recipePresets" :key="c.id" class="card" @click="openPreset(c)">
         <div class="ctop">
-          <span class="cname">{{ e.name }}</span>
-          <span v-if="isActive(e.id)" class="badge mono">AKTIV</span>
+          <span class="cname">{{ c.name }}</span>
+          <span class="cmeta mono">{{ metaPreset(c) }}</span>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6" /></svg>
         </div>
-        <span class="cdesc">{{ e.desc }}</span>
-        <span class="prev" :style="{ background: previewBg(e) }" />
+        <span class="prev" :style="{ background: presetPreviewBg(c) }" />
       </button>
+      <p v-if="!recipePresets.length" class="note">Rezepte werden beim ersten Öffnen angelegt.</p>
 
       <div class="sechd mono" style="margin-top:22px">GESPEICHERT</div>
-      <button v-for="c in fxPresets.list" :key="c.id" class="card" @click="openPreset(c)">
+      <button v-for="c in userPresets" :key="c.id" class="card" @click="openPreset(c)">
         <div class="ctop">
           <span class="cname">{{ c.name }}</span>
           <span class="cmeta mono">{{ metaPreset(c) }}</span>
@@ -305,15 +333,14 @@ async function onImportPresets (ev) {
       </button>
       <button class="card newcard" @click="openNew()">
         <div class="ctop">
-          <span class="cname accent">+ Neuer Effekt erstellen</span>
+          <span class="cname accent">+ Neuer Look</span>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6" /></svg>
         </div>
-        <span class="cdesc">Mehrere Standard-Effekte übereinander legen und speichern.</span>
+        <span class="cdesc">Generatoren als Ebenen kombinieren und speichern.</span>
       </button>
-      <p v-if="!fxPresets.list.length" class="note">Noch keine Presets. Speichere einen Standard-Effekt oder eine Kombination — dann erscheinen sie hier und in Playlists.</p>
+      <p v-if="!userPresets.length" class="note">Eigene Presets erscheinen hier und in Playlists.</p>
     </template>
 
-    <!-- EDITOR -->
     <template v-else>
       <div class="pvsticky">
         <button class="link" @click="back()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>Effekte</button>
@@ -328,8 +355,7 @@ async function onImportPresets (ev) {
           <button v-else-if="needsPlace" class="pvplace" @click="openPlan">
             <span class="mono">Tubes noch nicht im Plan platziert →</span>
           </button>
-          <span v-else-if="isLayered" class="pvhint mono">Vorschau: alle aktiven Ebenen additiv übereinander</span>
-          <span v-else-if="editId === WLED_PASS_FX" class="pvhint mono">Platzhalter — echter WLED-Effekt nur auf den LEDs</span>
+          <span v-else-if="isLayered" class="pvhint mono">Vorschau: aktive Ebenen gemischt</span>
           <button class="pvrestart" title="Animation neu starten" @click="restartPreview()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4" /><path d="M3 4.5V10h5.5" /></svg>
           </button>
@@ -371,11 +397,11 @@ async function onImportPresets (ev) {
       <Teleport to="body">
         <div v-if="saveOpen" class="modal" @click="saveOpen = false">
           <div class="mcard" @click.stop>
-            <div class="mtitle">Effekt speichern</div>
+            <div class="mtitle">Look speichern</div>
             <div class="seclbl mono">NAME</div>
             <input v-model="saveName" class="mkname" placeholder="z. B. Baum + Strobe" @keyup.enter="confirmSaveAs" />
             <p class="mhint">
-              <template v-if="isLayered">{{ layerCount }} Ebene{{ layerCount === 1 ? '' : 'n' }} — steht danach in der Liste und in Playlists bereit.</template>
+              <template v-if="isLayered">{{ layerCount }} Ebene{{ layerCount === 1 ? '' : 'n' }} — danach in der Liste und in Playlists.</template>
               <template v-else>Als Preset speichern — verknüpfte Playlist-Schritte übernehmen spätere Änderungen.</template>
             </p>
             <div class="mrow">
@@ -403,6 +429,7 @@ async function onImportPresets (ev) {
 <style scoped>
 .hd { margin: 10px 2px 18px; }
 .title { font-size: 25px; font-weight: 800; letter-spacing: -.02em; color: var(--text); }
+.intro { font-size: 13px; color: var(--muted); line-height: 1.45; margin: 8px 0 0; }
 .sechd { font-size: 11px; font-weight: 700; letter-spacing: .12em; color: var(--muted); margin: 4px 4px 10px; }
 .iorow { display: flex; gap: 8px; margin: 0 2px 16px; }
 .iobtn {
@@ -421,6 +448,7 @@ async function onImportPresets (ev) {
 .cname.accent { color: var(--accent); }
 .badge { font-size: 10px; font-weight: 800; letter-spacing: .08em; color: #1a1206; background: var(--accent); padding: 2px 7px; border-radius: 6px; }
 .cdesc { font-size: 12px; color: var(--muted); }
+.ctip { font-size: 10px; color: var(--muted2); letter-spacing: .02em; }
 .cmeta { font-size: 11px; color: var(--muted2); flex: none; }
 .prev { display: block; height: 40px; border-radius: 11px; }
 
