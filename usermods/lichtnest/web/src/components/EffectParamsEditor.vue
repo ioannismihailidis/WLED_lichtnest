@@ -166,7 +166,8 @@ const ANGLE_PRESETS = [
 .cval { font-size: 13px; color: var(--accent); }
 .hint { margin: -4px 0 10px; font-size: 11px; color: var(--muted2); line-height: 1.35; }
 .color { width: 100%; height: 42px; border-radius: 11px; border: 1px solid var(--line2); background: var(--inset); cursor: pointer; padding: 4px; }
-.seg { display: flex; gap: 6px; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { flex: 1 1 auto; min-width: 4.5em; }
 .seg button { flex: 1; padding: 10px 4px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); color: var(--muted2); font-weight: 600; font-size: 13px; cursor: pointer; }
 .seg button.on { background: rgba(240,162,60,.16); border-color: var(--accent); color: var(--accent); }
 .mksel { width: 100%; height: 42px; border-radius: 11px; background: var(--inset); border: 1px solid var(--line2); color: var(--text); font-size: 13px; font-weight: 600; padding: 0 12px; cursor: pointer; }

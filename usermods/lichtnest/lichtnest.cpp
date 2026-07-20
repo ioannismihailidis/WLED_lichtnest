@@ -5,9 +5,10 @@
  *
  * - Exposes the physical LED outputs ("ports") to the custom UI (/json/info).
  * - Hosts our OWN spatial effect engine (docs/generators.md): named base
- *   effects (fx 0..3, 8, 9, 11, 12, 14), each with named parameters, rendered
+ *   effects (fx 0..6, 8, 9, 11, 12, 14), each with named parameters, rendered
  *   per-LED using the tube geometry (each LED's 2D position interpolated
- *   between the tube endpoints). Removed: 5 mpulse, 6/7, 10 chase, 13 scanner, 15 WLED.
+ *   between the tube endpoints). Gravity: 5 Kugelbahn, 6 Pendel; Fill mode Level/Tide.
+ *   Removed: 7, 10 chase, 13 scanner, 15 WLED.
  * - "fx": 4 ("Kombiniert") composites an ordered stack of up to ZV_MAXLAYERS
  *   base-effect LAYERS instead of one flat param set: each layer is a full
  *   effect (any base fx + its own params), optionally masked to a soft-edged
@@ -58,7 +59,7 @@ struct KF { float t = 0; float v = 0; uint32_t c = 0xFFFFFF; };
 
 // one effect + its full parameter set (union over all effects)
 struct FxParams {
-  uint8_t  fx = 3;                                          // generators 0..3,8,9,11,12,14; 4=layered; 5/6/7/10/13/15 removed
+  uint8_t  fx = 3;                                          // generators 0..6,8,9,11,12,14; 4=layered; 7/10/13/15 removed
   // impulse: colour gradient painted across each band — fcount colours + per-colour width
   uint8_t  fcount = 3;
   uint32_t fcols[ZV_MAXCOL] = { 0xFF5A3C, 0x7B3CFF, 0x27C5FF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF };
@@ -199,6 +200,12 @@ class Lichtnest : public Usermod {
     uint32_t _zufFlash = 0xFFFFFFFF, _zufPrevFlash = 0xFFFFFFFF;
     uint8_t  _zufSel[ZV_MAXPAL], _zufPrev[ZV_MAXPAL]; uint8_t _zufSelN = 0, _zufPrevN = 0;
     float    _cx = 0.5f, _cy = 0.5f;   // radial centre = centroid of the tube geometry
+
+    // Kugelbahn path cache (rebuilt when geo / dir / Fall-Pause change — not per pixel)
+    float    _mLens[ZV_MAXGEO], _mGaps[ZV_MAXGEO], _mPrefix[ZV_MAXGEO];
+    bool     _mFlip[ZV_MAXGEO];
+    float    _mTotal = 0;
+    uint8_t  _mGeoN = 0, _mDir = 255, _mHz = 255;
 
     // recompute the radial centre (average tube midpoint) after geometry changes
     void computeCenter() {
@@ -582,6 +589,7 @@ class Lichtnest : public Usermod {
       if (P.fx == 0) return impulseDur(P);
       if (P.fx == 1) return strobeDur(P);
       if (P.fx == 3) return solidDur(P);
+      if (P.fx == 5) return marbleDur(P);
       if (P.fx == 8) return fillDur(P);
       return 0.0f;
     }
@@ -589,7 +597,8 @@ class Lichtnest : public Usermod {
     // clamped). `frozen` renders each layer at its own natural end instead of following
     // `baseElapsed` — used for the outgoing side of a playlist crossfade, mirroring how
     // classic effects freeze at stepSeconds() for the duration of the transition.
-    uint32_t renderStack(LayerStack& LS, float baseElapsed, bool frozen, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal) {
+    // `along` = 0..1 electrical position on the current tube (Kugelbahn).
+    uint32_t renderStack(LayerStack& LS, float baseElapsed, bool frozen, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal, float along) {
       uint32_t acc = 0;
       for (uint8_t i = 0; i < LS.count; i++) {
         FxLayer& L = LS.layers[i];
@@ -605,7 +614,7 @@ class Lichtnest : public Usermod {
         // Without this, a layer Marker only drove the radius mask and Impuls ignored it.
         uint8_t savedOrigin = L.p.origin;
         if (L.marker != 255) L.p.origin = L.marker;
-        uint32_t c = computeColor(L.p, elapsed, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal);
+        uint32_t c = computeColor(L.p, elapsed, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, along);
         L.p.origin = savedOrigin;
         if (mask < 1.0f) c = scaleCol(c, mask);
         acc = combineBlend(L.blend, acc, c);
@@ -686,14 +695,91 @@ class Lichtnest : public Usermod {
       if (P.fx == 0) return P.width ? 0.0f : impulseDur(P);
       if (P.fx == 1) return strobeDur(P);
       if (P.fx == 3) return solidDur(P);
+      if (P.fx == 5) return marbleDur(P);
       if (P.fx == 8) return fillDur(P);
       return 0.0f;
     }
     float fillDur(const FxParams& P) {
+      // Level / Tide — continuous (playlist `dur`)
+      if (P.mode != 0) return 0.0f;
       float v = (P.speed / 100.0f) * 0.6f; if (v < 0.001f) v = 0.001f;
       float soft = P.rwidth / 100.0f; if (soft < 0.02f) soft = 0.02f;
       float A = P.rfin * 0.1f, D = P.rgap * 0.1f, R = P.rfout * 0.1f;
       return (pulseUmax(P) + soft) / v + A + D + R + 0.2f;
+    }
+
+    // --- Kugelbahn path (chain/geo order, gravity-oriented tubes + air gaps) ---
+    // Fills lens[0..n), gaps[0..n-2], prefix[0..n); returns path total length. n = geoCount.
+    float marbleBuildPath(const FxParams& P, float* lens, float* gaps, float* prefix, bool* flip) const {
+      uint8_t n = geoCount;
+      if (n == 0) return 1e-4f;
+      float airExtra = P.hz * 0.01f;   // wire: Fall-Pause (hz slot; ADSR keeps rgap)
+      float total = 0.0f;
+      for (uint8_t g = 0; g < n; g++) {
+        float dx = gx2[g] - gx1[g], dy = gy2[g] - gy1[g];
+        float len = sqrtf(dx * dx + dy * dy); if (len < 1e-4f) len = 1e-4f;
+        lens[g] = len;
+        bool end1Top = gy1[g] <= gy2[g];
+        flip[g] = P.dir ? end1Top : !end1Top;
+        prefix[g] = total;
+        total += len;
+        if (g + 1 < n) {
+          float ex = flip[g] ? gx1[g] : gx2[g];
+          float ey = flip[g] ? gy1[g] : gy2[g];
+          bool nEnd1Top = gy1[g + 1] <= gy2[g + 1];
+          bool nFlip = P.dir ? nEnd1Top : !nEnd1Top;
+          float ix = nFlip ? gx2[g + 1] : gx1[g + 1];
+          float iy = nFlip ? gy2[g + 1] : gy1[g + 1];
+          float gdx = ix - ex, gdy = iy - ey;
+          float gap = sqrtf(gdx * gdx + gdy * gdy);
+          if (gap < 0.02f) gap = 0.02f;
+          gap += airExtra;
+          gaps[g] = gap;
+          total += gap;
+        }
+      }
+      return total < 1e-4f ? 1e-4f : total;
+    }
+    static float marbleTravel(const FxParams& P, float t) {
+      if (t <= 0.0f) return 0.0f;
+      float v = (P.speed / 100.0f) * 0.6f; if (v < 0.001f) v = 0.001f;
+      if (P.mode == 1) { float g = v * 1.2f; return 0.5f * g * t * t; }
+      return v * t;
+    }
+    void ensureMarblePath(const FxParams& P) {
+      if (_mGeoN == geoCount && _mDir == P.dir && _mHz == P.hz && geoCount > 0) return;
+      _mTotal = marbleBuildPath(P, _mLens, _mGaps, _mPrefix, _mFlip);
+      _mGeoN = geoCount; _mDir = P.dir; _mHz = P.hz;
+    }
+    float marbleDur(const FxParams& P) {
+      ensureMarblePath(P);
+      float pathTotal = _mTotal;
+      float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
+      w *= (pathTotal < 0.15f ? 0.15f : pathTotal);
+      float span = pathTotal + w;
+      float v = (P.speed / 100.0f) * 0.6f; if (v < 0.001f) v = 0.001f;
+      float tLast;
+      if (P.mode == 1) {
+        float g = v * 1.2f; if (g < 1e-4f) g = 1e-4f;
+        tLast = sqrtf(2.0f * span / g);
+      } else {
+        tLast = span / v;
+      }
+      float Nn = P.count < 1 ? 1 : P.count;
+      float iv = P.interval * 0.1f; if (iv < 0.05f) iv = 0.05f;
+      return (Nn - 1) * iv + tLast + 0.2f;
+    }
+    static bool marbleOnRail(uint8_t n, const float* lens, const float* gaps, const float* prefix, float s) {
+      if (s < 0.0f) return false;
+      for (uint8_t g = 0; g < n; g++) {
+        float a = prefix[g], b = a + lens[g];
+        if (s >= a && s <= b + 1e-6f) return true;
+        if (g + 1 < n) {
+          float g0 = b, g1 = g0 + gaps[g];
+          if (s > g0 && s < g1) return false;
+        }
+      }
+      return false;
     }
     // resolve a named marker (or tube centroid) into ox/oy — shared by mpulse/split
     void markerXY(const FxParams& P, float& ox, float& oy) const {
@@ -713,8 +799,9 @@ class Lichtnest : public Usermod {
       return (t < span) ? t : (2.0f * span - t);
     }
 
-    // render one pixel of effect P at `elapsed` seconds into its step (deterministic; mirrors fxsim)
-    uint32_t computeColor(const FxParams& P, float elapsed, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal) {
+    // render one pixel of effect P at `elapsed` seconds into its step (deterministic; mirrors fxsim/gravity.js)
+    // `along` = 0..1 electrical position on the current tube (used by Kugelbahn)
+    uint32_t computeColor(const FxParams& P, float elapsed, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal, float along) {
       switch (P.fx) {
         case 0: { // Impuls — bands over 2D (linear/radial) or LED chain; optional travel easing via mode
           if (P.speed == 0) return 0;
@@ -803,26 +890,133 @@ class Lichtnest : public Usermod {
           if (P.breathe) { float ph = 6.2831853f * curvePhase(K, n, elapsed); b = 0.25f + 0.75f * (0.5f + 0.5f * sinf(ph)); }
           return scaleCol(col, b);
         }
-        case 5: // removed Marker Pulse
-        case 6: // removed Split Zones
+        case 5: { // Kugelbahn — marbles roll down each tube (gravity), air-gap to next tube
+          if (P.speed == 0 || geoCount == 0 || tubeIdx >= geoCount) return 0;
+          ensureMarblePath(P);
+          float pathTotal = _mTotal;
+          float f = along; if (f < 0) f = 0; if (f > 1) f = 1;
+          float alongG = _mFlip[tubeIdx] ? (1.0f - f) : f;
+          float sLed = _mPrefix[tubeIdx] + alongG * _mLens[tubeIdx];
+          float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
+          float pathRef = pathTotal < 0.15f ? 0.15f : pathTotal;
+          w *= pathRef;
+          float tail = (P.tail / 100.0f) * pathRef;
+          float iv = P.interval * 0.1f; if (iv < 0.05f) iv = 0.05f;
+          uint8_t Nn = P.count < 1 ? 1 : P.count;
+          float A = P.rfin * 0.1f, Dec = P.rgap * 0.1f, Rel = P.rfout * 0.1f;
+          float S = P.tempo / 100.0f; if (S < 0) S = 0; if (S > 1) S = 1;
+          float best = 0.0f;
+          for (uint8_t k = 0; k < Nn; k++) {
+            float tk = k * iv; if (elapsed < tk) continue;
+            float sm = marbleTravel(P, elapsed - tk);
+            if (sm > pathTotal + w) continue;
+            if (!marbleOnRail(geoCount, _mLens, _mGaps, _mPrefix, sm) && sm < pathTotal) {
+              bool near = false;
+              for (uint8_t g = 0; g < geoCount; g++) {
+                float a = _mPrefix[g], b = a + _mLens[g];
+                if (fabsf(sm - a) < w || fabsf(sm - b) < w) { near = true; break; }
+              }
+              if (!near) continue;
+            }
+            float behind = sm - sLed;
+            if (behind < 0.0f) continue;
+            float bri = 0.0f;
+            if (behind <= w) {
+              float g = behind / w;
+              bri = envelopeUnit(g, A, Dec, S, Rel);
+            } else if (tail > 0.0f && behind <= w + tail) {
+              float u = (behind - w) / tail;
+              bri = S * expf(-3.0f * u);
+            }
+            if (bri > best) best = bri;
+          }
+          if (best <= 0.0f) return 0;
+          return scaleCol(gradN(P, 0.5f), best);
+        }
+        case 6: { // Pendel — sinusoidal bob on spatial axis + soft tail
+          float d = pulseDist(P, x, y);
+          float umax = pulseUmax(P); if (umax < 0.001f) umax = 0.001f;
+          float u = d / umax;
+          float amp = P.rwidth / 200.0f; if (amp < 0.05f) amp = 0.05f; if (amp > 0.5f) amp = 0.5f;
+          float hz = 0.15f + (P.speed / 100.0f) * 1.35f;
+          float Aenv = (P.mode == 1) ? expf(-0.45f * elapsed) : 1.0f;
+          float ph = 6.2831853f * hz * elapsed;
+          float pos = 0.5f + amp * Aenv * sinf(ph);
+          float vel = cosf(ph);
+          float headW = (P.tail / 100.0f) * 0.55f; if (headW < 0.02f) headW = 0.02f;
+          float dist = u - pos;
+          float bri = 0.0f;
+          float ad = fabsf(dist);
+          if (ad <= headW) {
+            bri = 1.0f - ad / headW;
+          } else {
+            float behind = dist * (vel >= 0.0f ? 1.0f : -1.0f);
+            float tailLen = headW * (1.5f + (P.duty / 100.0f) * 2.0f);
+            if (behind > 0.0f && behind < tailLen) bri = (1.0f - behind / tailLen) * 0.55f;
+          }
+          if (bri <= 0.0f) return 0;
+          float At = P.rfin * 0.1f;
+          float S = P.tempo / 100.0f; if (S < 0) S = 0; if (S > 1) S = 1;
+          float env = S;
+          if (At > 0.0f && elapsed < At) env = S * (elapsed / At);
+          bri *= env;
+          if (bri <= 0.0f) return 0;
+          float gph = u; if (gph < 0) gph = 0; if (gph > 1) gph = 1;
+          return scaleCol(gradN(P, gph), bri);
+        }
         case 7: // removed Gradient Sweep
           return 0;
-        case 8: { // Fill / Reveal — wavefront fills the field; brightness follows ADSR
-          if (P.speed == 0) return 0;
+        case 8: { // Fill — Reveal / Wasserstand / Gezeiten
           float d = pulseDist(P, x, y);
-          float v = (P.speed / 100.0f) * 0.6f;
           float soft = P.rwidth / 100.0f; if (soft < 0.02f) soft = 0.02f;
-          float front = v * elapsed;
-          if (d >= front) return 0;
           float umax = pulseUmax(P); if (umax < 0.001f) umax = 0.001f;
           float A = P.rfin * 0.1f, Dec = P.rgap * 0.1f, R = P.rfout * 0.1f;
           float S = P.tempo / 100.0f; if (S < 0) S = 0; if (S > 1) S = 1;
+
+          if (P.mode == 2) { // Tide
+            float hz = 0.05f + (P.speed / 100.0f) * 0.45f;
+            float amp = P.duty / 100.0f; if (amp < 0.05f) amp = 0.05f; if (amp > 1) amp = 1;
+            float h = umax * (0.5f + 0.5f * amp * sinf(6.2831853f * hz * elapsed));
+            if (d > h + soft) return 0;
+            float env = S;
+            if (A > 0.0f && elapsed < A) env = S * (elapsed / A);
+            if (env <= 0.0f) return 0;
+            float k = env;
+            if (d > h - soft) k *= (h + soft - d) / (2.0f * soft);
+            if (k < 0) k = 0;
+            float gph = d / umax; if (gph < 0) gph = 0; if (gph > 1) gph = 1;
+            return scaleCol(gradN(P, gph), k);
+          }
+          if (P.mode == 1) { // Wasserstand — pour then hold
+            if (P.speed == 0) return 0;
+            float v = (P.speed / 100.0f) * 0.6f;
+            float front = v * elapsed; if (front > umax) front = umax;
+            if (d >= front + soft) return 0;
+            float tLocal = (front > 1e-4f) ? (elapsed - d / v) : elapsed;
+            if (tLocal < 0) tLocal = 0;
+            float env = envelopeAt(tLocal, A, Dec, S, 0.0f);
+            if (env <= 0.0f) return 0;
+            float k = env;
+            if (d > front - soft) {
+              float den = 2.0f * soft; if (den < 1e-4f) den = 1e-4f;
+              k *= (front + soft - d) / den;
+              if (k < 0) k = 0;
+            }
+            float gph = d / umax; if (gph < 0) gph = 0; if (gph > 1) gph = 1;
+            return scaleCol(gradN(P, gph), k);
+          }
+
+          // Reveal — wavefront + ADSR (+ global release)
+          if (P.speed == 0) return 0;
+          float v = (P.speed / 100.0f) * 0.6f;
+          float front = v * elapsed;
+          if (d >= front) return 0;
           float tFill = (umax + soft) / v;
           float tRel0 = tFill + A + Dec;
           float env;
           if (R > 0.0f && elapsed >= tRel0) {
-            float u = (elapsed - tRel0) / R;
-            env = (u >= 1.0f) ? 0.0f : S * (1.0f - u);
+            float uu = (elapsed - tRel0) / R;
+            env = (uu >= 1.0f) ? 0.0f : S * (1.0f - uu);
           } else {
             float tLocal = elapsed - d / v;
             if (tLocal <= 0.0f) env = 0.0f;
@@ -998,11 +1192,11 @@ class Lichtnest : public Usermod {
           uint32_t c;
           uint32_t cTo;
           if (toWait) cTo = 0;                                                          // pause -> black
-          else if (toLayered) cTo = renderStack(toLS, elToRaw, false, x, y, i, chainTotal, g, geoCount);
-          else cTo = computeColor(to, elTo, x, y, i, chainTotal, g, geoCount);
+          else if (toLayered) cTo = renderStack(toLS, elToRaw, false, x, y, i, chainTotal, g, geoCount, f);
+          else cTo = computeColor(to, elTo, x, y, i, chainTotal, g, geoCount, f);
           if (tr) {
-            uint32_t a = fromLayered ? renderStack(_trFromLayers, 0.0f, true, x, y, i, chainTotal, g, geoCount)
-                                     : computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount);
+            uint32_t a = fromLayered ? renderStack(_trFromLayers, 0.0f, true, x, y, i, chainTotal, g, geoCount, f)
+                                     : computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount, f);
             c = applyTransition(a, cTo, trProg, x, y, i, g);
           } else {
             c = cTo;
@@ -1110,7 +1304,7 @@ class Lichtnest : public Usermod {
       // --- geometry ---
       JsonArray geo = o["geo"];
       if (!geo.isNull()) {
-        geoCount = 0;
+        geoCount = 0; _mGeoN = 0;   // invalidate Kugelbahn path cache
         for (JsonObject t : geo) {
           if (geoCount >= ZV_MAXGEO) break;
           geoId[geoCount] = t["id"] | 0;
@@ -1199,6 +1393,8 @@ class Lichtnest : public Usermod {
       if (!p["bounce"].isNull()) P.width = p["bounce"] | (uint8_t)0;   // travel mode → width slot
       P.pmode = p["pmode"] | P.pmode; P.origin = p["origin"] | P.origin;
       P.hz = p["hz"] | P.hz; P.duty = p["duty"] | P.duty; P.mode = p["mode"] | P.mode;
+      // Fill: legacy presets omit mode — keep Reveal (0). Struct default mode=1 is for strobe/noise.
+      if (P.fx == 8 && p["mode"].isNull()) P.mode = 0;
       P.tail = p["tail"] | P.tail; P.dir = p["dir"] | P.dir; P.tempo = p["tempo"] | P.tempo; P.breathe = p["breathe"] | P.breathe;
       P.rfin = p["rfin"] | P.rfin; P.rfout = p["rfout"] | P.rfout; P.rwidth = p["rwidth"] | P.rwidth; P.rgap = p["rgap"] | P.rgap;
       P.count = p["count"] | P.count; P.interval = p["interval"] | P.interval; P.cpar = p["cpar"] | P.cpar;
@@ -1602,7 +1798,7 @@ class Lichtnest : public Usermod {
       if (deserializeJson(doc, f) == DeserializationError::Ok) {
         JsonObject tubes = doc["tubes"];
         if (!tubes.isNull()) {
-          geoCount = 0;
+          geoCount = 0; _mGeoN = 0;
           for (JsonPair kv : tubes) {
             if (geoCount >= ZV_MAXGEO) break;
             JsonObject c = kv.value().as<JsonObject>();

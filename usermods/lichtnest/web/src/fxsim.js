@@ -12,6 +12,10 @@
 // Both only touch the import inside function bodies, never at module-eval time, so
 // the circular import resolves fine under ESM/Vite.
 import { impulsePositions, impulseColorAt, impulseDist, impulseUmax, impulseDuration, fillDuration, fillColorAt, adsrParts, envelopeAt, envelopeUnit } from './impulse.js'
+import {
+  buildMarblePath, tubesFromPts, marbleLedS, marblePositions, marbleColorAt, marbleDuration,
+  pendulumColorAt,
+} from './gravity.js'
 import { defaultParams, effectById } from './effects.js'
 
 const lerp = (a, b, t) => a + (b - a) * t
@@ -55,6 +59,8 @@ export function phaseRate (fx, p, N) {
   if (fx === 0) return ((p.speed ?? 42) / 100) * 0.6
   if (fx === 1) return Math.max(1, p.hz || 6)
   if (fx === 2) return 1                                          // Neon: phase = elapsed (s)
+  if (fx === 5) return 1                                          // Kugelbahn: phase = elapsed (s)
+  if (fx === 6) return 1                                          // Pendel: phase = elapsed (s)
   if (fx === 9) return ((p.speed ?? 36) / 100) * 0.5               // Welle travel
   if (fx === 11) return ((p.speed ?? 0) / 100) * 90                // Spotlight rotation (°/s)
   if (fx === 12) return 1                                          // Twinkle: phase = elapsed (s); speed/duty inside fx
@@ -271,12 +277,15 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       if (bri <= 0) return [0, 0, 0]
       return scale(effectCol(p, bri), bri)
     }
-    case 5: // removed Marker Pulse
-    case 6: // removed Split Zones
+    case 5: // Kugelbahn — needs tube path; use marbleColorAt via layer/MiniPlan context
     case 7: // removed Gradient Sweep
     case 10: // removed Tube Chase
     case 13: // removed Scanner
       return [0, 0, 0]
+    case 6: { // Pendel — phase = elapsed; soft bob on spatial axis
+      const umax = 1 // caller should prefer pendulumColorAt with real umax
+      return pendulumColorAt(p, x, y, cx, cy, phase, umax)
+    }
     case 9: { // Welle — phase = rate*t; intensity + colour from sin wave along pulseDist
       let d
       if (p.pmode === 1) {
@@ -414,6 +423,10 @@ export function layerNaturalDuration (layer, geomPts, cx, cy) {
   if (layer.fx === 0) return impulseDuration(p, impulseUmax(p, geomPts, cx, cy))
   if (layer.fx === 1) return strobeDuration(p)
   if (layer.fx === 3) return solidDuration(p)
+  if (layer.fx === 5) {
+    const path = buildMarblePath(tubesFromPts(geomPts), p.dir || 0, p.hz ?? 8)
+    return marbleDuration(p, path.total)
+  }
   if (layer.fx === 8) return fillDuration(p, impulseUmax(p, geomPts, cx, cy))
   return 0
 }
@@ -438,11 +451,18 @@ export function layerContext (layer, elapsedRaw, geomPts, chainTotal, markerXY) 
   // does Math.sin(phase); undefined phase → NaN → pure black tubes in the preview
   if (fx === 3) return { fx, p: { ...p, color: solidColorAt(p, elapsed) }, cx, cy, phase: solidPhaseAt(p, elapsed) }
   if (fx === 1) return { fx, p, cx, cy, phase: strobePhaseAt(p, elapsed) }
+  if (fx === 5) {
+    const path = buildMarblePath(tubesFromPts(geomPts), p.dir || 0, p.hz ?? 8)
+    return { fx, p, cx, cy, elapsed, path, positions: marblePositions(p, elapsed, path.total) }
+  }
+  if (fx === 6) return { fx, p, cx, cy, elapsed, umax: impulseUmax(p, geomPts, cx, cy) }
   if (fx === 8) return { fx, p, cx, cy, elapsed, umax: impulseUmax(p, geomPts, cx, cy) }
   return { fx, p, cx, cy, phase: elapsed * phaseRate(fx, p, chainTotal || 1) }
 }
 function layerColorAt (ctx, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, along = null) {
   if (ctx.fx === 0) return impulseColorAt(ctx.positions, ctx.p, impulseDist(ctx.p, x, y, ctx.cx, ctx.cy, chainIdx, chainTotal), ctx.umax || 1)
+  if (ctx.fx === 5) return marbleColorAt(ctx.positions, ctx.p, marbleLedS(ctx.path, tubeIdx, along ?? 0), ctx.path)
+  if (ctx.fx === 6) return pendulumColorAt(ctx.p, x, y, ctx.cx, ctx.cy, ctx.elapsed, ctx.umax || 1)
   if (ctx.fx === 8) return fillColorAt(ctx.p, impulseDist(ctx.p, x, y, ctx.cx, ctx.cy), ctx.elapsed, ctx.umax)
   return fxColor(ctx.fx, ctx.p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, ctx.phase, ctx.cx, ctx.cy, along)
 }

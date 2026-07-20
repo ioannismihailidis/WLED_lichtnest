@@ -6,6 +6,7 @@ import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { wled, lichtnest, plan, liveFxP, liveTransition, effectOrigin, tubeGeometry } from '../wled.js'
 import { fxColor, phaseRate, strobePhaseAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt, buildLayerContexts, compositeColor } from '../fxsim.js'
 import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulseUmax, fillDuration, fillColorAt } from '../impulse.js'
+import { buildMarblePath, marbleLedS, marblePositions, marbleColorAt, marbleDuration, pendulumColorAt } from '../gravity.js'
 import { applyTransition, buildTubeOrder } from '../transitions.js'
 import { sampleEffect } from '../previewSample.js'
 import { setPreviewElapsed } from '../previewClock.js'
@@ -29,8 +30,15 @@ function origin (p) {
 let lph = 0, lts = 0, lelapsed = 0
 let sTs = 0, sElapsed = 0   // free-running raw clock for the "Kombiniert" (layered) path
 // natural finite duration (mirrors firmware stepSeconds) — 0 = continuous / free-run, no wrap
-const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1 ? strobeDuration(p) : fx === 3 ? solidDuration(p) : fx === 8 ? fillDuration(p, umax) : 0)
-function frame (fx, p, umax) {
+const stepDur = (fx, p, umax, pathTotal = 1) => (
+  fx === 0 ? impulseDuration(p, umax)
+    : fx === 1 ? strobeDuration(p)
+      : fx === 3 ? solidDuration(p)
+        : fx === 5 ? marbleDuration(p, pathTotal)
+          : fx === 8 ? fillDuration(p, umax)
+            : 0
+)
+function frame (fx, p, umax, pathTotal = 1) {
   const now = performance.now(); let dt = lts ? (now - lts) / 1000 : 0; lts = now
   if (!(dt > 0 && dt < 1)) dt = 0
   const delay = edelay()
@@ -38,8 +46,8 @@ function frame (fx, p, umax) {
   if (!props.local && wled.pl.active && wled.pl.durMs > 0) {   // overall preview: follow the running step
     elapsed = Math.min(wled.pl.durMs, wled.pl.elapsedMs + (Date.now() - wled.pl.syncAt)) / 1000
   } else {
-    const dur = stepDur(fx, p, umax)
-    // only impulse/strobe/solid/fill wrap (seamless black→black or keyframe cycle);
+    const dur = stepDur(fx, p, umax, pathTotal)
+    // only impulse/strobe/solid/fill/marble wrap (seamless black→black or keyframe cycle);
     // ambient effects free-run so their phase never jumps (matches firmware)
     if (dur > 0.05) lelapsed = (lelapsed + dt) % (delay + dur)
     else lelapsed += dt
@@ -51,7 +59,7 @@ function frame (fx, p, umax) {
   let phase
   if (fx === 1) phase = strobePhaseAt(p, elapsed)
   else if (fx === 3) phase = solidPhaseAt(p, elapsed)
-  else if (fx === 2 || fx === 9 || fx === 11 || fx === 12 || fx === 14) phase = elapsed * phaseRate(fx, p, wled.info.leds?.count || 1)
+  else if (fx === 2 || fx === 5 || fx === 6 || fx === 9 || fx === 11 || fx === 12 || fx === 14) phase = elapsed * phaseRate(fx, p, wled.info.leds?.count || 1)
   else { lph += dt * phaseRate(fx, p, wled.info.leds?.count || 1); phase = lph }
   return { elapsed, phase, wait }
 }
@@ -143,10 +151,20 @@ function draw () {
   }
 
   const [cx, cy] = origin(pp)
-  const umax = (fx === 0 || fx === 8) ? impulseUmax(pp, CORNERS, cx, cy) : 1
-  const { elapsed, phase: t, wait } = frame(fx, pp, umax)
+  const geo = tubeGeometry()
+  let umax = 1
+  if (fx === 0 || fx === 6 || fx === 8) {
+    const pts = []
+    const src = (fx === 6 && geo.length) ? geo : null
+    if (src) for (const t of src) pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 })
+    umax = impulseUmax(pp, pts.length ? pts : CORNERS, cx, cy)
+  }
+  const marblePath = fx === 5
+    ? buildMarblePath(geo.length ? geo : CORNERS.map((c) => ({ x1: c.x, y1: c.y, x2: c.x, y2: c.y })), pp.dir || 0, pp.hz ?? 8)
+    : null
+  const { elapsed, phase: t, wait } = frame(fx, pp, umax, marblePath ? marblePath.total : 1)
   setPreviewElapsed(elapsed)
-  const positions = fx === 0 ? impulsePositions(pp, elapsed) : null
+  const positions = fx === 0 ? impulsePositions(pp, elapsed) : (fx === 5 ? marblePositions(pp, elapsed, marblePath.total) : null)
   const rp = fx === 3 ? { ...pp, color: solidColorAt(pp, elapsed) } : pp   // solid: colour over time
   const img = bctx.createImageData(bw, bh)
   for (let gy = 0; gy < bh; gy++) {
@@ -157,6 +175,8 @@ function draw () {
       let col = [22, 24, 28]
       if (on && !wait) {
         if (fx === 0) col = impulseColorAt(positions, pp, impulseDist(pp, x, y, cx, cy, idx, total), umax)
+        else if (fx === 5) col = marbleColorAt(positions, pp, marbleLedS(marblePath, tubeIdx, x), marblePath)
+        else if (fx === 6) col = pendulumColorAt(pp, x, y, cx, cy, elapsed, umax)
         else if (fx === 8) col = fillColorAt(pp, impulseDist(pp, x, y, cx, cy), elapsed, umax)
         else col = fxColor(fx, rp, x, y, idx, total, tubeIdx, N, t, cx, cy, x)
       }

@@ -476,7 +476,7 @@ function confirmImport () {
             <template v-if="isTrItem(it)">{{ it.trDur }}s</template>
             <template v-else>
               <span v-if="it.delay > 0" class="wait">⏸{{ it.delay }}·</span>
-              <span v-if="it.fx === 0 || it.fx === 1 || it.fx === 3 || it.fx === 8" class="auto">~{{ autoDur(it) }}s</span>
+              <span v-if="it.fx === 0 || it.fx === 1 || it.fx === 3 || it.fx === 5 || (it.fx === 8 && !(it.p && it.p.mode))" class="auto">~{{ autoDur(it) }}s</span>
               <span v-else>{{ it.dur }}s</span>
             </template>
           </span>
@@ -535,7 +535,7 @@ function confirmImport () {
         <div v-if="expanded === it.uid && !isTrItem(it)" class="iexp">
           <div class="actrow">
             <button class="pstep" :class="{ on: isCurrent(it) }" title="Ab hier abspielen" @click="playFrom(i)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z" /></svg> Ab hier</button>
-            <span v-if="it.fx === 0 || it.fx === 1 || it.fx === 3 || it.fx === 8" class="dur mono auto">~{{ autoDur(it) }}s</span>
+            <span v-if="it.fx === 0 || it.fx === 1 || it.fx === 3 || it.fx === 5 || (it.fx === 8 && !(it.p && it.p.mode))" class="dur mono auto">~{{ autoDur(it) }}s</span>
             <span v-else class="dur mono"><button @click="bumpDur(it, -5)">−</button><b>{{ it.dur }}s</b><button @click="bumpDur(it, 5)">+</button></span>
             <button class="ic del sm" @click="removeItem(it)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M9 7V5h6v2M7 7l1 12h8l1-12" /></svg></button>
           </div>

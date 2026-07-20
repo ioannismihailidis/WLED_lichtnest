@@ -160,15 +160,67 @@ export const EFFECTS = [
     ],
   },
   {
-    id: 8, key: 'fill', name: 'Fill / Reveal', category: 'flaeche',
-    desc: 'Eine Wellenfront füllt die Fläche — Helligkeit folgt ADSR (Attack → Decay → Sustain → Release).',
-    tip: 'Radial am Marker + Twinkle darüber = Reveal-Look.',
-    preview: 'linear-gradient(90deg,#0d0f13 0 35%,#ff5a3c 40%,#7b3cff 70%,#27c5ff 100%)',
+    id: 5, key: 'marble', name: 'Kugelbahn', category: 'bewegung',
+    desc: 'Kugeln rollen tubeweise nach unten und fallen an der richtigen Stelle auf die nächste Tube — wie eine Kugelbahn über den Plan.',
+    tip: 'Tubes im Plan in Bahn-Reihenfolge legen (Chain-Order). Fall-Pause für längere Luft-Übergänge.',
+    preview: 'radial-gradient(circle at 20% 15%,#ffd27a 0 3%,transparent 4%),radial-gradient(circle at 35% 45%,#ffd27a 0 3%,transparent 4%),radial-gradient(circle at 55% 75%,#ffd27a 0 3%,transparent 4%),#0d0f13',
     params: [
-      COLOR_GRAD(),
+      COLOR_GRAD({ seedColor: [255, 210, 122] }),
+      MOTION_DIR('Gravity', { options: [{ v: 0, l: 'Nach unten' }, { v: 1, l: 'Nach oben' }] }),
+      {
+        key: 'mode', type: 'select', name: 'Rollen', group: 'bewegung',
+        options: [{ v: 0, l: 'Gleichmäßig' }, { v: 1, l: 'Beschleunigen' }],
+      },
+      { key: 'count', type: 'range', name: 'Kugeln', min: 1, max: 12, def: 3, group: 'bewegung' },
+      { key: 'interval', type: 'range', name: 'Abstand', min: 1, max: 50, mul: 0.1, unit: 's', def: 10, group: 'bewegung' },
+      { key: 'rwidth', type: 'range', name: 'Kugelgröße', min: 4, max: 60, unit: '%', def: 18, group: 'raum' },
+      { key: 'tail', type: 'range', name: 'Schweif', min: 0, max: 80, unit: '%', def: 22, group: 'raum' },
+      { key: 'hz', type: 'range', name: 'Fall-Pause', min: 0, max: 40, def: 8, group: 'bewegung', hint: 'Luft zwischen Tubes' },
+      MOTION_SPEED('Tempo', 48),
+      ADSR_BLOCK({ rfin: 0, rgap: 0, tempo: 100, rfout: 3 }),
+    ],
+  },
+  {
+    id: 6, key: 'pendulum', name: 'Pendel', category: 'bewegung',
+    desc: 'Ein weicher Kopf schwingt sinusförmig — langsam an den Enden, schnell in der Mitte (Gravity-Feel).',
+    tip: 'Richtung = Schwingachse; Schweif folgt der Bewegung. Sustain unter 100% = Ausklingen.',
+    preview: 'radial-gradient(circle at 50% 30%,#27c5ff 0 4%,transparent 6%),linear-gradient(90deg,#0d0f13,#27c5ff33 50%,#0d0f13),#0d0f13',
+    params: [
+      COLOR_GRAD({ seedColor: [39, 197, 255] }),
+      ...SPATIAL_PLANE,
+      { key: 'rwidth', type: 'range', name: 'Amplitude', min: 10, max: 100, unit: '%', def: 40, group: 'raum' },
+      { key: 'tail', type: 'range', name: 'Kopf / Weiche', min: 4, max: 80, unit: '%', def: 22, group: 'raum' },
+      { key: 'duty', type: 'range', name: 'Schweif', min: 0, max: 100, unit: '%', def: 35, group: 'bewegung' },
+      MOTION_SPEED('Frequenz', 36),
+      {
+        key: 'mode', type: 'select', name: 'Ausklang', group: 'bewegung',
+        options: [{ v: 0, l: 'Dauerhaft' }, { v: 1, l: 'Gedämpft' }],
+      },
+      ADSR_BLOCK({ rfin: 2, rgap: 0, tempo: 100, rfout: 0 }),
+    ],
+  },
+  {
+    id: 8, key: 'fill', name: 'Fill / Wasserstand', category: 'flaeche',
+    desc: 'Pegel füllt die Fläche: Reveal (Wellenfront), Wasserstand (einschenken & halten) oder Gezeiten (atmend).',
+    tip: 'Oben „Art“ wählen: Wasserstand = Pegel steigt und bleibt; Gezeiten = langsam auf/ab; Reveal = klassische Front.',
+    preview: 'linear-gradient(180deg,#0d0f13 0 40%,#27c5ff55 40%,#27c5ff 70%,#0a4a6a 100%)',
+    params: [
+      {
+        key: 'mode', type: 'select', name: 'Art', group: 'raum', def: 0,
+        options: [
+          { v: 0, l: 'Reveal' },
+          { v: 1, l: 'Wasserstand' },
+          { v: 2, l: 'Gezeiten' },
+        ],
+      },
+      COLOR_GRAD({ seedColor: [39, 197, 255] }),
       ...SPATIAL_PLANE,
       SOFT_EDGE('Weiche Kante', 18),
       MOTION_SPEED(),
+      {
+        key: 'duty', type: 'range', name: 'Gezeiten-Amplitude', min: 5, max: 100, unit: '%', def: 55, group: 'bewegung',
+        show: (p) => (p.mode || 0) === 2,
+      },
       ADSR_BLOCK({ rfin: 0, rgap: 0, tempo: 100, rfout: 0 }),
     ],
   },
@@ -255,7 +307,7 @@ export const V2_CATEGORIES = [
 ]
 
 /** Base generators for Effekte 2.0 (docs/generators.md) — incl. Neon as takt special. */
-export const V2_GENERATOR_IDS = [3, 8, 9, 11, 14, 0, 12, 1, 2]
+export const V2_GENERATOR_IDS = [3, 8, 9, 11, 14, 0, 5, 6, 12, 1, 2]
 export const V2_GENERATORS = V2_GENERATOR_IDS.map((id) => effectById(id)).filter(Boolean)
 
 /** Catalogue groups for Effekte 2.0 list view. */
@@ -400,6 +452,26 @@ export function recipePresetSeeds () {
       p: {
         ...defaultParams(0),
         pmode: 2, bounce: 1, rwidth: 10, speed: 36, count: 1, interval: 1, dir: 0,
+      },
+    },
+    {
+      id: 'recipe-wasserstand',
+      name: 'Wasserstand',
+      fx: 8,
+      p: {
+        ...defaultParams(8),
+        mode: 1, pmode: 0, angle: 90, speed: 28, rwidth: 14,
+        rfin: 0, rgap: 0, tempo: 100, rfout: 0,
+      },
+    },
+    {
+      id: 'recipe-gezeiten',
+      name: 'Gezeiten',
+      fx: 8,
+      p: {
+        ...defaultParams(8),
+        mode: 2, pmode: 0, angle: 90, speed: 22, duty: 60, rwidth: 12,
+        rfin: 2, rgap: 0, tempo: 100, rfout: 0,
       },
     },
   ]

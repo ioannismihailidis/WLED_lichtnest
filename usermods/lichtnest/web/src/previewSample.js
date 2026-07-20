@@ -2,8 +2,16 @@
 // (incl. dual-render during playlist transitions).
 import { fxColor, strobePhaseAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt, buildLayerContexts, compositeColor, phaseRate } from './fxsim.js'
 import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulseUmax, fillDuration, fillColorAt } from './impulse.js'
+import { buildMarblePath, marbleLedS, marblePositions, marbleColorAt, marbleDuration, pendulumColorAt } from './gravity.js'
 
-const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1 ? strobeDuration(p) : fx === 3 ? solidDuration(p) : fx === 8 ? fillDuration(p, umax) : 0)
+const stepDur = (fx, p, umax, pathTotal = 1) => (
+  fx === 0 ? impulseDuration(p, umax)
+    : fx === 1 ? strobeDuration(p)
+      : fx === 3 ? solidDuration(p)
+        : fx === 5 ? marbleDuration(p, pathTotal)
+          : fx === 8 ? fillDuration(p, umax)
+            : 0
+)
 
 /**
  * @param {{ fx, p, layers }} step
@@ -31,13 +39,14 @@ export function sampleEffect (step, ctx) {
 
   const [cx, cy] = originFn(p)
   let umax = 1
-  if (fx === 0 || fx === 8) {
+  const marblePath = fx === 5 ? buildMarblePath(list || [], p.dir || 0, p.hz ?? 8) : null
+  if (fx === 0 || fx === 6 || fx === 8) {
     const pts = []
     for (const tb of list) pts.push({ x: tb.x1, y: tb.y1 }, { x: tb.x2, y: tb.y2 })
     umax = impulseUmax(p, pts, cx, cy)
   }
   if (ctx.frozen) {
-    const D = stepDur(fx, p, umax)
+    const D = stepDur(fx, p, umax, marblePath ? marblePath.total : 1)
     elapsed = D > 0.05 ? D : elapsed
   }
   let phase
@@ -50,6 +59,11 @@ export function sampleEffect (step, ctx) {
     const positions = impulsePositions(p, elapsed)
     return impulseColorAt(positions, p, impulseDist(p, x, y, cx, cy, pix, total), umax)
   }
+  if (fx === 5) {
+    const positions = marblePositions(p, elapsed, marblePath.total)
+    return marbleColorAt(positions, p, marbleLedS(marblePath, tubeIdx, along ?? 0), marblePath)
+  }
+  if (fx === 6) return pendulumColorAt(p, x, y, cx, cy, elapsed, umax)
   if (fx === 8) return fillColorAt(p, impulseDist(p, x, y, cx, cy), elapsed, umax)
   const rp = fx === 3 ? { ...p, color: solidColorAt(p, elapsed) } : p
   return fxColor(fx, rp, x, y, pix, total, tubeIdx, nTubes, phase, cx, cy, along)

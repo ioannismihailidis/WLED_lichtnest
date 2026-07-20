@@ -11,6 +11,7 @@
 import { reactive } from 'vue'
 import { phaseRate, strobeDuration, solidDuration, strobePhaseAt, solidPhaseAt } from './fxsim.js'
 import { impulseUmax, impulseDuration, fillDuration } from './impulse.js'
+import { buildMarblePath, marbleDuration } from './gravity.js'
 import { defaultParams, effectById, expandParamKeys, COMBINED_FX, recipePresetSeeds } from './effects.js'
 
 function normHost (h) {
@@ -862,7 +863,13 @@ export function stepDurationMs (it) {
     const pts = []; for (const t of g) pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 })
     const umax = impulseUmax(p, pts, cx, cy)
     const sec = it.fx === 8 ? fillDuration(p, umax) : impulseDuration(p, umax)
-    return delayMs + Math.max(200, sec * 1000)
+    // Level/Tide → fillDuration 0 → fall through to playlist dur
+    if (sec > 0.05) return delayMs + Math.max(200, sec * 1000)
+  }
+  if (it.fx === 5) {
+    const g = tubeGeometry()
+    const path = buildMarblePath(g, p.dir || 0, p.hz ?? 8)
+    return delayMs + Math.max(200, marbleDuration(p, path.total) * 1000)
   }
   return delayMs + Math.max(1, it.dur || 10) * 1000
 }

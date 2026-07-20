@@ -148,6 +148,8 @@ export function fillDecay (p) { return adsrParts(p).D }
 export function fillSustain (p) { return adsrParts(p).S }
 export function fillRelease (p) { return adsrParts(p).R }
 export function fillDuration (p, umax) {
+  // Level / Tide hold or loop — no natural end (playlist `dur`)
+  if ((p.mode || 0) !== 0) return 0
   const v = Math.max(0.001, impulseSpeed(p)), soft = fillSoft(p)
   const { A, D, R } = adsrParts(p)
   return (umax + soft) / v + A + D + R + 0.2
@@ -163,12 +165,47 @@ function fillEnv (p, elapsed, tHit, tFill) {
   return envelopeAt(elapsed - tHit, A, D, S, 0)
 }
 export function fillColorAt (p, d, elapsed, umax) {
+  const soft = fillSoft(p)
+  const u = Math.max(0.001, umax)
+  const mode = p.mode || 0
+
+  // mode 2 Tide — oscillating waterline; duty = amplitude
+  if (mode === 2) {
+    const hz = 0.05 + ((p.speed ?? 42) / 100) * 0.45
+    const amp = Math.max(0.05, Math.min(1, (p.duty ?? 55) / 100))
+    const h = u * (0.5 + 0.5 * amp * Math.sin(2 * Math.PI * hz * elapsed))
+    if (d > h + soft) return [0, 0, 0]
+    const { A, S } = adsrParts(p)
+    let env = S
+    if (A > 0 && elapsed < A) env = S * (elapsed / A)
+    if (env <= 0) return [0, 0, 0]
+    let k = env
+    if (d > h - soft) k *= Math.max(0, (h + soft - d) / (2 * soft))
+    const col = gradN(Math.max(0, Math.min(1, d / u)), fadeCols(p), fadeCw(p))
+    return k >= 1 ? col : scale3(col, k)
+  }
+
+  // mode 1 Wasserstand — pour to full then hold (no global release)
+  if (mode === 1) {
+    const v = impulseSpeed(p)
+    if (v <= 0) return [0, 0, 0]
+    const front = Math.min(u, v * elapsed)
+    if (d >= front + soft) return [0, 0, 0]
+    const { A, D, S } = adsrParts(p)
+    const tLocal = front > 1e-4 ? Math.max(0, elapsed - d / v) : elapsed
+    let env = envelopeAt(tLocal, A, D, S, 0)
+    if (env <= 0) return [0, 0, 0]
+    let k = env
+    if (d > front - soft) k *= Math.max(0, (front + soft - d) / (2 * soft || 1e-4))
+    const col = gradN(Math.max(0, Math.min(1, d / u)), fadeCols(p), fadeCw(p))
+    return k >= 1 ? col : scale3(col, k)
+  }
+
+  // mode 0 Reveal — classic wavefront + ADSR (+ global release)
   const v = impulseSpeed(p)
   if (v <= 0) return [0, 0, 0]
-  const soft = fillSoft(p)
   const front = v * elapsed
   if (d >= front) return [0, 0, 0]
-  const u = Math.max(0.001, umax)
   const tFill = (u + soft) / v
   const env = fillEnv(p, elapsed, d / v, tFill)
   if (env <= 0) return [0, 0, 0]
