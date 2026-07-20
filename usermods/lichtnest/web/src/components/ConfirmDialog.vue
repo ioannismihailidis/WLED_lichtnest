@@ -13,7 +13,7 @@ import { confirmState, confirmYes, confirmNo } from '../confirm.js'
         <div class="title">{{ confirmState.title }}</div>
         <div v-if="confirmState.body" class="body">{{ confirmState.body }}</div>
         <div class="row">
-          <button class="cancel" @click="confirmNo">Abbrechen</button>
+          <button v-if="!confirmState.notice" class="cancel" @click="confirmNo">Abbrechen</button>
           <button class="confirm" :class="{ danger: confirmState.danger }" @click="confirmYes">{{ confirmState.confirmLabel }}</button>
         </div>
       </div>

@@ -16,10 +16,20 @@ const power = computed(() => wled.info.leds?.pwr ?? 0)
 
 const paramSummary = computed(() => {
   const p = liveFxP().p; const k = eff.value.key
-  if (k === 'pulse') return p.pmode ? `${p.speed ?? 0}% · ${p.hz ?? 0} Hz · radial` : `${p.speed ?? 0}% · ${p.hz ?? 0} Hz · ${p.angle ?? 0}°`
-  if (k === 'strobe') return `${p.hz ?? 0} Hz · ${['Alle', 'Wechsel', 'Reihum'][p.mode ?? 0]}`
-  if (k === 'schwarm') return `${p.speed ?? 0}% · ${p.dir ? 'Rückwärts' : 'Vorwärts'}`
-  return p.breathe !== false ? `Atmen · ${p.tempo ?? 0}%` : 'statisch'
+  if (k === 'pulse') {
+    const m = ['linear', 'radial', 'Kette'][p.pmode ?? 0] || 'linear'
+    return `${p.speed ?? 0}% · ${m}`
+  }
+  if (k === 'strobe') {
+    const modes = ['Alle', 'Wechsel', 'Reihum', 'Zufall']
+    return `${p.duty ?? 30}% · ${modes[p.mode ?? 0] || 'Alle'}`
+  }
+  if (k === 'neon') return `${p.speed ?? 0}% · ${(p.mode || 0) ? 'Fade' : 'Hart'}`
+  if (k === 'chase') return `${p.speed ?? 0}% · ${p.dir ? 'Rückwärts' : 'Vorwärts'}`
+  if (k === 'scanner') return `${p.speed ?? 0}% · ${(p.pmode || 0) ? 'pro Tube' : 'Kette'}`
+  if (k === 'solid') return p.breathe !== false ? 'Atmen' : 'statisch'
+  if (k === 'fill' || k === 'twinkle') return `ADSR · Sustain ${p.tempo ?? 0}%`
+  return `${p.speed ?? 0}%`
 })
 </script>
 
@@ -36,14 +46,14 @@ const paramSummary = computed(() => {
     </div>
 
     <!-- live: full-width mini plan with overlaid status -->
-    <div class="livepanel" @click="emit('navigate', 'effects')">
+    <div class="livepanel" @click="emit('navigate', wled.pl.active ? 'playlists' : 'effects')">
       <MiniPlan class="planbg" />
       <div class="ovtop">
         <span class="mono lbl">{{ wled.on ? 'LIVE · ' : 'AUS · ' }}{{ fx }}</span>
         <span v-if="wled.on" class="onair mono"><span class="blip" />ON AIR</span>
       </div>
       <div class="ovbot">
-        <div class="fxparams mono">{{ paramSummary }} · tippen zum Ändern</div>
+        <div class="fxparams mono">{{ wled.pl.active ? 'Playlist · tippen zum Steuern' : (paramSummary + ' · tippen zum Ändern') }}</div>
       </div>
     </div>
 

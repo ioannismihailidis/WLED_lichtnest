@@ -1,4 +1,4 @@
-// Client-side simulation of our 4 effects (ported from the lichtnest usermod's
+// Client-side simulation of our base effects (ported from the lichtnest usermod's
 // computeColor) — used to animate the 2D-plan preview, matching what the device
 // actually renders. Input params come from the live `lichtnest.p` state.
 //
@@ -6,6 +6,14 @@
 // integrates the rate parameter, so changing speed/hz/tempo speeds the internal
 // clock up instead of jumping the phase. The device exposes its phase, the store
 // extrapolates it (see devicePhase()), so preview and device stay in lock-step.
+//
+// NOTE: this module and impulse.js import from each other (impulse.js needs gradN/
+// fadeCols/fadeCw, this file's layer compositing below needs the impulse renderer).
+// Both only touch the import inside function bodies, never at module-eval time, so
+// the circular import resolves fine under ESM/Vite.
+import { impulsePositions, impulseColorAt, impulseDist, impulseUmax, impulseDuration, fillDuration, fillColorAt, adsrParts, envelopeAt, envelopeUnit } from './impulse.js'
+import { defaultParams, effectById } from './effects.js'
+
 const lerp = (a, b, t) => a + (b - a) * t
 
 // default fade gradient (used when params haven't been set yet)
@@ -36,12 +44,91 @@ export function gradN (ph, cols, cw) {
 }
 function scale (c, k) { k = Math.max(0, Math.min(1, k)); return [c[0] * k, c[1] * k, c[2] * k] }
 
+/** Colour from gradient cols when present, else solid `color` (legacy presets). */
+export function effectCol (p, ph = 0) {
+  if (p.cols && p.cols.length) return gradN(ph, fadeCols(p), fadeCw(p))
+  return p.color || [255, 255, 255]
+}
+
 // phase advance per second for each effect's rate param (matches the firmware)
 export function phaseRate (fx, p, N) {
-  if (fx === 0) return Math.max(1, p.hz || 6) * 0.15
+  if (fx === 0) return ((p.speed ?? 42) / 100) * 0.6
   if (fx === 1) return Math.max(1, p.hz || 6)
-  if (fx === 2) return ((p.speed || 0) / 100) * 0.5 * (N || 1)
-  return 0.3 + ((p.tempo ?? 35) / 100) * 2
+  if (fx === 2) return 1                                          // Neon: phase = elapsed (s)
+  if (fx === 5) return 0.2 + ((p.speed ?? 42) / 100) * 2          // Marker Pulse Hz
+  if (fx === 9) return ((p.speed ?? 36) / 100) * 0.5               // Welle travel
+  if (fx === 10) return ((p.speed ?? 42) / 100) * 0.5              // Tube Chase (× tubeCount in fxColor)
+  if (fx === 11) return ((p.speed ?? 0) / 100) * 90                // Spotlight rotation (°/s)
+  if (fx === 12) return 1                                          // Twinkle: phase = elapsed (s); speed/duty inside fx
+  if (fx === 13) return ((p.speed ?? 36) / 100) * 0.4              // Scanner bar travel
+  if (fx === 14) return ((p.speed ?? 22) / 100) * 0.25             // Noise drift
+  if (fx === 15) return 0.4 + ((p.sx ?? 128) / 255) * 1.2         // WLED placeholder drift
+  return 0.3 + ((p.speed ?? 35) / 100) * 2
+}
+// smooth 2D value-noise (0..1) — lattice + fade must match firmware valueNoise2
+function valueNoise2 (x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y)
+  const fx = x - ix, fy = y - iy
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy)
+  const a = (zvHash(ix >>> 0, iy >>> 0) & 255) / 255
+  const b = (zvHash((ix + 1) >>> 0, iy >>> 0) & 255) / 255
+  const c = (zvHash(ix >>> 0, (iy + 1) >>> 0) & 255) / 255
+  const d = (zvHash((ix + 1) >>> 0, (iy + 1) >>> 0) & 255) / 255
+  return lerp(lerp(a, b, ux), lerp(c, d, ux), uy)
+}
+function fbmNoise2 (x, y) {
+  let a = 0.5, f = 1, sum = 0, norm = 0
+  for (let i = 0; i < 3; i++) {
+    sum += a * valueNoise2(x * f, y * f)
+    norm += a
+    a *= 0.5
+    f *= 2
+  }
+  return sum / (norm || 1)
+}
+function cellularNoise2 (x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y)
+  let md = 2
+  for (let j = -1; j <= 1; j++) {
+    for (let i = -1; i <= 1; i++) {
+      const hx = zvHash((ix + i) >>> 0, (iy + j) >>> 0)
+      const cx = ix + i + (hx & 255) / 255
+      const cy = iy + j + ((hx >>> 8) & 255) / 255
+      const dx = x - cx, dy = y - cy
+      const d = Math.sqrt(dx * dx + dy * dy)
+      if (d < md) md = d
+    }
+  }
+  return md > 1 ? 1 : md
+}
+function sampleNoise (mode, nx, ny) {
+  if (mode === 1) return fbmNoise2(nx, ny)
+  if (mode === 2) return cellularNoise2(nx, ny)
+  if (mode === 3) return (zvHash(Math.floor(nx * 64) >>> 0, Math.floor(ny * 64) >>> 0) & 255) / 255
+  return valueNoise2(nx, ny)
+}
+/** Neon flicker brightness 0..1 for one tube at elapsed seconds — mirrors firmware. */
+export function neonBriAt (p, tubeIdx, elapsed) {
+  const tempo = 2 + ((p.speed ?? 48) / 100) * 18
+  const tCell = Math.floor(elapsed * tempo)
+  const frac = elapsed * tempo - tCell
+  const amp = Math.max(0.1, (p.rwidth ?? 70) / 100)
+  const dropChance = Math.max(0, Math.min(1, (p.duty ?? 35) / 100))
+  const level = (cell, ti) => {
+    const h = zvHash(cell >>> 0, (ti + 1) >>> 0)
+    let target = 0.35 + 0.65 * ((h & 255) / 255)
+    if (((h >>> 8) & 255) / 255 < dropChance * 0.35) {
+      target *= 0.05 + 0.15 * (((h >>> 16) & 255) / 255)
+    }
+    return 1 - amp + amp * target
+  }
+  const cur = level(tCell, tubeIdx)
+  if ((p.mode || 0) === 1) {
+    const prev = level(tCell > 0 ? tCell - 1 : 0, tubeIdx)
+    const s = frac * frac * (3 - 2 * frac)
+    return prev + (cur - prev) * s
+  }
+  return cur
 }
 // linear interpolation over keyframes [{ t, v }] (t in seconds), clamped at the ends
 export function sampleCurve (keys, t) {
@@ -74,7 +161,12 @@ export const strobePhaseAt = (p, elapsed) => curvePhaseAt(strobeKeys(p), elapsed
 
 // Solid/Atmen: ONE keyframe list [{ t, v(Hz), c:[r,g,b] }] drives both the breathe rate
 // and the colour over time. Phase in radians → sin() per breath; colour interpolated.
-const DEF_SOLIDKEYS = [{ t: 0, v: 0.3, c: [39, 197, 255] }, { t: 4, v: 0.3, c: [255, 90, 60] }]
+const DEF_SOLIDKEYS = [
+  { t: 0, v: 0.3, c: [0, 0, 0] },
+  { t: 1.5, v: 0.3, c: [39, 197, 255] },
+  { t: 3, v: 0.3, c: [255, 90, 60] },
+  { t: 4.5, v: 0.3, c: [0, 0, 0] },
+]
 export const solidKeys = (p) => (p.keys && p.keys.length ? p.keys.slice().sort((a, b) => a.t - b.t) : DEF_SOLIDKEYS)
 export const solidPhaseAt = (p, elapsed) => 2 * Math.PI * curvePhaseAt(solidKeys(p), elapsed)
 export const solidDuration = (p) => { const k = solidKeys(p); return Math.max(0.5, k[k.length - 1].t) }
@@ -101,7 +193,7 @@ export const strobeCols = (p) => (p.scols && p.scols.length ? p.scols : DEF_SCOL
 // cpar consecutive tubes that sweeps. Returns [0,0,0] for tubes that aren't lit this flash.
 // deterministic 32-bit hash — MUST match the firmware's zvHash bit-for-bit, so the
 // "Zufall" mode picks the same tubes in the preview and on the device
-function zvHash (a, b) {
+export function zvHash (a, b) {
   let x = ((Math.imul(a, 0x9E3779B1) ^ Math.imul(b, 0x85EBCA6B)) >>> 0)
   x ^= x >>> 16; x = Math.imul(x, 0x7FEB352D) >>> 0
   x ^= x >>> 15; x = Math.imul(x, 0x846CA68B) >>> 0
@@ -159,47 +251,180 @@ export function strobeColor (p, tubeIdx, tubeTotal, flash) {
   return list[(((rank % M) + flash) % M + M) % M]
 }
 
-// fx: 0 fade, 1 strobe, 2 schwarm, 3 solid, 4 radial. p: param pool. (x,y) normalised 0..1.
-// `phase` is the accumulated phase for this effect; (cx,cy) is the radial centre.
-export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase, cx = 0.5, cy = 0.5) {
+// fx: base effect id. p: param pool. (x,y) normalised 0..1.
+// `phase` is the accumulated phase for this effect; (cx,cy) is the marker/radial centre.
+// `along` optional 0..1 position along the current tube (scanner per-tube mode).
+// Fill (8) is rendered via fillColorAt in the plan preview (needs umax + elapsed).
+export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase, cx = 0.5, cy = 0.5, along = null) {
   const col = p.color || [255, 255, 255]
   switch (fx) {
-    case 0: { // Puls — Frequenz = emission rate, Geschwindigkeit = travel; linear or radial (pmode)
-      if ((p.speed || 0) === 0) return [0, 0, 0]              // no travel → nothing is emitted
-      let u, u0
-      if (p.pmode === 1) {                                    // radial: distance from the centre, origin = centre
-        const dx = x - cx, dy = y - cy
-        u = Math.sqrt(dx * dx + dy * dy); u0 = 0
-      } else {                                                // linear: projection along the direction, origin = near edge
-        const ang = (p.angle || 0) * Math.PI / 180
-        const ax = Math.cos(ang), ay = Math.sin(ang)
-        u = x * ax + y * ay; u0 = (ax < 0 ? ax : 0) + (ay < 0 ? ay : 0)
-      }
-      const v = (p.speed / 100) * 0.6                          // travel speed (proj/sec-equiv)
-      const R = Math.max(1, p.hz || 6) * 0.15                  // emission rate (= phaseRate)
-      const L = v / R                                          // spacing between successive bands
-      const s = phase - (u - u0) / L
-      const f = s - Math.floor(s)                              // 0..1 within one band's cycle
-      const duty = Math.min(0.98, Math.max(0.02, (p.rwidth ?? 30) / 100))   // Breite = lit fraction of each cycle
-      let c = f < duty ? gradN(f / duty, fadeCols(p), fadeCw(p)) : [0, 0, 0]  // gradient across band, else gap
-      const front = u0 - 0.04 + phase * L                      // first band's leading edge (= u0 + v*t)
-      let rev = (front - u) / 0.06 + 0.5                       // start-black reveal
-      rev = rev < 0 ? 0 : rev > 1 ? 1 : rev
-      return scale(c, rev)
+    case 0: { // legacy continuous pulse — live preview uses impulse.js instead
+      return [0, 0, 0]
     }
     case 1: {
       const flash = Math.floor(phase); const inFrac = phase - flash
       if (inFrac >= (p.duty || 30) / 100) return [0, 0, 0]   // off part of the flash cycle
       return strobeColor(p, tubeIdx, tubeTotal, flash)       // handles which tubes are lit + their colour
     }
-    case 2: {
-      const N = chainTotal || 1
-      const pos = ((phase % N) + N) % N
-      const ci = p.dir ? (N - 1 - chainIdx) : chainIdx
-      let d = ci - pos; if (d < 0) d += N
-      let tl = ((p.tail || 0) / 100) * N; if (tl < 1) tl = 1
-      return scale(col, Math.exp(-d / tl))
+    case 2: { // Neon flicker — phase = elapsed seconds; ADSR = soft fade-in + sustain floor
+      const { A, S } = adsrParts(p)
+      let env = S
+      if (A > 0 && phase < A) env = S * (phase / A)
+      if (env <= 0) return [0, 0, 0]
+      const bri = neonBriAt(p, tubeIdx, phase) * env
+      if (bri <= 0) return [0, 0, 0]
+      return scale(effectCol(p, bri), bri)
     }
+    case 5: { // Marker Pulse — soft disc around (cx,cy); ADSR shapes each pulse cycle
+      const dx = x - cx, dy = y - cy
+      const d = Math.sqrt(dx * dx + dy * dy)
+      const rad = Math.max(0.05, (p.rwidth ?? 35) / 100)
+      const soft = Math.max(0.01, (p.tail ?? 20) / 100)
+      let mask = 1
+      if (d >= rad) mask = 0
+      else if (d > rad - soft) mask = (rad - d) / soft
+      if (mask <= 0) return [0, 0, 0]
+      const { A, D, S, R } = adsrParts(p)
+      let tIn = phase - Math.floor(phase)
+      if (tIn < 0) tIn += 1
+      // map cycle fraction to seconds via a 1s note length scaled by ADSR sum
+      const note = Math.max(0.2, A + D + R + 0.15)
+      const b = envelopeAt(tIn * note, A, D, S, R)
+      if (b <= 0) return [0, 0, 0]
+      return scale(effectCol(p, d / rad), mask * b)
+    }
+    case 6: // removed Split Zones
+    case 7: // removed Gradient Sweep
+      return [0, 0, 0]
+    case 9: { // Welle — phase = rate*t; intensity + colour from sin wave along pulseDist
+      let d
+      if (p.pmode === 1) {
+        const dx = x - cx, dy = y - cy
+        d = Math.sqrt(dx * dx + dy * dy)
+      } else {
+        const ang = (p.angle || 0) * Math.PI / 180
+        const ax = Math.cos(ang), ay = Math.sin(ang)
+        const u0 = (p.origin != null && p.origin !== 255)
+          ? (cx * ax + cy * ay)
+          : ((ax < 0 ? ax : 0) + (ay < 0 ? ay : 0))
+        d = x * ax + y * ay - u0
+      }
+      const lambda = Math.max(0.08, (p.rwidth ?? 35) / 100)
+      let ph = phase - d / lambda
+      const intens = 0.5 + 0.5 * Math.sin(2 * Math.PI * ph)
+      ph -= Math.floor(ph)
+      return scale(gradN(ph, fadeCols(p), fadeCw(p)), intens)
+    }
+    case 10: { // Tube Chase — phase = rate*t; head sweeps tube indices
+      const N = Math.max(1, tubeTotal || 1)
+      let pos = ((phase * N) % N + N) % N
+      const ci = p.dir ? (N - 1 - tubeIdx) : tubeIdx
+      let d = ci - pos; if (d < 0) d += N
+      let tl = ((p.tail ?? 28) / 100) * N; if (tl < 1) tl = 1
+      const u = Math.min(1, d / tl)
+      const { A, D, S, R } = adsrParts(p)
+      const env = envelopeUnit(u, A, D, S, R)
+      if (env <= 0) return [0, 0, 0]
+      return scale(effectCol(p, u), Math.exp(-d / tl) * env)
+    }
+    case 11: { // Spotlight — soft cone; phase = rotation degrees when speed > 0
+      const dx = x - cx, dy = y - cy
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      const base = effectCol(p, Math.min(1, dist))
+      if (dist < 1e-4) return base
+      const ang = ((p.angle || 0) + phase) * Math.PI / 180
+      const bx = Math.cos(ang), by = Math.sin(ang)
+      let cA = (dx * bx + dy * by) / dist
+      cA = cA > 1 ? 1 : cA < -1 ? -1 : cA
+      const deg = Math.acos(cA) * (180 / Math.PI)
+      const open = 5 + ((p.rwidth ?? 40) / 100) * 85
+      const soft = Math.max(0.5, ((p.tail ?? 25) / 100) * open)
+      if (deg >= open) return [0, 0, 0]
+      if (deg <= open - soft) return base
+      return scale(base, (open - deg) / soft)
+    }
+    case 12: { // Twinkle — each LED has its own phase offset + period; ADSR envelope + palette
+      // optional cluster: rwidth > 0 limits sparks to a disc around (cx,cy)
+      const clusterR = (p.rwidth ?? 0) / 100
+      if (clusterR > 0.001) {
+        const dx = x - cx, dy = y - cy
+        if (Math.sqrt(dx * dx + dy * dy) > clusterR) return [0, 0, 0]
+      }
+      const { A, D, S, R: Rel } = adsrParts(p)
+      let envLen = A + D + Rel
+      if (envLen < 0.05) envLen = 0.05
+      const dens = Math.max(0.01, (p.duty ?? 18) / 100)
+      const speedK = 0.35 + (1 - (p.speed ?? 40) / 100) * 2.65   // 0.35..3.0 s base gap
+      const gapMean = speedK * (1.15 - dens * 0.95)              // denser → shorter idle
+      const h0 = zvHash(chainIdx >>> 0, 0)
+      const period = envLen + gapMean * (0.45 + ((h0 & 255) / 255) * 1.1)
+      const offset = (((h0 >>> 8) & 0xFFFF) / 65536) * period
+      const tAdj = phase + offset                                 // phase === elapsed (s)
+      const cycle = Math.floor(tAdj / period)
+      let tIn = tAdj - cycle * period
+      if (tIn < 0) tIn += period
+      if (tIn >= envLen) return [0, 0, 0]
+      const bri = envelopeAt(tIn, A, D, S, Rel)
+      if (bri <= 0) return [0, 0, 0]
+      const h1 = zvHash(chainIdx >>> 0, cycle >>> 0)
+      return scale(gradN((h1 & 255) / 255, fadeCols(p), fadeCw(p)), bri)
+    }
+    case 13: { // Scanner — ping-pong along chain (pmode 0) or per tube (pmode 1)
+      const span = 1
+      let u
+      if ((p.pmode || 0) === 1) {
+        u = along != null ? along : 0
+      } else {
+        const N = Math.max(1, chainTotal || 1)
+        const ci = chainIdx
+        u = N > 1 ? ci / (N - 1) : 0
+      }
+      const cycle = 2 * span
+      let t = ((phase % cycle) + cycle) % cycle
+      let pos = t < span ? t : (2 * span - t)
+      if (p.dir) pos = span - pos
+      const half = Math.max(0.015, (p.rwidth ?? 10) / 200)
+      const d = Math.abs(u - pos)
+      if (d >= half) return [0, 0, 0]
+      let bri = 1 - d / half; bri *= bri
+      const { A, D, S, R } = adsrParts(p)
+      bri *= envelopeUnit(d / half, A, D, S, R)
+      if (bri <= 0) return [0, 0, 0]
+      return scale(effectCol(p, d / half), bri)
+    }
+    case 14: { // Noise / Drift — types + optional attract/repel marker
+      const sc = 1 + ((p.rwidth ?? 40) / 100) * 6
+      let nx, ny
+      if (p.pmode === 1) {
+        const dx = x - cx, dy = y - cy
+        const rad = Math.sqrt(dx * dx + dy * dy) * sc
+        nx = rad + phase
+        ny = Math.atan2(dy, dx) * 0.3
+      } else {
+        const ang = (p.angle || 0) * Math.PI / 180
+        const ax = Math.cos(ang), ay = Math.sin(ang)
+        nx = x * sc + phase * ax
+        ny = y * sc + phase * ay * 0.73
+      }
+      const field = p.dir || 0
+      if (field > 0) {
+        const dx = x - cx, dy = y - cy
+        const dist = Math.sqrt(dx * dx + dy * dy) + 1e-4
+        const str = ((p.duty ?? 40) / 100) * 2.5
+        const pull = field === 1 ? -str : str
+        nx += (dx / dist) * pull
+        ny += (dy / dist) * pull
+      }
+      const n = sampleNoise(p.mode || 0, nx, ny)
+      return gradN(n, fadeCols(p), fadeCw(p))
+    }
+    case 15: { // WLED pass-through — placeholder only (real FX runs on the device)
+      const c = col
+      const band = ((x * 8 + phase * 0.5) % 1)
+      const bri = band < 0.35 ? 0.15 + 0.85 * (1 - Math.abs(band - 0.175) / 0.175) : 0.08
+      return scale(c, bri)
+    }
+    case 3:
     default: {
       let b = 1
       if (p.breathe !== false) b = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(phase))
@@ -207,6 +432,101 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
     }
   }
 }
+// --- "Kombiniert" (layered) effects: N ordinary effects composited per-pixel --------
+// A layer = { fx, p, marker, radius, falloff, blend, enabled, sched:{mode,period,duration} }.
+// radius/falloff mask a layer to a zone around its marker (radius 0 = whole field).
+// sched gates a layer on/off over RAW time, independent of its own effect loop (e.g. a
+// strobe that only flashes for 4s every 30s). Mirrors the planned firmware math 1:1, so
+// this is a straight port once lichtnest.cpp understands `layers`.
+const clamp255 = (v) => (v < 0 ? 0 : v > 255 ? 255 : v)
+export function blendAdd (a, b) { return [clamp255(a[0] + b[0]), clamp255(a[1] + b[1]), clamp255(a[2] + b[2])] }
+export function blendMax (a, b) { return [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.max(a[2], b[2])] }
+export function blendScreen (a, b) {
+  const s = (x, y) => 255 - ((255 - x) * (255 - y)) / 255
+  return [s(a[0], b[0]), s(a[1], b[1]), s(a[2], b[2])]
+}
+export function combineBlend (mode, a, b) { return mode === 1 ? blendMax(a, b) : mode === 2 ? blendScreen(a, b) : blendAdd(a, b) }
+
+// true while a layer contributes, given RAW seconds since the stack activated
+export function layerGateOpen (layer, tSec) {
+  const sched = layer.sched || {}
+  if ((sched.mode || 0) !== 1) return true
+  const per = Math.max(0.1, sched.period ?? 30), dur = Math.max(0, sched.duration ?? 4)
+  let m = tSec % per; if (m < 0) m += per
+  return m < dur
+}
+// 0..1 falloff mask around a layer's marker; radius 0 (default) = unrestricted (whole field)
+export function layerMask (layer, x, y, markerXY) {
+  const r = layer.radius || 0
+  if (!r) return 1
+  const mx = markerXY ? markerXY[0] : 0.5, my = markerXY ? markerXY[1] : 0.5
+  const dx = x - mx, dy = y - my
+  const d = Math.sqrt(dx * dx + dy * dy)
+  const rf = r / 100, fo = Math.max(1, layer.falloff ?? 20) / 100
+  if (d <= rf - fo) return 1
+  if (d >= rf) return 0
+  return (rf - d) / fo
+}
+// how long a layer's OWN effect naturally takes before it repeats — impulse/strobe/solid
+// auto-loop on this (like the classic single-effect step); ambient FX free-run
+export function layerNaturalDuration (layer, geomPts, cx, cy) {
+  const p = layer.p || {}
+  if (layer.fx === 0) return impulseDuration(p, impulseUmax(p, geomPts, cx, cy))
+  if (layer.fx === 1) return strobeDuration(p)
+  if (layer.fx === 3) return solidDuration(p)
+  if (layer.fx === 8) return fillDuration(p, impulseUmax(p, geomPts, cx, cy))
+  return 0
+}
+// per-frame render context for one layer (computed once, sampled per pixel) — mirrors
+// what MiniPlan/TexturePreview already precompute for a single (non-layered) effect
+export function layerContext (layer, elapsedRaw, geomPts, chainTotal, markerXY) {
+  const fx = layer.fx
+  // merge declared defaults under the layer's own `p` — empty `{}` (or partial edits)
+  // must still match firmware FxParams defaults
+  const p = { ...defaultParams(fx), ...(layer.p || {}) }
+  // layer.marker is the single spatial anchor (mask centre + Impuls origin) — mirrors
+  // firmware renderStack temporarily overriding P.origin from L.marker
+  if (layer.marker != null && layer.marker !== 255) p.origin = layer.marker
+  const cx = markerXY ? markerXY[0] : 0.5, cy = markerXY ? markerXY[1] : 0.5
+  const natural = layerNaturalDuration({ ...layer, p }, geomPts, cx, cy)
+  const elapsed = natural > 0.05 ? (elapsedRaw % natural) : elapsedRaw
+  if (fx === 0) {
+    const umax = impulseUmax(p, geomPts, cx, cy)
+    return { fx, p, cx, cy, umax, positions: (p.speed ?? 42) === 0 ? [] : impulsePositions(p, elapsed) }
+  }
+  // solid: colour + breathe phase must both be precomputed — fxColor's default branch
+  // does Math.sin(phase); undefined phase → NaN → pure black tubes in the preview
+  if (fx === 3) return { fx, p: { ...p, color: solidColorAt(p, elapsed) }, cx, cy, phase: solidPhaseAt(p, elapsed) }
+  if (fx === 1) return { fx, p, cx, cy, phase: strobePhaseAt(p, elapsed) }
+  if (fx === 8) return { fx, p, cx, cy, elapsed, umax: impulseUmax(p, geomPts, cx, cy) }
+  return { fx, p, cx, cy, phase: elapsed * phaseRate(fx, p, chainTotal || 1) }
+}
+function layerColorAt (ctx, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, along = null) {
+  if (ctx.fx === 0) return impulseColorAt(ctx.positions, ctx.p, impulseDist(ctx.p, x, y, ctx.cx, ctx.cy, chainIdx, chainTotal), ctx.umax || 1)
+  if (ctx.fx === 8) return fillColorAt(ctx.p, impulseDist(ctx.p, x, y, ctx.cx, ctx.cy), ctx.elapsed, ctx.umax)
+  return fxColor(ctx.fx, ctx.p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, ctx.phase, ctx.cx, ctx.cy, along)
+}
+// build one context per enabled+gated layer for the CURRENT FRAME (call once per frame,
+// not per pixel). `resolveMarker(markerId)` -> [x,y] for that plan marker (or the default
+// centroid when markerId is 255/unset) — reuses the same resolution as classic effects.
+export function buildLayerContexts (layers, elapsedRaw, geomPts, chainTotal, resolveMarker) {
+  return (layers || [])
+    .filter((l) => l.enabled !== false && layerGateOpen(l, elapsedRaw))
+    .map((l) => ({ layer: l, ctx: layerContext(l, elapsedRaw, geomPts, chainTotal, resolveMarker(l.marker)) }))
+}
+// composite every active layer's colour at one pixel (additive/max/screen, clamped)
+export function compositeColor (layerCtxs, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, along = null) {
+  let acc = [0, 0, 0]
+  for (const { layer, ctx } of layerCtxs) {
+    const m = layerMask(layer, x, y, [ctx.cx, ctx.cy])
+    if (m <= 0) continue
+    let c = layerColorAt(ctx, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, along)
+    if (m < 1) c = [c[0] * m, c[1] * m, c[2] * m]
+    acc = combineBlend(layer.blend || 0, acc, c)
+  }
+  return acc
+}
+
 export const rgbCss = (c) => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`
 
 // CSS preview of the gradient (solid plateaus + boundary blends, matching gradN)
@@ -227,4 +547,71 @@ export function gradientCss (cols, cw) {
     acc += w[i]
   }
   return `linear-gradient(90deg, ${stops.join(', ')})`
+}
+
+function listGrad (cols) {
+  if (!cols || !cols.length) return '#0d0f13'
+  if (cols.length === 1) return rgbCss(cols[0])
+  const step = 100 / cols.length
+  const stops = cols.map((c, i) => `${rgbCss(c)} ${(i * step).toFixed(1)}% ${((i + 1) * step).toFixed(1)}%`)
+  return `linear-gradient(90deg, ${stops.join(', ')})`
+}
+
+// Compact CSS swatch for the Effekte list — reflects the last/current colour config
+// for each effect instead of the static catalogue placeholder.
+export function effectListPreview (fx, p, layers) {
+  const e = effectById(fx)
+  const pool = p || {}
+  const types = new Set((e.params || []).map((pr) => pr.type))
+
+  if (types.has('gradient')) return gradientCss(fadeCols(pool), fadeCw(pool))
+
+  if (types.has('colorlist')) {
+    const key = (e.params || []).find((pr) => pr.type === 'colorlist')?.key || 'scols'
+    const cols = (pool[key] && pool[key].length) ? pool[key] : (key === 'scols' ? strobeCols(pool) : [[255, 90, 60], [39, 197, 255]])
+    if (fx === 1) {
+      // strobe: short flashes of the palette colours
+      const parts = []
+      cols.forEach((c, i) => {
+        const a = i * 28, b = a + 10
+        parts.push(`${rgbCss(c)} ${a}px ${b}px`, `#0d0f13 ${b}px ${a + 28}px`)
+      })
+      return `repeating-linear-gradient(90deg, ${parts.join(', ')})`
+    }
+    return listGrad(cols)
+  }
+
+  if (types.has('keyframes')) {
+    const pr = (e.params || []).find((x) => x.type === 'keyframes')
+    const keys = pool[pr?.key] || pr?.def || []
+    const cols = keys.map((k) => k.c).filter((c) => Array.isArray(c) && c.length >= 3)
+    if (cols.length) return listGrad(cols)
+  }
+
+  if (types.has('layers')) {
+    const stack = layers || []
+    const cols = []
+    for (const L of stack) {
+      if (!L || L.enabled === false) continue
+      const lp = L.p || {}
+      if (lp.cols && lp.cols.length) cols.push(lp.cols[0])
+      else if (lp.scols && lp.scols.length) cols.push(lp.scols[0])
+      else if (lp.color) cols.push(lp.color)
+      else if (lp.keys && lp.keys[0]?.c) cols.push(lp.keys[0].c)
+    }
+    if (cols.length) return listGrad(cols)
+    return e.preview
+  }
+
+  if (types.has('color') || pool.color) {
+    const c = pool.color || (e.params || []).find((pr) => pr.type === 'color')?.def || [39, 197, 255]
+    const hex = rgbCss(c)
+    if (fx === 2) return `linear-gradient(90deg,#0d0f13,${hex} 40%,#fff 52%,${hex}88 70%,#0d0f13)` // neon
+    if (fx === 10) return `linear-gradient(90deg,#0d0f13 0 40%,${hex}55 55%,#fff 70%,#0d0f13 85%)` // chase
+    if (fx === 13) return `linear-gradient(90deg,#0d0f13 0 42%,#fff 48%,${hex} 52%,#0d0f13 58% 100%)`
+    if (fx === 15) return `repeating-linear-gradient(90deg,${hex} 0 6px,#0d0f13 6px 14px)`
+    return hex
+  }
+
+  return e.preview
 }

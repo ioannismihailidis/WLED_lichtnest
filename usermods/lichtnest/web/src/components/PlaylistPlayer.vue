@@ -44,9 +44,12 @@ function stepName (i, fallbackFx) {
     </div>
     <div class="nowact">
       <button class="tctl" title="Vorheriger Schritt" @click.stop="prevStep()"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6z" /><path d="M20 5v14l-10-7z" /></svg></button>
-      <button class="tctl" :class="{ on: playback.loop }" title="Aktuellen Schritt wiederholen" @click.stop="setLoop(!playback.loop)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><path d="M7 22l-4-4 4-4" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg></button>
+      <button class="tctl" :class="{ on: playback.loop }" title="Nur diesen Schritt wiederholen" @click.stop="setLoop(!playback.loop)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><path d="M7 22l-4-4 4-4" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg>
+        <b class="loop1">1</b>
+      </button>
       <button class="tctl" title="Nächster Schritt" @click.stop="nextStep()"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2z" /><path d="M4 5v14l10-7z" /></svg></button>
-      <span class="mono nxt">{{ playback.loop ? 'Schritt wiederholt' : '→ ' + stepName((prog.idx + 1) % prog.total, prog.nextFx) }}</span>
+      <span class="mono nxt">{{ playback.loop ? 'Schritt-Loop an' : '→ ' + stepName((prog.idx + 1) % prog.total, prog.nextFx) }}</span>
     </div>
   </div>
 </template>
@@ -59,7 +62,8 @@ function stepName (i, fallbackFx) {
 .plfill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .5s linear; }
 .tick { position: absolute; top: 0; bottom: 0; width: 1.5px; background: rgba(255,255,255,.5); }
 .nowact { display: flex; align-items: center; gap: 8px; }
-.tctl { flex: none; width: 34px; height: 30px; border-radius: 8px; background: rgba(255,255,255,.08); border: 1px solid var(--line); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.tctl { position: relative; flex: none; width: 34px; height: 30px; border-radius: 8px; background: rgba(255,255,255,.08); border: 1px solid var(--line); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .tctl.on { background: var(--accent); color: #1a1206; border-color: transparent; box-shadow: 0 0 12px -3px var(--accent); }
+.loop1 { position: absolute; font-size: 8px; font-weight: 800; bottom: 2px; right: 4px; line-height: 1; }
 .nxt { font-size: 11px; color: var(--muted2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 4px; }
 </style>

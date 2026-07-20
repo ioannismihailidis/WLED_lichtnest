@@ -27,6 +27,7 @@ const MA_OPTS = [
   { v: 12, l: '12 mA (WS2815)' },
 ]
 
+const LN_VERSION = __LN_VERSION__
 const busy = ref(false)
 const msg = ref('')
 const wifiPass = ref('')
@@ -190,6 +191,7 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
       <!-- GERÄTENAME -->
       <div class="seclbl mono">GERÄTENAME</div>
       <div class="panel pad">
+        <label class="flbl">Anzeigename</label><input class="in mono" v-model="c.id.name">
         <label class="flbl">Hostname (mDNS)</label><input class="in mono" v-model="c.id.mdns">
         <div class="hint mono">Erreichbar unter <b>{{ c.id.mdns }}.local</b></div>
       </div>
@@ -198,7 +200,8 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
       <div class="seclbl mono">GERÄT</div>
       <div class="panel pad">
         <div class="row brd"><span class="lbl">Sync senden</span><button class="sw" :class="{ on: c.if?.sync?.send?.en }" @click="c.if.sync.send.en = !c.if.sync.send.en"><span /></button></div>
-        <div class="row"><span class="lbl">Firmware</span><span class="mono muted">WLED {{ wled.info.ver }}</span></div>
+        <div class="row brd"><span class="lbl">Firmware</span><span class="mono muted">WLED {{ wled.info.ver }}</span></div>
+        <div class="row"><span class="lbl">Lichtnest</span><span class="mono muted">v{{ LN_VERSION }}</span></div>
       </div>
 
       <div class="actions">

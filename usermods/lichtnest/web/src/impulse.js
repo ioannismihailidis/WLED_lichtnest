@@ -12,14 +12,32 @@ export const impulseInterval = (p) => Math.max(0.05, (p.interval ?? 8) * 0.1)   
 export const impulseSpeed = (p) => ((p.speed ?? 42) / 100) * KV
 export const impulseWidth = (p) => Math.max(0.02, (p.rwidth ?? 30) / 100)
 
-// distance of a pixel from the emission origin (linear: near edge; radial: centre)
-export function impulseDist (p, x, y, cx, cy) {
+/** Easing on 0..1 (mode: 0 linear, 1 in, 2 out, 3 in-out). */
+export function ease01 (t, mode) {
+  t = t < 0 ? 0 : t > 1 ? 1 : t
+  if (mode === 1) return t * t
+  if (mode === 2) { const u = 1 - t; return 1 - u * u }
+  if (mode === 3) return t * t * (3 - 2 * t)
+  return t
+}
+
+// Distance of a pixel from the emission origin.
+// pmode 0 linear / 1 radial (2D) / 2 LED chain (normalized 0..1).
+export function impulseDist (p, x, y, cx, cy, chainIdx = 0, chainTotal = 1) {
+  if (p.pmode === 2) {
+    const N = Math.max(1, chainTotal)
+    const ci = p.dir ? (N - 1 - chainIdx) : chainIdx
+    return N > 1 ? ci / (N - 1) : 0
+  }
   if (p.pmode === 1) { const dx = x - cx, dy = y - cy; return Math.sqrt(dx * dx + dy * dy) }
   const ang = (p.angle || 0) * Math.PI / 180, ax = Math.cos(ang), ay = Math.sin(ang)
-  const u0 = (ax < 0 ? ax : 0) + (ay < 0 ? ay : 0)
+  const u0 = (p.origin != null && p.origin !== 255)
+    ? (cx * ax + cy * ay)
+    : ((ax < 0 ? ax : 0) + (ay < 0 ? ay : 0))
   return x * ax + y * ay - u0
 }
 export function impulseUmax (p, pts, cx, cy) {
+  if (p.pmode === 2) return 1
   let m = 0.5
   for (const q of pts) { const d = impulseDist(p, q.x, q.y, cx, cy); if (d > m) m = d }
   return m
@@ -40,10 +58,104 @@ export function impulseDuration (p, umax) {
 }
 
 // colour at distance d: frontmost covering band, gradient across its width (black→colour→black)
-export function impulseColorAt (positions, p, d) {
+export function impulseColorAt (positions, p, d, umax = 1) {
   const w = impulseWidth(p)
+  const travel = Math.max(0.001, umax + w)
+  const ease = p.mode || 0
   let bestg = 2
-  for (const pos of positions) { const g = (pos - d) / w; if (g >= 0 && g <= 1 && g < bestg) bestg = g }
+  for (const raw of positions) {
+    let pos = raw
+    if (ease) {
+      const t = raw / travel
+      pos = ease01(t > 1 ? 1 : t, ease) * travel
+    }
+    const g = (pos - d) / w
+    if (g >= 0 && g <= 1 && g < bestg) bestg = g
+  }
   if (bestg > 1) return [0, 0, 0]
-  return gradN(bestg, fadeCols(p), fadeCw(p))
+  const { A, D, S, R } = adsrParts(p)
+  const bri = envelopeUnit(bestg, A, D, S, R)
+  if (bri <= 0) return [0, 0, 0]
+  const col = gradN(bestg, fadeCols(p), fadeCw(p))
+  return bri >= 1 ? col : scale3(col, bri)
+}
+
+// Shared ADSR helpers — pool: rfin=Attack, rgap=Decay, tempo=Sustain(%), rfout=Release (×0.1 s).
+const scale3 = (c, k) => { k = Math.max(0, Math.min(1, k)); return [c[0] * k, c[1] * k, c[2] * k] }
+export function adsrParts (p) {
+  return {
+    A: Math.max(0, (p.rfin ?? 0) * 0.1),
+    D: Math.max(0, (p.rgap ?? 0) * 0.1),
+    S: Math.max(0, Math.min(1, (p.tempo ?? 100) / 100)),
+    R: Math.max(0, (p.rfout ?? 0) * 0.1),
+  }
+}
+/** Classic ADSR brightness for local time tLocal (≥0) within one note (no global release). */
+export function envelopeAt (tLocal, A, D, S, R) {
+  if (tLocal <= 0) return 0
+  if (A > 0 && tLocal < A) return tLocal / A
+  const t1 = tLocal - A
+  if (D > 0) {
+    if (t1 < D) return 1 - (1 - S) * (t1 / D)
+    const tRel = t1 - D
+    if (R > 0) return tRel >= R ? 0 : S * (1 - tRel / R)
+    return S
+  }
+  if (R > 0) return t1 >= R ? 0 : (1 - t1 / R)
+  return 1
+}
+/**
+ * Map ADSR onto a 0..1 progress (band / tail / bar cross-section).
+ * A/D/R are seconds; they are converted to fractions of the unit via /5 (soft scale).
+ * Defaults A=D=R=0, S=1 → identity 1.
+ */
+export function envelopeUnit (u, A, D, S, R) {
+  if (u < 0 || u > 1) return 0
+  const a = Math.min(0.49, A / 5), d = Math.min(0.49, D / 5), r = Math.min(0.49, R / 5)
+  if (a <= 0 && d <= 0 && r <= 0) return S >= 1 ? 1 : S
+  if (a > 0 && u < a) return u / a
+  if (r > 0 && u > 1 - r) return S * ((1 - u) / r)
+  const mid0 = a
+  const mid1 = 1 - r
+  if (d > 0 && u < mid0 + d && mid1 > mid0) {
+    const t = (u - mid0) / d
+    if (t < 1) return 1 - (1 - S) * t
+  }
+  return S
+}
+
+export function fillSoft (p) { return Math.max(0.02, (p.rwidth ?? 18) / 100) }
+export function fillAttack (p) { return adsrParts(p).A }
+export function fillDecay (p) { return adsrParts(p).D }
+export function fillSustain (p) { return adsrParts(p).S }
+export function fillRelease (p) { return adsrParts(p).R }
+export function fillDuration (p, umax) {
+  const v = Math.max(0.001, impulseSpeed(p)), soft = fillSoft(p)
+  const { A, D, R } = adsrParts(p)
+  return (umax + soft) / v + A + D + R + 0.2
+}
+// Temporal envelope for a pixel hit at tHit: Attack→Decay→Sustain, then global Release.
+function fillEnv (p, elapsed, tHit, tFill) {
+  const { A, D, S, R } = adsrParts(p)
+  const tRel0 = tFill + A + D
+  if (R > 0 && elapsed >= tRel0) {
+    const u = (elapsed - tRel0) / R
+    return u >= 1 ? 0 : S * (1 - u)
+  }
+  return envelopeAt(elapsed - tHit, A, D, S, 0)
+}
+export function fillColorAt (p, d, elapsed, umax) {
+  const v = impulseSpeed(p)
+  if (v <= 0) return [0, 0, 0]
+  const soft = fillSoft(p)
+  const front = v * elapsed
+  if (d >= front) return [0, 0, 0]
+  const u = Math.max(0.001, umax)
+  const tFill = (u + soft) / v
+  const env = fillEnv(p, elapsed, d / v, tFill)
+  if (env <= 0) return [0, 0, 0]
+  const col = gradN(Math.max(0, Math.min(1, d / u)), fadeCols(p), fadeCw(p))
+  let k = env
+  if (d > front - soft) k *= (front - d) / soft
+  return k >= 1 ? col : scale3(col, k)
 }
