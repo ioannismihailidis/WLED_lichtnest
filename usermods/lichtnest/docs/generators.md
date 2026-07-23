@@ -58,7 +58,7 @@ Stable wire keys (shared pool on firmware). Same semantics ⇒ same key and widg
 Applied on Pulse, Fill, Wave, Strobe, Twinkle, Solid. Dedicated audio looks
 (Spektrum / Beat-Impuls / Bass-Pegel) use `again` as sensitivity; Beat/Bass also
 accept `asrc`. Hardware tuning (enable, gain, AGC, squelch) lives in **System**
-→ `um.AudioReactive` (Gledopto 2D-EXMU I2S pins 32/15/14, local mic, sync off).
+→ `um.AudioReactive` (Gledopto 2D-EXMU PDM pins SD/WS 32/15, local mic, sync off).
 
 ### Snapshot timeline (`tl`)
 

@@ -119,7 +119,7 @@ const paramSummary = computed(() => {
 .val { font-size: 13px; color: var(--text); }
 .val.peak { color: #e0614f; }
 .meter { height: 10px; border-radius: 999px; background: var(--inset); border: 1px solid var(--line); overflow: hidden; }
-.meter .fill { height: 100%; background: var(--accent); transition: width .08s linear; }
+.meter .fill { height: 100%; background: var(--accent); transition: width .05s linear; will-change: width; }
 .meter .fill.peak { background: #e0614f; }
 
 .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 14px; }

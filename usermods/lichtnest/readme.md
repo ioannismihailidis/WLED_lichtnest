@@ -104,14 +104,14 @@ Product board for `[env:esp32_eth]`:
 | Role | GPIO |
 | --- | --- |
 | LED data (primary / secondary) | 16 / 2 |
-| I2S mic SD / WS / SCK | 32 / 15 / 14 |
+| PDM mic SD / WS (SCK unused) | 32 / 15 |
 | Relay (invert) | 18 |
 | DIY | 13 |
 | Ethernet type | Gledopto Series (`WLED_ETH_GLEDOPTO` = 13) |
 
-`audioreactive` is compiled in with those I2S defaults. Each fleet unit listens to
-its **own** mic (UDP sound sync stays off in the product UI). Tune enable / gain /
-AGC / squelch under **System → Mikrofon**; live level also on **Start**.
+`audioreactive` is compiled in with Generic PDM defaults (`SR_DMTYPE=5`). Each fleet
+unit listens to its **own** mic (UDP sound sync stays off in the product UI). Tune
+enable / gain / AGC / squelch under **System → Mikrofon**; live level also on **Start**.
 
 Creative use: shared `asrc` / `amod` / `again` on generators, plus Spektrum (7),
 Beat-Impuls (10), Bass-Pegel (13). See [`docs/generators.md`](docs/generators.md).

@@ -4,6 +4,7 @@ import { wled, connectDevice, goOffline, playlists, palettes, fxPresets } from '
 import { uiNav, sideNav, pickSideNav, requestSideList } from './nav.js'
 import { V2_GENERATORS, V2_CATEGORIES, SIDE_NEW_COMBO } from './effects.js'
 import { BUILTIN_PALETTES, palettePreviewCss } from './palettes.js'
+import { guardScrollEl } from './overscroll.js'
 import Start from './screens/Start.vue'
 import Effekte from './screens/Effekte.vue'
 import Tubes from './screens/Tubes.vue'
@@ -25,8 +26,12 @@ const NAV = [
 const screen = ref('home')
 const width = ref(window.innerWidth)
 const wide = computed(() => width.value >= 760)
+const contentEl = ref(null)
 const onResize = () => { width.value = window.innerWidth }
-onMounted(() => window.addEventListener('resize', onResize))
+onMounted(() => {
+  window.addEventListener('resize', onResize)
+  guardScrollEl(contentEl.value)
+})
 onUnmounted(() => window.removeEventListener('resize', onResize))
 watch(() => uiNav.screen, (s) => { if (s) { screen.value = s; uiNav.screen = null } })
 
@@ -149,7 +154,7 @@ const statusText = computed(() => {
         </span>
       </header>
 
-      <div class="content scrl">
+      <div ref="contentEl" class="content scrl">
         <component :is="screenComp" :title="stubTitle" @navigate="screen = $event" />
       </div>
 
@@ -166,7 +171,7 @@ const statusText = computed(() => {
 </template>
 
 <style scoped>
-.app { display: flex; height: 100%; }
+.app { display: flex; height: 100%; max-height: 100%; overflow: hidden; overscroll-behavior-y: none; }
 .app:not(.wide) { flex-direction: column; }
 
 .sidebar {
@@ -178,7 +183,7 @@ const statusText = computed(() => {
 .brandname { font-size: 19px; font-weight: 800; color: var(--text); letter-spacing: -.01em; }
 .navlist {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  overscroll-behavior: contain;
+  overscroll-behavior: none;
   display: flex; flex-direction: column; gap: 2px;
   scrollbar-width: none;
 }
@@ -224,13 +229,19 @@ const statusText = computed(() => {
 .connbtn { margin-left: auto; background: rgba(255,255,255,.06); border: 1px solid var(--line); color: var(--text2); font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 7px; cursor: pointer; }
 .connbtn:hover { border-color: var(--accent); color: var(--accent); }
 
-.main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; overscroll-behavior-y: none; }
 .statusbar {
   flex: none; display: flex; align-items: center; justify-content: space-between;
   padding: 14px 22px 6px; font-size: 12px; color: var(--muted2);
 }
 .statusbar .status { margin: 0; }
-.content { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+/* overflow:scroll (not auto) so Chrome always treats this as the scroll root;
+   no touch-action here — pan-y makes touchmove non-cancelable and PTR slips through. */
+.content {
+  flex: 1; min-height: 0; overflow-x: hidden; overflow-y: scroll;
+  overscroll-behavior-y: none;
+  -webkit-overflow-scrolling: touch;
+}
 
 .tabbar {
   flex: none; display: flex; justify-content: space-around;

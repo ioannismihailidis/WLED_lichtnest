@@ -4,6 +4,7 @@
 // persistent sim state. The step starts black (nothing launched yet) and ends black
 // (everything has travelled off), so the playlist can auto-advance when it drains.
 import { gradN, fadeCols, fadeCw } from './fxsim.js'
+import { previewAudioSrc } from './audioPreview.js'
 
 const KV = 0.6                 // travel scale (proj/sec at speed 100)
 
@@ -74,16 +75,11 @@ export function impulseDuration (p, umax) {
 }
 
 function previewAudioMods (p) {
-  // keep in sync with fxsim.simAudioMods (avoid circular import at module eval)
+  // keep in sync with fxsim.simAudioMods (shared live/fake source via audioPreview.js)
   let briMul = 1, szMul = 1
   const asrc = p.asrc || 0, again = p.again || 0
   if (!asrc || !again) return { briMul, szMul, lvlMul: 1, spdMul: 1 }
-  const t = performance.now() / 1000
-  let sig = 0.4 + 0.4 * (0.5 + 0.5 * Math.sin(t * 3.2))
-  if (asrc === 5) sig = (Math.sin(t * 6.2) > 0.82) ? 1 : 0
-  else if (asrc === 2) sig = 0.35 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.1))
-  else if (asrc === 3) sig = 0.3 + 0.4 * (0.5 + 0.5 * Math.sin(t * 4.7))
-  else if (asrc === 4) sig = 0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t * 9.3))
+  const sig = previewAudioSrc(asrc)
   const af = 1 - again / 255 + (again / 255) * sig
   const amod = p.amod || 0
   let spdMul = 1, lvlMul = 1

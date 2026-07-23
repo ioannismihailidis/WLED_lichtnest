@@ -19,6 +19,7 @@ import EffectParamsEditor from '../components/EffectParamsEditor.vue'
 import LayersEditor from '../components/LayersEditor.vue'
 import FxSnapTimeline from '../components/FxSnapTimeline.vue'
 import { normalizeTl } from '../snaps.js'
+import { previewAudio, setPreviewAudioMode, canPreviewLiveMic } from '../audioPreview.js'
 
 const SIDE_KIND = 'effects'
 
@@ -398,6 +399,10 @@ async function onImportPresets (ev) {
           <button class="pvrestart" title="Animation neu starten" @click="restartPreview()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4" /><path d="M3 4.5V10h5.5" /></svg>
           </button>
+          <div class="pvaudio" title="Vorschau-Audio: Mikrofon oder Demo-Welle">
+            <button :class="{ on: previewAudio.mode === 'live' }" :disabled="!canPreviewLiveMic()" @click="setPreviewAudioMode('live')">Mic</button>
+            <button :class="{ on: previewAudio.mode === 'demo' }" @click="setPreviewAudioMode('demo')">Demo</button>
+          </div>
           <div class="pvtoggle">
             <button :class="{ on: previewMode === 'tubes' }" :disabled="!hasTubes" @click="previewMode = 'tubes'">Tubes</button>
             <button :class="{ on: previewMode === 'texture' }" @click="previewMode = 'texture'">Textur</button>
@@ -509,10 +514,12 @@ async function onImportPresets (ev) {
 .link { display: flex; align-items: center; gap: 6px; background: none; border: none; color: var(--muted2); font-size: 14px; font-weight: 600; cursor: pointer; padding: 8px 0; margin-bottom: 6px; }
 .bigprev { position: relative; height: 200px; border-radius: 20px; border: 1px solid var(--line); overflow: hidden; background: var(--inset); }
 .pvcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.pvtoggle { position: absolute; top: 8px; right: 8px; display: flex; gap: 3px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 9px; padding: 3px; z-index: 4; }
-.pvtoggle button { border: none; background: transparent; color: var(--muted2); font-size: 11px; font-weight: 700; padding: 4px 9px; border-radius: 6px; cursor: pointer; }
-.pvtoggle button.on { background: var(--accent); color: #1a1206; }
-.pvtoggle button:disabled { opacity: .35; cursor: default; }
+.pvtoggle, .pvaudio { position: absolute; top: 8px; display: flex; gap: 3px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 9px; padding: 3px; z-index: 4; }
+.pvtoggle { right: 8px; }
+.pvaudio { left: 8px; }
+.pvtoggle button, .pvaudio button { border: none; background: transparent; color: var(--muted2); font-size: 11px; font-weight: 700; padding: 4px 9px; border-radius: 6px; cursor: pointer; }
+.pvtoggle button.on, .pvaudio button.on { background: var(--accent); color: #1a1206; }
+.pvtoggle button:disabled, .pvaudio button:disabled { opacity: .35; cursor: default; }
 .pvrestart { position: absolute; top: 8px; left: 8px; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 9px; color: var(--muted2); cursor: pointer; z-index: 4; }
 .pvrestart:active { color: var(--accent); transform: scale(.92); }
 .pvhint { position: absolute; bottom: 40px; left: 8px; right: 8px; font-size: 10px; color: var(--muted2); background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 8px; padding: 5px 8px; z-index: 2; pointer-events: none; }

@@ -4,8 +4,18 @@ import { wled, cfg, loadCfg, saveCfg, postState, persistTubes, tubesTotalForPort
 import NumStepper from '../components/NumStepper.vue'
 import { confirmDialog } from '../confirm.js'
 
-// Gledopto Elite 2D-EXMU (GL-C-616WL) built-in I2S mic — not editable in UI
-const GLEDOPTO_MIC = { type: 1, pin: [32, 15, 14, -1] }
+// Default for new configs (Gledopto Elite 2D-EXMU PDM). Editable in UI afterwards.
+const DEFAULT_MIC = { type: 5, pin: [32, 15, -1, -1] }
+const MIC_TYPES = [
+  { v: 1, l: 'Generic I2S' },
+  { v: 5, l: 'Generic PDM' },
+  { v: 3, l: 'SPH0645' },
+  { v: 2, l: 'ES7243' },
+  { v: 4, l: 'Generic I2S + MCLK' },
+  { v: 6, l: 'ES8388' },
+  { v: 0, l: 'Analog' },
+  { v: 254, l: 'Nur Netzwerk (kein Mic)' },
+]
 const AGC_OPTS = [
   { v: 0, l: 'Aus (manuell)' },
   { v: 1, l: 'Normal' },
@@ -47,11 +57,12 @@ onMounted(async () => {
   await loadCfg()
   if (cfg.data?.hw?.led?.maxpwr) lastMax = cfg.data.hw.led.maxpwr
   ensureAr()
+  micHwSnapshot = snapshotMicHw()
 })
 
 const c = computed(() => cfg.data)
 
-/** Ensure um.AudioReactive exists with Gledopto pin defaults. */
+/** Ensure um.AudioReactive exists; fill missing fields only — never overwrite user pins/type. */
 function ensureAr () {
   if (!c.value) return
   if (!c.value.um) c.value.um = {}
@@ -59,18 +70,22 @@ function ensureAr () {
     c.value.um.AudioReactive = {
       enabled: false,
       'add-palettes': false,
-      digitalmic: { type: GLEDOPTO_MIC.type, pin: [...GLEDOPTO_MIC.pin] },
+      digitalmic: { type: DEFAULT_MIC.type, pin: [...DEFAULT_MIC.pin] },
       config: { squelch: 10, gain: 60, AGC: 0 },
       sync: { port: 11988, mode: 0 },
     }
   }
   const ar = c.value.um.AudioReactive
-  if (!ar.digitalmic) ar.digitalmic = { type: GLEDOPTO_MIC.type, pin: [...GLEDOPTO_MIC.pin] }
-  else {
-    ar.digitalmic.type = GLEDOPTO_MIC.type
-    ar.digitalmic.pin = [...GLEDOPTO_MIC.pin]
-  }
+  if (!ar.digitalmic) ar.digitalmic = { type: DEFAULT_MIC.type, pin: [...DEFAULT_MIC.pin] }
+  if (ar.digitalmic.type == null) ar.digitalmic.type = DEFAULT_MIC.type
+  if (!Array.isArray(ar.digitalmic.pin)) ar.digitalmic.pin = [...DEFAULT_MIC.pin]
+  while (ar.digitalmic.pin.length < 4) ar.digitalmic.pin.push(-1)
   if (!ar.config) ar.config = { squelch: 10, gain: 60, AGC: 0 }
+  // Soft VU dynamics — short AR rise (80) still looks stair-steppy on tubes.
+  if (!ar.dynamics) ar.dynamics = { limiter: true, rise: 220, fall: 1800 }
+  if (ar.dynamics.limiter == null) ar.dynamics.limiter = true
+  if (ar.dynamics.rise == null) ar.dynamics.rise = 220
+  if (ar.dynamics.fall == null) ar.dynamics.fall = 1800
   if (!ar.sync) ar.sync = { port: 11988, mode: 0 }
   ar.sync.mode = 0 // local mic only — no UDP sound sync in product UX
 }
@@ -79,6 +94,38 @@ const micOn = computed({
   get: () => !!(ar.value?.enabled ?? audioReactive.on),
   set: (v) => { ensureAr(); if (ar.value) ar.value.enabled = !!v },
 })
+const micType = computed({
+  get: () => ar.value?.digitalmic?.type ?? DEFAULT_MIC.type,
+  set: (v) => {
+    ensureAr()
+    if (!ar.value?.digitalmic) return
+    ar.value.digitalmic.type = v
+    // PDM has no SCK — clear it so save doesn't leave a stale clock pin
+    if (v === 5 && Array.isArray(ar.value.digitalmic.pin)) ar.value.digitalmic.pin[2] = -1
+  },
+})
+function micPin (i) {
+  return computed({
+    get: () => {
+      const p = ar.value?.digitalmic?.pin
+      return Array.isArray(p) && p[i] != null ? p[i] : (DEFAULT_MIC.pin[i] ?? -1)
+    },
+    set: (v) => {
+      ensureAr()
+      if (!ar.value?.digitalmic) return
+      if (!Array.isArray(ar.value.digitalmic.pin)) ar.value.digitalmic.pin = [...DEFAULT_MIC.pin]
+      while (ar.value.digitalmic.pin.length < 4) ar.value.digitalmic.pin.push(-1)
+      ar.value.digitalmic.pin[i] = v
+    },
+  })
+}
+const micPinSd = micPin(0)
+const micPinWs = micPin(1)
+const micPinSck = micPin(2)
+const micPinMclk = micPin(3)
+const micNeedsMclk = computed(() => micType.value === 2 || micType.value === 4 || micType.value === 6)
+const micNeedsSck = computed(() => micType.value !== 5 && micType.value !== 254 && micType.value !== 0)
+const micTypeLabel = computed(() => MIC_TYPES.find((o) => o.v === micType.value)?.l || 'Mic')
 const micGain = computed({
   get: () => ar.value?.config?.gain ?? 60,
   set: (v) => { if (ar.value?.config) ar.value.config.gain = v },
@@ -93,6 +140,11 @@ const micSquelch = computed({
 })
 const micLvlPct = computed(() => Math.round(((lichtnest.audio.lvl || 0) / 255) * 100))
 const micNeedsReboot = ref(false)
+let micHwSnapshot = ''
+function snapshotMicHw () {
+  const dm = ar.value?.digitalmic
+  return JSON.stringify({ t: dm?.type, p: dm?.pin, on: !!ar.value?.enabled })
+}
 const ins = computed(() => c.value?.hw?.led?.ins || [])
 const ablOn = computed({
   get: () => (c.value?.hw?.led?.maxpwr || 0) > 0,
@@ -103,12 +155,10 @@ const psuRec = computed(() => ((c.value?.hw?.led?.maxpwr || 0) / 1000).toFixed(1
 function busTubes (b) { return tubesTotalForPort(b.start, b.start + b.len) }
 
 // --- add / remove a port (= WLED bus). WLED rebuilds buses from the ins array. ---
-// Gledopto 2D-EXMU: 14/15/32 = I2S mic (reserved). Prefer 16, 2, then DIY 13.
-const GPIO_RESERVED_MIC = [14, 15, 32]
-const GPIO_CANDIDATES = [16, 2, 13, 4, 5, 33, 12, 0, 1, 3]
+const GPIO_CANDIDATES = [16, 2, 13, 4, 5, 33, 12, 0, 1, 3, 14]
 function freeGpio () {
   const used = new Set(ins.value.flatMap((b) => b.pin || []))
-  GPIO_RESERVED_MIC.forEach((g) => used.add(g))
+  ;(ar.value?.digitalmic?.pin || []).forEach((g) => { if (g >= 0) used.add(g) })
   return GPIO_CANDIDATES.find((g) => !used.has(g)) ?? 16
 }
 function addPort () {
@@ -151,7 +201,11 @@ async function save () {
     b.start = ns
   })
   const arCfg = c.value.um.AudioReactive
-  const wasOn = audioReactive.on
+  const pins = Array.isArray(arCfg.digitalmic?.pin) ? [...arCfg.digitalmic.pin] : [...DEFAULT_MIC.pin]
+  while (pins.length < 4) pins.push(-1)
+  const micTypeVal = arCfg.digitalmic?.type ?? DEFAULT_MIC.type
+  if (micTypeVal === 5) pins[2] = -1 // PDM: no SCK
+  const hwAfter = JSON.stringify({ t: micTypeVal, p: pins, on: !!arCfg.enabled })
   const partial = {
     id: { name: c.value.id.name, mdns: c.value.id.mdns },
     hw: { led: { maxpwr: c.value.hw.led.maxpwr, ins: arr } },
@@ -162,11 +216,16 @@ async function save () {
       AudioReactive: {
         enabled: !!arCfg.enabled,
         'add-palettes': !!arCfg['add-palettes'],
-        digitalmic: { type: GLEDOPTO_MIC.type, pin: [...GLEDOPTO_MIC.pin] },
+        digitalmic: { type: micTypeVal, pin: pins },
         config: {
           squelch: arCfg.config?.squelch ?? 10,
           gain: arCfg.config?.gain ?? 60,
           AGC: arCfg.config?.AGC ?? 0,
+        },
+        dynamics: {
+          limiter: arCfg.dynamics?.limiter !== false,
+          rise: arCfg.dynamics?.rise ?? 220,
+          fall: arCfg.dynamics?.fall ?? 1800,
         },
         sync: { port: arCfg.sync?.port ?? 11988, mode: 0 },
       },
@@ -182,7 +241,8 @@ async function save () {
   if (ok) {
     await postState({ AudioReactive: { enabled: !!arCfg.enabled } })
     audioReactive.on = !!arCfg.enabled
-    if (!!arCfg.enabled !== wasOn) micNeedsReboot.value = true
+    if (hwAfter !== micHwSnapshot) micNeedsReboot.value = true
+    micHwSnapshot = hwAfter
   }
   busy.value = false
   msg.value = ok ? 'Gespeichert ✓' : 'Fehler beim Speichern'
@@ -198,10 +258,10 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
     <p v-else-if="!cfg.loaded" class="note">Lade Konfiguration …</p>
 
     <template v-if="c">
-      <!-- MIKROFON (Gledopto 2D-EXMU I2S) -->
+      <!-- MIKROFON -->
       <div class="seclbl mono">MIKROFON</div>
       <div class="panel pad">
-        <div class="row"><span class="lbl">Mikrofon<small>I2S · GPIO 32 / 15 / 14 · lokal</small></span>
+        <div class="row"><span class="lbl">Mikrofon<small>{{ micTypeLabel }} · lokal</small></span>
           <button class="sw" :class="{ on: micOn }" @click="micOn = !micOn"><span /></button></div>
         <div class="row brd">
           <span class="lbl">Eingangspegel</span>
@@ -211,6 +271,31 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
           </div>
         </div>
         <template v-if="micOn">
+          <label class="flbl">Typ</label>
+          <select class="sel" v-model.number="micType"><option v-for="o in MIC_TYPES" :key="o.v" :value="o.v">{{ o.l }}</option></select>
+          <template v-if="micType !== 254 && micType !== 0">
+            <div class="two" style="margin-top:10px">
+              <span>
+                <label class="flbl" style="margin-top:0">SD / Daten</label>
+                <NumStepper v-model="micPinSd" full :min="-1" :max="39" />
+              </span>
+              <span>
+                <label class="flbl" style="margin-top:0">WS / Clock</label>
+                <NumStepper v-model="micPinWs" full :min="-1" :max="39" />
+              </span>
+            </div>
+            <div v-if="micNeedsSck || micNeedsMclk" class="two">
+              <span v-if="micNeedsSck">
+                <label class="flbl">SCK <small>(-1 = aus)</small></label>
+                <NumStepper v-model="micPinSck" full :min="-1" :max="39" />
+              </span>
+              <span v-if="micNeedsMclk">
+                <label class="flbl">MCLK <small>(-1 = aus)</small></label>
+                <NumStepper v-model="micPinMclk" full :min="-1" :max="39" />
+              </span>
+            </div>
+            <p class="hint">GPIO laut Board-Doku. Nach Typ-/Pin-Änderung Speichern und neu starten.</p>
+          </template>
           <div class="row brd">
             <span class="lbl">Verstärkung</span>
             <NumStepper v-model="micGain" :min="1" :max="255" />
@@ -222,7 +307,11 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
             <NumStepper v-model="micSquelch" :min="0" :max="100" />
           </div>
         </template>
-        <p v-if="micNeedsReboot" class="hint mono" style="color:var(--accent)">Nach Ein-/Ausschalten einmal <b>Neu starten</b>, damit der I2S-Treiber greift.</p>
+        <p v-if="micNeedsReboot" class="hint mono" style="color:var(--accent)">
+          Mikrofon-Hardware geändert — bitte einmal
+          <button type="button" class="linkish" @click="reboot">Neu starten</button>,
+          damit der Treiber neu greift.
+        </p>
       </div>
 
       <!-- LEISTUNG -->
@@ -339,9 +428,14 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
 .lbl small { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
 .hint { font-size: 12px; color: var(--muted); padding: 0 0 12px; }
 .hint b { color: var(--accent); }
+.linkish {
+  display: inline; padding: 0; margin: 0; border: none; background: none;
+  color: var(--accent); font: inherit; font-weight: 800; text-decoration: underline;
+  cursor: pointer;
+}
 .meterwrap { display: flex; align-items: center; gap: 10px; flex: 1; justify-content: flex-end; max-width: 220px; }
 .meter { flex: 1; height: 10px; border-radius: 999px; background: var(--inset); border: 1px solid var(--line2); overflow: hidden; }
-.meter .fill { height: 100%; background: var(--accent); transition: width .08s linear; }
+.meter .fill { height: 100%; background: var(--accent); transition: width .05s linear; will-change: width; }
 .meter .fill.peak { background: #e0614f; }
 
 .flbl { display: block; font-size: 12px; color: var(--muted2); margin: 12px 0 6px 2px; }

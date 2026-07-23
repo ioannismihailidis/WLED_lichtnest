@@ -17,6 +17,7 @@ import {
   pendulumColorAt,
 } from './gravity.js'
 import { defaultParams, effectById } from './effects.js'
+import { previewAudioSrc, previewFftBand } from './audioPreview.js'
 import {
   resolveSnap, snapDuration, integrateRate, usesRateIntegral,
   createRatePhaseAcc, resetRatePhase, tickRatePhase,
@@ -65,15 +66,9 @@ export function gradN (ph, cols, cw) {
 }
 function scale (c, k) { k = Math.max(0, Math.min(1, k)); return [c[0] * k, c[1] * k, c[2] * k] }
 
-/** Fake mic signal for offline / draft preview (0..1). */
+/** Mic signal for draft preview (0..1) — live pegel when connected, else synthetic. */
 export function simAudioSrc (asrc) {
-  if (!asrc) return 0
-  const t = performance.now() / 1000
-  if (asrc === 5) return (Math.sin(t * 6.2) > 0.82) ? 1 : 0 // beat-ish
-  if (asrc === 2) return 0.35 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.1)) // bass
-  if (asrc === 3) return 0.3 + 0.4 * (0.5 + 0.5 * Math.sin(t * 4.7))
-  if (asrc === 4) return 0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t * 9.3))
-  return 0.4 + 0.4 * (0.5 + 0.5 * Math.sin(t * 3.2)) // volume
+  return previewAudioSrc(asrc)
 }
 export function simAudioFactor (p) {
   const asrc = p.asrc || 0, again = p.again || 0
@@ -93,9 +88,7 @@ export function simAudioMods (p) {
   return { briMul, spdMul, szMul, lvlMul }
 }
 function simFftBand (band) {
-  const t = performance.now() / 1000
-  const b = band % 16
-  return 0.15 + 0.75 * (0.5 + 0.5 * Math.sin(t * (2.2 + b * 0.55) + b))
+  return previewFftBand(band)
 }
 
 /** Colour from gradient cols when present, else solid `color` (legacy presets). */

@@ -15,13 +15,16 @@
   --sans:'Manrope',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
   --mono:ui-monospace,'JetBrains Mono',SFMono-Regular,Menlo,monospace;
 }
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body,#app{height:100%;overflow:hidden;overscroll-behavior:none}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+html,body,#app{
+  height:100%;height:100dvh;max-height:100dvh;
+  overflow:hidden;overscroll-behavior-y:none;
+}
 body{
   margin:0;background:var(--bg);color:var(--text);
   font-family:var(--sans);
   -webkit-font-smoothing:antialiased;
-  /* App shell: scroll only inside .content — blocks mobile pull-to-refresh. */
+  /* App shell: only .content scrolls — Chrome Android PTR needs a fixed root. */
   position:fixed;inset:0;width:100%;
 }
 input[type=range]{accent-color:var(--accent)}

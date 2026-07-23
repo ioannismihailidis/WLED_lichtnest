@@ -17,6 +17,7 @@ import TexturePreview from '../components/TexturePreview.vue'
 import EffectParamsEditor from '../components/EffectParamsEditor.vue'
 import LayersEditor from '../components/LayersEditor.vue'
 import TransitionSwatch from '../components/TransitionSwatch.vue'
+import { previewAudio, setPreviewAudioMode, canPreviewLiveMic } from '../audioPreview.js'
 
 const view = ref('list')
 const editId = ref(null)
@@ -440,6 +441,10 @@ function confirmImport () {
           <!-- no fx/p props: live path so playlist transitions blend in the preview -->
           <MiniPlan v-if="ovPvMode === 'tubes'" class="ovcanvas" />
           <TexturePreview v-else class="ovcanvas" />
+          <div class="pvaudio2" title="Vorschau-Audio: Mikrofon oder Demo-Welle">
+            <button :class="{ on: previewAudio.mode === 'live' }" :disabled="!canPreviewLiveMic()" @click="setPreviewAudioMode('live')">Mic</button>
+            <button :class="{ on: previewAudio.mode === 'demo' }" @click="setPreviewAudioMode('demo')">Demo</button>
+          </div>
           <div class="pvtoggle2">
             <button :class="{ on: ovPvMode === 'tubes' }" @click="ovPvMode = 'tubes'">Tubes</button>
             <button :class="{ on: ovPvMode === 'texture' }" @click="ovPvMode = 'texture'">Textur</button>
@@ -705,7 +710,7 @@ function confirmImport () {
 .pstep.on { background: var(--accent); color: #1a1206; border-color: transparent; }
 .addsticky { position: sticky; bottom: 0; z-index: 8; margin: 16px -20px -20px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom)); background: linear-gradient(180deg, transparent, var(--bg) 28%); }
 .addstep { width: 100%; height: 48px; border-radius: 13px; border: none; cursor: pointer; background: var(--accent); color: #1a1206; font-size: 14px; font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 8px; }
-.sheet { width: 100%; max-width: 400px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 16px; max-height: 80vh; overflow-y: auto; overscroll-behavior: contain; }
+.sheet { width: 100%; max-width: 400px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 16px; max-height: 80vh; overflow-y: auto; overscroll-behavior: none; }
 .shtabs { display: flex; gap: 4px; background: var(--inset); border: 1px solid var(--line); border-radius: 11px; padding: 3px; margin-bottom: 14px; }
 .shtabs button { flex: 1; padding: 8px; border: none; border-radius: 9px; background: transparent; color: var(--muted2); font-weight: 700; font-size: 12px; cursor: pointer; }
 .shtabs button.on { background: rgba(240,162,60,.16); color: var(--accent); }
@@ -719,9 +724,12 @@ function confirmImport () {
 }
 .ovprev { position: relative; height: 150px; border-radius: 16px; overflow: hidden; background: var(--inset); border: 1px solid var(--line2); }
 .ovcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.pvtoggle2 { position: absolute; top: 6px; right: 6px; display: flex; gap: 2px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 8px; padding: 2px; z-index: 2; }
-.pvtoggle2 button { border: none; background: transparent; color: var(--muted2); font-size: 10px; font-weight: 700; padding: 3px 7px; border-radius: 5px; cursor: pointer; }
-.pvtoggle2 button.on { background: var(--accent); color: #1a1206; }
+.pvtoggle2, .pvaudio2 { position: absolute; top: 6px; display: flex; gap: 2px; background: rgba(13,15,19,.72); backdrop-filter: blur(6px); border: 1px solid var(--line2); border-radius: 8px; padding: 2px; z-index: 2; }
+.pvtoggle2 { right: 6px; }
+.pvaudio2 { left: 6px; }
+.pvtoggle2 button, .pvaudio2 button { border: none; background: transparent; color: var(--muted2); font-size: 10px; font-weight: 700; padding: 3px 7px; border-radius: 5px; cursor: pointer; }
+.pvtoggle2 button.on, .pvaudio2 button.on { background: var(--accent); color: #1a1206; }
+.pvaudio2 button:disabled { opacity: .35; cursor: default; }
 .frow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
 .frow.fcol { flex-direction: column; align-items: stretch; gap: 7px; }
 .flbl { font-size: 12px; color: var(--text2); }
@@ -742,7 +750,7 @@ function confirmImport () {
 
 /* import picker modal */
 .modal { position: fixed; inset: 0; z-index: 50; background: rgba(8,9,11,.6); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 20px; }
-.card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 18px; max-height: 80vh; overflow-y: auto; overscroll-behavior: contain; }
+.card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 18px; max-height: 80vh; overflow-y: auto; overscroll-behavior: none; }
 .mhead { margin-bottom: 4px; }
 .mtitle { font-size: 16px; font-weight: 800; color: var(--text); }
 .impnote { font-size: 11px; color: var(--muted); margin: 0 0 10px; }
