@@ -43,8 +43,66 @@ Stable wire keys (shared pool on firmware). Same semantics ⇒ same key and widg
 | Raum | `pmode`, `angle`, `origin`, `rwidth`, `tail` | Linear / radial / chain, direction, marker, width/opening, soft/tail |
 | Bewegung | `speed`, `dir`, `mode` (easing/shape), **`bounce`** | Tempo, direction, curve, **Schleife vs Hin und zurück** |
 | Hülle | `adsr` → `rfin`, `rgap`, `tempo`, `rfout` | Attack / decay / sustain / release |
-| Takt | keyframes (`keys`, `hzKeys`), `duty`, `hz` | Time curves, pulse width; `hz` also = Kugelbahn Fall-Pause |
-| Mix (layer only) | `enabled`, `blend`, `radius`, `falloff`, `sched` | Compositing (+ future: opacity) |
+| Takt | keyframes (`keys`, `hzKeys`), `duty`, `hz`, **`tl`** | Special lists inside a look; snapshot timeline animates the full param set; `hz` also = Kugelbahn Fall-Pause |
+| Audio | `asrc`, `amod`, `again` | Mic source · what to modulate · depth (0 = ignore). Local audioreactive only. |
+| Mix (layer only) | `enabled`, `blend`, `radius`, `falloff`, `sched`, optional **`tl`** | Compositing; each layer may carry its own snapshot timeline |
+
+### Audio modulation (`asrc` / `amod` / `again`)
+
+| Key | Values |
+| --- | --- |
+| `asrc` | 0 off · 1 volume · 2 bass · 3 mid · 4 treble · 5 beat |
+| `amod` | 0 bri · 1 speed · 2 size (`rwidth`) · 3 level / density |
+| `again` | 0–255 depth (`factor = 1 - d + d·signal`) |
+
+Applied on Pulse, Fill, Wave, Strobe, Twinkle, Solid. Dedicated audio looks
+(Spektrum / Beat-Impuls / Bass-Pegel) use `again` as sensitivity; Beat/Bass also
+accept `asrc`. Hardware tuning (enable, gain, AGC, squelch) lives in **System**
+→ `um.AudioReactive` (Gledopto 2D-EXMU I2S pins 32/15/14, local mic, sync off).
+
+### Snapshot timeline (`tl`)
+
+Under the effect preview, keyframes store a **full snapshot** of the param pool.
+Selecting a keyframe loads that snapshot into the editor. Between consecutive
+snaps, a per-interval transition mode (`xf` on the *incoming* key) blends:
+
+| `xf` | Mode | Behaviour |
+| --- | --- | --- |
+| `0` | Hart | Hold A until `t_i`, then B |
+| `1` | Linear | Lerp numerics / colours over `[t_{i-1}, t_i]` |
+| `2` | Kurzer Fade | Hold A, then ~0.35s crossfade ending at `t_i` |
+
+Loop mode lives on the **first** snap (`lm` / `lg` / `lx`):
+
+| `lm` | Mode | Period | Behaviour |
+| --- | --- | --- | --- |
+| `0` | Hold | `last.t` | Stay on last snap after the end |
+| `1` | Loop | `last.t + lg` | After last key, blend back to first over `lg` with `lx`, then wrap |
+| `2` | Pingpong | `2 × last.t` | Play forward, then reverse |
+
+```json
+{
+  "fx": 11,
+  "p": { "speed": 42, "angle": 25 },
+  "tl": [
+    { "t": 0, "xf": 0, "lm": 1, "lg": 1.0, "lx": 1, "p": { "speed": 20, "angle": 0 } },
+    { "t": 4, "xf": 1, "p": { "speed": 80, "angle": 90 } },
+    { "t": 7, "xf": 2, "p": { "speed": 40, "angle": 180 } }
+  ]
+}
+```
+
+- Root `p` is the **currently selected / edited** snapshot (synced with the selected key).
+- No `tl` (or length 0) → classic single-`p` behaviour.
+- Cap: **4** snaps per effect/layer (`MAX_SNAP` / `ZV_MAXSNAP`) — see `web/src/snaps.js`.
+- **Clocks:** `tl` modulates parameters on its own period (see `lm` above).
+  The effect’s own loop / free-run clock is independent — `tl` does **not** set step duration.
+- **Rate FX** (Spotlight, Welle, Noise): phase is `∫ rate(resolve(τ)) dτ`, never `speed(t) × t`
+  (the product accelerates across loops when speed is timeline-modulated).
+- Firmware keeps only the **active** (and optional transition-from) timelines in RAM;
+  playlist JSON on FS still carries full `tl` per step/layer.
+- Specialised Strobe/Solid lists (`hzKeys` / `keys`) stay inside each snap’s `p`.
+- Plan markers stay static (no global marker animation).
 
 ### `bounce` (Lauf)
 
@@ -79,6 +137,9 @@ Do **not** reuse `bounce` for Kugelbahn air-gaps or elastic rebound.
 | 9 | Twinkle | 12 | Bewegung | Stochastic pixels with ADSR |
 | 10 | Tube-Strobe | 1 | Takt | Timed flashes (Hz keys, duty, colour list) |
 | 11 | Neon-Flackern | 2 | Takt | Special strobe: neon-tube flicker (random brightness drops) |
+| 12 | Spektrum | 7 | Audio | 16 GEQ bands along tube or across tubes |
+| 13 | Beat-Impuls | 10 | Audio | Beat/volume flashes (full tube or bar) |
+| 14 | Bass-Pegel | 13 | Audio | Low-band energy as Wasserstand fill |
 
 **Kombiniert** (fx 4) is the compositor. Entry: “Neuer Look”.
 
@@ -128,14 +189,15 @@ Position `u = 0.5 + A·sin(ωt)` on the spatial plane (`pmode` / `angle` / `orig
 
 ## Former specials → recipe
 
-| Former FX | Recipe |
+| Former FX | Recipe / reuse |
 | --- | --- |
-| Tube Chase (10) | Pulse `pmode=Kette` (+ bounce optional) |
-| Scanner (13) | Pulse Kette + `bounce=1`, schmal (`recipe-scanner`) |
+| Tube Chase (ex-10) | Pulse `pmode=Kette` (+ bounce optional) |
+| Scanner (ex-13) | Pulse Kette + `bounce=1`, schmal (`recipe-scanner`) |
 | Marker Pulse (ex-5) | Spot or Pulse radial + ADSR, small layer radius |
+| Gradient Sweep (ex-7) | removed; ID **7** = Spektrum |
+| IDs 10 / 13 | Beat-Impuls / Bass-Pegel (audio) |
 
-Removed from firmware and web: 7, 10, 13, 15. IDs **5** and **6** reused for
-Kugelbahn / Pendel.
+Removed permanently: 15 (WLED passthrough). IDs **5** / **6** = Kugelbahn / Pendel.
 
 ---
 
@@ -144,7 +206,7 @@ Kugelbahn / Pendel.
 Max `MAX_LAYERS` = 4. Blend: 0 Add · 1 Max · 2 Screen.
 
 Seeded as `recipe-*` presets (Ambient Cloud, Marker Reveal, Show Opener, Tube Run,
-Soft Zone, Scanner).
+Soft Zone, Scanner, Spektrum-Balken, Beat-Flash, Bass-Pegel).
 
 ---
 
@@ -159,4 +221,6 @@ Soft Zone, Scanner).
 7. ~~Neon as takt generator (not Noise recipe)~~
 8. ~~Nav cutover — Effekte 2.0 is the only Effekte screen~~
 9. ~~Gravity: Kugelbahn (5), Pendel (6), Fill Level/Tide~~
-10. Later: Mirror / Hue, BPM / opacity
+10. ~~Snapshot timeline `tl` (replaces generic curves / `originPath`)~~
+11. ~~Audio: Gledopto mic + `asrc`/`amod`/`again` + Spektrum/Beat/Bass~~
+12. Later: Mirror / Hue, BPM / opacity

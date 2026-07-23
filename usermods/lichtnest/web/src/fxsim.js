@@ -17,6 +17,23 @@ import {
   pendulumColorAt,
 } from './gravity.js'
 import { defaultParams, effectById } from './effects.js'
+import {
+  resolveSnap, snapDuration, integrateRate, usesRateIntegral,
+  createRatePhaseAcc, resetRatePhase, tickRatePhase,
+} from './snaps.js'
+export {
+  resolveSnap, snapDuration, integrateRate, usesRateIntegral,
+  createRatePhaseAcc, resetRatePhase, tickRatePhase,
+}
+
+// per-layer tl → rate-phase accumulator (preview / layered path)
+const _layerRateAcc = new WeakMap()
+function layerRateAcc (tl) {
+  if (!tl || typeof tl !== 'object') return createRatePhaseAcc()
+  let a = _layerRateAcc.get(tl)
+  if (!a) { a = createRatePhaseAcc(); _layerRateAcc.set(tl, a) }
+  return a
+}
 
 const lerp = (a, b, t) => a + (b - a) * t
 
@@ -48,6 +65,39 @@ export function gradN (ph, cols, cw) {
 }
 function scale (c, k) { k = Math.max(0, Math.min(1, k)); return [c[0] * k, c[1] * k, c[2] * k] }
 
+/** Fake mic signal for offline / draft preview (0..1). */
+export function simAudioSrc (asrc) {
+  if (!asrc) return 0
+  const t = performance.now() / 1000
+  if (asrc === 5) return (Math.sin(t * 6.2) > 0.82) ? 1 : 0 // beat-ish
+  if (asrc === 2) return 0.35 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.1)) // bass
+  if (asrc === 3) return 0.3 + 0.4 * (0.5 + 0.5 * Math.sin(t * 4.7))
+  if (asrc === 4) return 0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t * 9.3))
+  return 0.4 + 0.4 * (0.5 + 0.5 * Math.sin(t * 3.2)) // volume
+}
+export function simAudioFactor (p) {
+  const asrc = p.asrc || 0, again = p.again || 0
+  if (!asrc || !again) return 1
+  const depth = again / 255
+  return 1 - depth + depth * simAudioSrc(asrc)
+}
+export function simAudioMods (p) {
+  let briMul = 1, spdMul = 1, szMul = 1, lvlMul = 1
+  if (!(p.asrc || 0) || !(p.again || 0)) return { briMul, spdMul, szMul, lvlMul }
+  const af = simAudioFactor(p)
+  const amod = p.amod || 0
+  if (amod === 0) briMul = af
+  else if (amod === 1) spdMul = Math.max(0.05, af)
+  else if (amod === 2) szMul = Math.max(0.05, af)
+  else if (amod === 3) lvlMul = af
+  return { briMul, spdMul, szMul, lvlMul }
+}
+function simFftBand (band) {
+  const t = performance.now() / 1000
+  const b = band % 16
+  return 0.15 + 0.75 * (0.5 + 0.5 * Math.sin(t * (2.2 + b * 0.55) + b))
+}
+
 /** Colour from gradient cols when present, else solid `color` (legacy presets). */
 export function effectCol (p, ph = 0) {
   if (p.cols && p.cols.length) return gradN(ph, fadeCols(p), fadeCw(p))
@@ -56,12 +106,14 @@ export function effectCol (p, ph = 0) {
 
 // phase advance per second for each effect's rate param (matches the firmware)
 export function phaseRate (fx, p, N) {
-  if (fx === 0) return ((p.speed ?? 42) / 100) * 0.6
-  if (fx === 1) return Math.max(1, p.hz || 6)
+  const { spdMul } = simAudioMods(p)
+  if (fx === 0) return ((p.speed ?? 42) / 100) * 0.6 * spdMul
+  if (fx === 1) return Math.max(1, p.hz || 6) * spdMul
   if (fx === 2) return 1                                          // Neon: phase = elapsed (s)
   if (fx === 5) return 1                                          // Kugelbahn: phase = elapsed (s)
   if (fx === 6) return 1                                          // Pendel: phase = elapsed (s)
-  if (fx === 9) return ((p.speed ?? 36) / 100) * 0.5               // Welle travel
+  if (fx === 7 || fx === 10 || fx === 13) return 1                 // audio looks: elapsed / live
+  if (fx === 9) return ((p.speed ?? 36) / 100) * 0.5 * spdMul      // Welle travel
   if (fx === 11) return ((p.speed ?? 0) / 100) * 90                // Spotlight rotation (°/s)
   if (fx === 12) return 1                                          // Twinkle: phase = elapsed (s); speed/duty inside fx
   if (fx === 14) return ((p.speed ?? 22) / 100) * 0.25             // Noise drift
@@ -145,7 +197,10 @@ export function sampleCurve (keys, t) {
 const DEF_HZKEYS = [{ t: 0, v: 2 }, { t: 2, v: 10 }]
 export const strobeKeys = (p) => (p.hzKeys && p.hzKeys.length ? p.hzKeys.slice().sort((a, b) => a.t - b.t) : DEF_HZKEYS)
 export const strobeRateAt = (p, elapsed) => Math.max(1, sampleCurve(strobeKeys(p), elapsed))
-export const strobeDuration = (p) => { const k = strobeKeys(p); return Math.max(0.5, k[k.length - 1].t) }
+export const strobeDuration = (p) => {
+  const k = strobeKeys(p)
+  return Math.max(0.5, k[k.length - 1].t)
+}
 // integral of a piecewise-linear keyframe list [{t,v}] from 0..elapsed. Deterministic in
 // `elapsed`, so the preview can sync exactly to the running step. Used for any rate-over-time.
 export function curvePhaseAt (keys, elapsed) {
@@ -171,7 +226,10 @@ const DEF_SOLIDKEYS = [
 ]
 export const solidKeys = (p) => (p.keys && p.keys.length ? p.keys.slice().sort((a, b) => a.t - b.t) : DEF_SOLIDKEYS)
 export const solidPhaseAt = (p, elapsed) => 2 * Math.PI * curvePhaseAt(solidKeys(p), elapsed)
-export const solidDuration = (p) => { const k = solidKeys(p); return Math.max(0.5, k[k.length - 1].t) }
+export const solidDuration = (p) => {
+  const k = solidKeys(p)
+  return Math.max(0.5, k[k.length - 1].t)
+}
 // interpolate the colour of a keyframe list (reads .c) at time t
 export function sampleColorAt (keys, t) {
   if (!keys || !keys.length) return [255, 255, 255]
@@ -258,7 +316,8 @@ export function strobeColor (p, tubeIdx, tubeTotal, flash) {
 // `along` optional 0..1 position along the current tube (scanner per-tube mode).
 // Fill (8) is rendered via fillColorAt in the plan preview (needs umax + elapsed).
 export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase, cx = 0.5, cy = 0.5, along = null) {
-  const col = p.color || [255, 255, 255]
+  const { briMul, szMul, lvlMul } = simAudioMods(p)
+  const a = along != null ? along : (chainTotal > 1 ? chainIdx / (chainTotal - 1) : 0)
   switch (fx) {
     case 0: { // legacy continuous pulse — live preview uses impulse.js instead
       return [0, 0, 0]
@@ -266,22 +325,62 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
     case 1: {
       const flash = Math.floor(phase); const inFrac = phase - flash
       if (inFrac >= (p.duty || 30) / 100) return [0, 0, 0]   // off part of the flash cycle
-      return strobeColor(p, tubeIdx, tubeTotal, flash)       // handles which tubes are lit + their colour
+      return scale(strobeColor(p, tubeIdx, tubeTotal, flash), briMul)
     }
     case 2: { // Neon flicker — phase = elapsed seconds; ADSR = soft fade-in + sustain floor
       const { A, S } = adsrParts(p)
       let env = S
       if (A > 0 && phase < A) env = S * (phase / A)
       if (env <= 0) return [0, 0, 0]
-      const bri = neonBriAt(p, tubeIdx, phase) * env
+      const bri = neonBriAt(p, tubeIdx, phase) * env * briMul
       if (bri <= 0) return [0, 0, 0]
       return scale(effectCol(p, bri), bri)
     }
     case 5: // Kugelbahn — needs tube path; use marbleColorAt via layer/MiniPlan context
-    case 7: // removed Gradient Sweep
-    case 10: // removed Tube Chase
-    case 13: // removed Scanner
       return [0, 0, 0]
+    case 7: { // Spektrum
+      let band
+      if ((p.pmode || 0) === 2 && tubeTotal > 1) band = Math.min(15, Math.floor((tubeIdx * 16) / tubeTotal))
+      else band = Math.min(15, Math.floor(a * 15.99))
+      const lvl = simFftBand(band)
+      const sens = (p.again || 255) / 255
+      const intens = Math.min(1, lvl * (0.35 + 0.65 * sens))
+      if (intens < 0.01) return [0, 0, 0]
+      const soft = Math.max(0.02, ((p.rwidth ?? 12) * szMul) / 100)
+      if ((p.mode || 0) === 0) {
+        if (a > intens + soft) return [0, 0, 0]
+        let k = intens * briMul
+        if (a > intens - soft) k *= (intens + soft - a) / (2 * soft)
+        return scale(gradN(band / 15, fadeCols(p), fadeCw(p)), Math.max(0, k))
+      }
+      return scale(gradN(band / 15, fadeCols(p), fadeCw(p)), intens * briMul)
+    }
+    case 10: { // Beat-Impuls
+      const src = p.asrc || 5
+      let sig = simAudioSrc(src)
+      if (src === 5) sig = Math.max(sig, simAudioSrc(1))
+      const sens = (p.again || 255) / 255
+      const bri = sig * sens * briMul
+      if (bri < 0.02) return [0, 0, 0]
+      const soft = Math.max(0.02, ((p.rwidth ?? 14) * szMul) / 100)
+      if ((p.pmode || 0) === 2) {
+        if (a > bri + soft) return [0, 0, 0]
+        let k = bri
+        if (a > bri - soft) k *= (bri + soft - a) / (2 * soft)
+        return scale(gradN(a, fadeCols(p), fadeCw(p)), k)
+      }
+      return scale(gradN(a, fadeCols(p), fadeCw(p)), bri)
+    }
+    case 13: { // Bass-Pegel — simplified along-tube fill for preview
+      const src = p.asrc || 2
+      const sens = (p.again || 255) / 255
+      const level = Math.min(1, simAudioSrc(src) * (0.35 + 0.65 * sens)) * lvlMul
+      const soft = Math.max(0.02, ((p.rwidth ?? 14) * szMul) / 100)
+      if (a > level + soft) return [0, 0, 0]
+      let k = briMul
+      if (a > level - soft) k *= (level + soft - a) / (2 * soft)
+      return scale(gradN(a, fadeCols(p), fadeCw(p)), Math.max(0, k))
+    }
     case 6: { // Pendel — phase = elapsed; soft bob on spatial axis
       const umax = 1 // caller should prefer pendulumColorAt with real umax
       return pendulumColorAt(p, x, y, cx, cy, phase, umax)
@@ -299,9 +398,9 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
           : ((ax < 0 ? ax : 0) + (ay < 0 ? ay : 0))
         d = x * ax + y * ay - u0
       }
-      const lambda = Math.max(0.08, (p.rwidth ?? 35) / 100)
+      const lambda = Math.max(0.08, ((p.rwidth ?? 35) * szMul) / 100)
       let ph = phase - d / lambda
-      const intens = 0.5 + 0.5 * Math.sin(2 * Math.PI * ph)
+      const intens = (0.5 + 0.5 * Math.sin(2 * Math.PI * ph)) * briMul
       ph -= Math.floor(ph)
       return scale(gradN(ph, fadeCols(p), fadeCw(p)), intens)
     }
@@ -323,7 +422,7 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
     }
     case 12: { // Twinkle — each LED has its own phase offset + period; ADSR envelope + palette
       // optional cluster: rwidth > 0 limits sparks to a disc around (cx,cy)
-      const clusterR = (p.rwidth ?? 0) / 100
+      const clusterR = ((p.rwidth ?? 0) * szMul) / 100
       if (clusterR > 0.001) {
         const dx = x - cx, dy = y - cy
         if (Math.sqrt(dx * dx + dy * dy) > clusterR) return [0, 0, 0]
@@ -331,8 +430,11 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       const { A, D, S, R: Rel } = adsrParts(p)
       let envLen = A + D + Rel
       if (envLen < 0.05) envLen = 0.05
-      const dens = Math.max(0.01, (p.duty ?? 18) / 100)
-      const speedK = 0.35 + (1 - (p.speed ?? 40) / 100) * 2.65   // 0.35..3.0 s base gap
+      let dens = Math.max(0.01, (p.duty ?? 18) / 100)
+      dens = Math.min(1, dens * (0.35 + 0.65 * lvlMul))
+      const { spdMul } = simAudioMods(p)
+      const spd = Math.min(100, (p.speed ?? 40) * spdMul)
+      const speedK = 0.35 + (1 - spd / 100) * 2.65   // 0.35..3.0 s base gap
       const gapMean = speedK * (1.15 - dens * 0.95)              // denser → shorter idle
       const h0 = zvHash(chainIdx >>> 0, 0)
       const period = envLen + gapMean * (0.45 + ((h0 & 255) / 255) * 1.1)
@@ -342,7 +444,7 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       let tIn = tAdj - cycle * period
       if (tIn < 0) tIn += period
       if (tIn >= envLen) return [0, 0, 0]
-      const bri = envelopeAt(tIn, A, D, S, Rel)
+      const bri = envelopeAt(tIn, A, D, S, Rel) * briMul
       if (bri <= 0) return [0, 0, 0]
       const h1 = zvHash(chainIdx >>> 0, cycle >>> 0)
       return scale(gradN((h1 & 255) / 255, fadeCols(p), fadeCw(p)), bri)
@@ -375,9 +477,10 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
     }
     case 3:
     default: {
+      const col = p.color || [255, 255, 255]
       let b = 1
       if (p.breathe !== false) b = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(phase))
-      return scale(col, b)
+      return scale(col, b * briMul)
     }
   }
 }
@@ -408,10 +511,11 @@ export function layerGateOpen (layer, tSec) {
 export function layerMask (layer, x, y, markerXY) {
   const r = layer.radius || 0
   if (!r) return 1
+  const foV = layer.falloff ?? 20
   const mx = markerXY ? markerXY[0] : 0.5, my = markerXY ? markerXY[1] : 0.5
   const dx = x - mx, dy = y - my
   const d = Math.sqrt(dx * dx + dy * dy)
-  const rf = r / 100, fo = Math.max(1, layer.falloff ?? 20) / 100
+  const rf = r / 100, fo = Math.max(1, foV) / 100
   if (d <= rf - fo) return 1
   if (d >= rf) return 0
   return (rf - d) / fo
@@ -420,15 +524,15 @@ export function layerMask (layer, x, y, markerXY) {
 // auto-loop on this (like the classic single-effect step); ambient FX free-run
 export function layerNaturalDuration (layer, geomPts, cx, cy) {
   const p = layer.p || {}
-  if (layer.fx === 0) return impulseDuration(p, impulseUmax(p, geomPts, cx, cy))
-  if (layer.fx === 1) return strobeDuration(p)
-  if (layer.fx === 3) return solidDuration(p)
-  if (layer.fx === 5) {
+  let sec = 0
+  if (layer.fx === 0) sec = impulseDuration(p, impulseUmax(p, geomPts, cx, cy))
+  else   if (layer.fx === 1) sec = strobeDuration(p)
+  else if (layer.fx === 3) sec = solidDuration(p)
+  else if (layer.fx === 5) {
     const path = buildMarblePath(tubesFromPts(geomPts), p.dir || 0, p.hz ?? 8)
-    return marbleDuration(p, path.total)
-  }
-  if (layer.fx === 8) return fillDuration(p, impulseUmax(p, geomPts, cx, cy))
-  return 0
+    sec = marbleDuration(p, path.total)
+  } else if (layer.fx === 8) sec = fillDuration(p, impulseUmax(p, geomPts, cx, cy))
+  return sec
 }
 // per-frame render context for one layer (computed once, sampled per pixel) — mirrors
 // what MiniPlan/TexturePreview already precompute for a single (non-layered) effect
@@ -436,28 +540,40 @@ export function layerContext (layer, elapsedRaw, geomPts, chainTotal, markerXY) 
   const fx = layer.fx
   // merge declared defaults under the layer's own `p` — empty `{}` (or partial edits)
   // must still match firmware FxParams defaults
-  const p = { ...defaultParams(fx), ...(layer.p || {}) }
+  let p = { ...defaultParams(fx), ...(layer.p || {}) }
   // layer.marker is the single spatial anchor (mask centre + Impuls origin) — mirrors
   // firmware renderStack temporarily overriding P.origin from L.marker
   if (layer.marker != null && layer.marker !== 255) p.origin = layer.marker
-  const cx = markerXY ? markerXY[0] : 0.5, cy = markerXY ? markerXY[1] : 0.5
-  const natural = layerNaturalDuration({ ...layer, p }, geomPts, cx, cy)
+  const natural = layerNaturalDuration({ ...layer, p }, geomPts, markerXY ? markerXY[0] : 0.5, markerXY ? markerXY[1] : 0.5)
+  // params follow raw step time; effect phase uses natural wrap (or ∫rate under tl)
   const elapsed = natural > 0.05 ? (elapsedRaw % natural) : elapsedRaw
+  const rootP = p
+  p = resolveSnap(layer.tl, elapsedRaw, p)
+  const cx = markerXY ? markerXY[0] : 0.5
+  const cy = markerXY ? markerXY[1] : 0.5
   if (fx === 0) {
     const umax = impulseUmax(p, geomPts, cx, cy)
-    return { fx, p, cx, cy, umax, positions: (p.speed ?? 42) === 0 ? [] : impulsePositions(p, elapsed) }
+    return { fx, p, cx, cy, umax, elapsed, layer, positions: (p.speed ?? 42) === 0 ? [] : impulsePositions(p, elapsed) }
   }
   // solid: colour + breathe phase must both be precomputed — fxColor's default branch
   // does Math.sin(phase); undefined phase → NaN → pure black tubes in the preview
-  if (fx === 3) return { fx, p: { ...p, color: solidColorAt(p, elapsed) }, cx, cy, phase: solidPhaseAt(p, elapsed) }
-  if (fx === 1) return { fx, p, cx, cy, phase: strobePhaseAt(p, elapsed) }
+  if (fx === 3) return { fx, p: { ...p, color: solidColorAt(p, elapsed) }, cx, cy, elapsed, layer, phase: solidPhaseAt(p, elapsed) }
+  if (fx === 1) return { fx, p, cx, cy, elapsed, layer, phase: strobePhaseAt(p, elapsed) }
   if (fx === 5) {
     const path = buildMarblePath(tubesFromPts(geomPts), p.dir || 0, p.hz ?? 8)
-    return { fx, p, cx, cy, elapsed, path, positions: marblePositions(p, elapsed, path.total) }
+    return { fx, p, cx, cy, elapsed, layer, path, positions: marblePositions(p, elapsed, path.total) }
   }
-  if (fx === 6) return { fx, p, cx, cy, elapsed, umax: impulseUmax(p, geomPts, cx, cy) }
-  if (fx === 8) return { fx, p, cx, cy, elapsed, umax: impulseUmax(p, geomPts, cx, cy) }
-  return { fx, p, cx, cy, phase: elapsed * phaseRate(fx, p, chainTotal || 1) }
+  if (fx === 6) return { fx, p, cx, cy, elapsed, layer, umax: impulseUmax(p, geomPts, cx, cy) }
+  if (fx === 8) return { fx, p, cx, cy, elapsed, layer, umax: impulseUmax(p, geomPts, cx, cy) }
+  let phase = elapsed * phaseRate(fx, p, chainTotal || 1)
+  if (usesRateIntegral(fx) && Array.isArray(layer.tl) && layer.tl.length) {
+    const N = chainTotal || 1
+    const acc = layerRateAcc(layer.tl)
+    const rate = phaseRate(fx, p, N)
+    phase = tickRatePhase(acc, elapsedRaw, rate, () =>
+      integrateRate(layer.tl, elapsedRaw, (pp) => phaseRate(fx, pp, N), rootP))
+  }
+  return { fx, p, cx, cy, elapsed, layer, phase }
 }
 function layerColorAt (ctx, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, along = null) {
   if (ctx.fx === 0) return impulseColorAt(ctx.positions, ctx.p, impulseDist(ctx.p, x, y, ctx.cx, ctx.cy, chainIdx, chainTotal), ctx.umax || 1)

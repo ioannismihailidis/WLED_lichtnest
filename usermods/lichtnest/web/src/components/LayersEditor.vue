@@ -1,8 +1,5 @@
 <script setup>
-// Editor for a "Kombiniert" effect's layer stack: each layer is one of the 4 base
-// effects, optionally anchored to a plan marker (with a radius/falloff mask) and
-// optionally gated to a periodic on/off window (e.g. a strobe that only flashes for
-// 4s every 30s). Fully controlled — emits the whole updated array on every change.
+// Editor for a "Kombiniert" effect's layer stack.
 import { reactive, ref } from 'vue'
 import { plan } from '../wled.js'
 import { goPlan } from '../nav.js'
@@ -12,7 +9,7 @@ import EffectParamsEditor from './EffectParamsEditor.vue'
 const props = defineProps({ modelValue: { type: Array, default: () => [] } })
 const emit = defineEmits(['update'])
 
-const expanded = ref(null)   // uid of the expanded layer row
+const expanded = ref(null)
 const BLEND_OPTS = [{ v: 0, l: 'Addieren' }, { v: 1, l: 'Maximum' }, { v: 2, l: 'Screen' }]
 
 function uid () { return 'ly' + Date.now().toString(36) + Math.floor(Math.random() * 1e4) }
@@ -28,7 +25,7 @@ function addLayer (fx) {
 }
 function removeLayer (l) { commit(props.modelValue.filter((x) => x.uid !== l.uid)) }
 function patchLayer (l, patch) { commit(props.modelValue.map((x) => (x.uid === l.uid ? { ...x, ...patch } : x))) }
-function setLayerFx (l, fx) { patchLayer(l, { fx, p: defaultParams(fx) }) }   // switching effect type resets its params
+function setLayerFx (l, fx) { patchLayer(l, { fx, p: defaultParams(fx) }) }
 function onLayerParams (l, patch) { patchLayer(l, { p: { ...l.p, ...patch } }) }
 function toggleEnabled (l) { patchLayer(l, { enabled: !l.enabled }) }
 function setMarker (l, e) { const v = e.target.value; patchLayer(l, { marker: v === '' ? 255 : +v }) }
@@ -39,7 +36,6 @@ function setSchedMode (l, mode) { patchLayer(l, { sched: { ...l.sched, mode } })
 function bumpDuration (l, d) { patchLayer(l, { sched: { ...l.sched, duration: Math.max(0.1, +((l.sched?.duration ?? 4) + d).toFixed(1)) } }) }
 function bumpPeriod (l, d) { patchLayer(l, { sched: { ...l.sched, period: Math.max(1, +((l.sched?.period ?? 30) + d).toFixed(1)) } }) }
 
-// --- drag reorder (mirrors Playlists.vue's item drag) ---
 const drag = reactive({ id: null, startIndex: 0, target: 0, dy: 0, h: 64 })
 const settling = ref(false)
 let dragIds = []; let startY = 0
@@ -102,9 +98,9 @@ function rowStyle (uidVal, index) {
           </select>
         </div>
         <button class="mklink" type="button" @click="goPlan({ placeMarker: true })">Im 2D-Plan Marker setzen →</button>
-        <p v-if="l.fx === 0 || l.fx === 8 || l.fx === 9" class="mkhint">{{ l.fx === 0 ? 'Impuls' : l.fx === 8 ? 'Fill' : 'Welle' }} startet an diesem Marker (radial: Mittelpunkt, linear: Wellenfront). Radius begrenzt zusätzlich die Zone.</p>
-        <p v-else-if="l.fx === 14" class="mkhint">Noise nutzt diesen Marker als Anzieh-/Abstoßpunkt (Feld-Modus unter Parameter).</p>
-        <p v-else-if="l.fx === 11" class="mkhint">Spotlight strahlt von diesem Marker. Richtung und Öffnung unter Parameter.</p>
+        <p v-if="l.fx === 0 || l.fx === 8 || l.fx === 9" class="mkhint">{{ l.fx === 0 ? 'Impuls' : l.fx === 8 ? 'Fill' : 'Welle' }} startet an diesem Marker. Radius begrenzt zusätzlich die Zone.</p>
+        <p v-else-if="l.fx === 14" class="mkhint">Noise nutzt diesen Marker als Anzieh-/Abstoßpunkt.</p>
+        <p v-else-if="l.fx === 11" class="mkhint">Spotlight strahlt von diesem Marker.</p>
         <div class="frow">
           <span class="flbl">Radius<span v-if="l.radius > 0" class="mono"> · {{ l.radius }}%</span><span v-else class="mono muted"> · unbegrenzt</span></span>
         </div>
@@ -137,7 +133,6 @@ function rowStyle (uidVal, index) {
           </div>
         </template>
         <div class="plbl mono">PARAMETER</div>
-        <!-- hide per-effect "Ursprung": the layer Marker above is the single spatial anchor -->
         <EffectParamsEditor :params="effectById(l.fx).params.filter(pp => pp.key !== 'origin' && (!pp.show || pp.show(l.p)))" :values="l.p" @update="onLayerParams(l, $event)" />
       </div>
     </div>
@@ -150,8 +145,8 @@ function rowStyle (uidVal, index) {
         </button>
       </div>
     </template>
-    <p v-else class="note">Maximum von {{ MAX_LAYERS }} Ebenen erreicht — entferne eine Ebene, um eine neue hinzuzufügen.</p>
-    <p v-if="!modelValue.length" class="note">Noch keine Ebene. Füge einen Basis-Effekt hinzu — z. B. einen linearen Impuls auf Marker 1, einen radialen auf Marker 2, dazu einen periodischen Strobe.</p>
+    <p v-else class="note">Maximum von {{ MAX_LAYERS }} Ebenen erreicht.</p>
+    <p v-if="!modelValue.length" class="note">Noch keine Ebene. Füge einen Basis-Effekt hinzu.</p>
   </div>
 </template>
 
@@ -170,7 +165,6 @@ function rowStyle (uidVal, index) {
 .ic.on { color: var(--green); border-color: rgba(94,201,138,.4); }
 .ic.del:hover { color: #e0614f; border-color: #e0614f; }
 .ic.sm { width: 28px; height: 28px; }
-
 .lexp { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.06); display: flex; flex-direction: column; gap: 9px; }
 .frow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .flbl { font-size: 12px; color: var(--text2); }
@@ -183,7 +177,6 @@ function rowStyle (uidVal, index) {
 .dur button { width: 24px; height: 24px; border-radius: 7px; background: var(--inset); border: 1px solid var(--line); color: var(--text2); font-size: 14px; font-weight: 700; cursor: pointer; }
 .dur b { font-size: 12px; color: var(--text); min-width: 34px; text-align: center; }
 .plbl { font-size: 11px; font-weight: 700; letter-spacing: .12em; color: var(--muted); margin: 4px 0 2px; }
-
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 9px 12px; color: var(--text2); font-size: 13px; font-weight: 600; cursor: pointer; }
 .cprev { width: 16px; height: 10px; border-radius: 3px; }

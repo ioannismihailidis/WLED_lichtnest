@@ -26,6 +26,22 @@ original UI, regardless of what is on the filesystem.
 
 ## Build & deploy
 
+**One-shot update script** (recommended for agents / repeatable flash):
+
+```bash
+# From repo root — never flashes unless you pass --ota or --serial
+./usermods/lichtnest/update.sh --build-only
+./usermods/lichtnest/update.sh --ota 4.3.2.1              # AP default
+./usermods/lichtnest/update.sh --serial                   # USB auto-detect
+./usermods/lichtnest/update.sh --ui-only --ota 4.3.2.1    # UI gzip only
+```
+
+What it does: builds Lichtnest UI (`web/` → `dist/index.htm.gz`), builds
+firmware for `[env:esp32_eth]`, flashes firmware (OTA espota or serial), then
+HTTP-uploads the UI to WLED `/upload` (not PlatformIO `uploadfs`).
+
+UI-only / manual path:
+
 ```bash
 cd usermods/lichtnest/web
 npm install
@@ -81,7 +97,26 @@ firmware.
 Effect / generator model (Effekte 2.0 vocabulary, base generators, layer
 composition recipes): [`docs/generators.md`](docs/generators.md).
 
+## Hardware — Gledopto Elite 2D-EXMU (GL-C-616WL)
+
+Product board for `[env:esp32_eth]`:
+
+| Role | GPIO |
+| --- | --- |
+| LED data (primary / secondary) | 16 / 2 |
+| I2S mic SD / WS / SCK | 32 / 15 / 14 |
+| Relay (invert) | 18 |
+| DIY | 13 |
+| Ethernet type | Gledopto Series (`WLED_ETH_GLEDOPTO` = 13) |
+
+`audioreactive` is compiled in with those I2S defaults. Each fleet unit listens to
+its **own** mic (UDP sound sync stays off in the product UI). Tune enable / gain /
+AGC / squelch under **System → Mikrofon**; live level also on **Start**.
+
+Creative use: shared `asrc` / `amod` / `again` on generators, plus Spektrum (7),
+Beat-Impuls (10), Bass-Pegel (13). See [`docs/generators.md`](docs/generators.md).
+
 ## Enable in the firmware
 
-`lichtnest` is added to `[env:esp32_eth]`'s `custom_usermods` in
+`lichtnest` + `audioreactive` are in `[env:esp32_eth]`'s `custom_usermods` in
 `platformio.ini`.

@@ -11,7 +11,42 @@ export const PARAM_GROUPS = [
   { id: 'bewegung', name: 'Bewegung' },
   { id: 'huelle', name: 'Hüllkurve' },
   { id: 'takt', name: 'Takt' },
+  { id: 'audio', name: 'Audio' },
 ]
+
+const ASRC_OPTS = [
+  { v: 0, l: 'Aus' },
+  { v: 1, l: 'Pegel' },
+  { v: 2, l: 'Bass' },
+  { v: 3, l: 'Mitten' },
+  { v: 4, l: 'Höhen' },
+  { v: 5, l: 'Beat' },
+]
+const AMOD_OPTS = [
+  { v: 0, l: 'Helligkeit' },
+  { v: 1, l: 'Geschwindigkeit' },
+  { v: 2, l: 'Größe' },
+  { v: 3, l: 'Pegel / Dichte' },
+]
+
+/** Shared audio modulation block (asrc / amod / again). */
+export function AUDIO_BLOCK (opts = {}) {
+  return [
+    {
+      key: 'asrc', type: 'select', name: 'Quelle', group: 'audio', def: 0,
+      options: ASRC_OPTS, ...opts,
+    },
+    {
+      key: 'amod', type: 'select', name: 'Moduliert', group: 'audio', def: 0,
+      options: AMOD_OPTS,
+      show: (p) => (p.asrc || 0) > 0,
+    },
+    {
+      key: 'again', type: 'range', name: 'Stärke', group: 'audio', min: 0, max: 255, def: 180,
+      show: (p) => (p.asrc || 0) > 0,
+    },
+  ]
+}
 
 const PMODE_OPTS = [{ v: 0, l: 'Linear' }, { v: 1, l: 'Radial' }]
 const DIR_OPTS = [{ v: 0, l: 'Vorwärts' }, { v: 1, l: 'Rückwärts' }]
@@ -40,7 +75,7 @@ export function SPATIAL_ANGLE (opts = {}) {
 }
 /** @param {string} [name] @param {object} [opts] */
 export function SPATIAL_ORIGIN (name = 'Ursprung', opts = {}) {
-  return { key: 'origin', type: 'marker', name, group: 'raum', ...opts }
+  return { key: 'origin', type: 'marker', name, group: 'raum', pathable: true, ...opts }
 }
 /** Linear/radial plane: pmode + angle (dial, linear only) + origin */
 export const SPATIAL_PLANE = [
@@ -100,6 +135,7 @@ export const EFFECTS = [
       { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90, unit: '%', def: 30, group: 'raum' },
       MOTION_SPEED(),
       ADSR_BLOCK({ rfin: 0, rgap: 0, tempo: 100, rfout: 4 }),
+      ...AUDIO_BLOCK(),
     ],
   },
   {
@@ -113,6 +149,7 @@ export const EFFECTS = [
       { key: 'hzKeys', type: 'keyframes', name: 'Frequenz-Verlauf', timeline: 'strobe', vMin: 1, vMax: 20, vUnit: 'Hz', def: [{ t: 0, v: 2 }, { t: 2, v: 10 }], group: 'takt' },
       { key: 'duty', type: 'range', name: 'Pulsbreite', min: 5, max: 95, unit: '%', def: 30, group: 'takt' },
       { key: 'mode', type: 'select', name: 'Modus', group: 'takt', options: [{ v: 0, l: 'Alle' }, { v: 1, l: 'Wechsel' }, { v: 2, l: 'Reihum' }, { v: 3, l: 'Zufall' }] },
+      ...AUDIO_BLOCK(),
     ],
   },
   {
@@ -149,6 +186,7 @@ export const EFFECTS = [
         ],
       },
       { key: 'breathe', type: 'toggle', name: 'Atmen', group: 'takt' },
+      ...AUDIO_BLOCK(),
     ],
   },
   {
@@ -222,6 +260,26 @@ export const EFFECTS = [
         show: (p) => (p.mode || 0) === 2,
       },
       ADSR_BLOCK({ rfin: 0, rgap: 0, tempo: 100, rfout: 0 }),
+      ...AUDIO_BLOCK(),
+    ],
+  },
+  {
+    id: 7, key: 'spectrum', name: 'Spektrum', category: 'audio',
+    desc: '16 Frequenzbänder aus dem Mikrofon — als Balken entlang der Tube oder über die Tubes verteilt.',
+    tip: 'Modus „Balken“ füllt von unten; „Voll“ färbt die ganze Tube mit Band-Energie.',
+    preview: 'repeating-linear-gradient(90deg,#27c5ff 0 6%,#0d0f13 6% 10%,#7b3cff 10% 16%,#0d0f13 16% 20%,#ff5a3c 20% 26%,#0d0f13 26% 100%)',
+    params: [
+      COLOR_GRAD({ seedColor: [39, 197, 255] }),
+      {
+        key: 'pmode', type: 'select', name: 'Verteilung', group: 'raum', def: 0,
+        options: [{ v: 0, l: 'Entlang Tube' }, { v: 2, l: 'Über Tubes' }],
+      },
+      {
+        key: 'mode', type: 'select', name: 'Darstellung', group: 'raum', def: 0,
+        options: [{ v: 0, l: 'Balken' }, { v: 1, l: 'Voll' }],
+      },
+      SOFT_EDGE('Weiche Kante', 12),
+      { key: 'again', type: 'range', name: 'Empfindlichkeit', group: 'audio', min: 0, max: 255, def: 200 },
     ],
   },
   {
@@ -234,6 +292,42 @@ export const EFFECTS = [
       ...SPATIAL_PLANE,
       { key: 'rwidth', type: 'range', name: 'Wellenlänge', min: 8, max: 100, unit: '%', def: 35, group: 'raum' },
       MOTION_SPEED('Geschwindigkeit', 36),
+      ...AUDIO_BLOCK(),
+    ],
+  },
+  {
+    id: 10, key: 'beat', name: 'Beat-Impuls', category: 'audio',
+    desc: 'Beat- und Pegel-Impulse vom Mikrofon — Tube blitzt oder füllt sich mit der Energie.',
+    tip: 'Quelle Beat für Drums; Pegel für durchgehende Reaktion. Stärke = Empfindlichkeit.',
+    preview: 'radial-gradient(circle at 50% 50%,#fff 0 8%,#ff5a3c 18%,#0d0f13 55%)',
+    params: [
+      COLOR_GRAD({ seedColor: [255, 90, 60] }),
+      {
+        key: 'asrc', type: 'select', name: 'Quelle', group: 'audio', def: 5,
+        options: ASRC_OPTS.filter((o) => o.v > 0),
+      },
+      {
+        key: 'pmode', type: 'select', name: 'Form', group: 'raum', def: 0,
+        options: [{ v: 0, l: 'Ganzer Tube' }, { v: 2, l: 'Balken' }],
+      },
+      SOFT_EDGE('Weiche Kante', 14),
+      { key: 'again', type: 'range', name: 'Empfindlichkeit', group: 'audio', min: 0, max: 255, def: 200 },
+    ],
+  },
+  {
+    id: 13, key: 'bassfill', name: 'Bass-Pegel', category: 'audio',
+    desc: 'Bass-Energie steuert den Füllstand — wie Wasserstand, aber live vom Mikrofon.',
+    tip: 'Richtung über Plan-Marker / Winkel; Empfindlichkeit für laute Räume runterdrehen.',
+    preview: 'linear-gradient(180deg,#0d0f13 0 45%,#7b3cff88 45%,#7b3cff 75%,#2a1050 100%)',
+    params: [
+      COLOR_GRAD({ seedColor: [123, 60, 255] }),
+      ...SPATIAL_PLANE,
+      SOFT_EDGE('Weiche Kante', 14),
+      {
+        key: 'asrc', type: 'select', name: 'Quelle', group: 'audio', def: 2,
+        options: ASRC_OPTS.filter((o) => o.v > 0),
+      },
+      { key: 'again', type: 'range', name: 'Empfindlichkeit', group: 'audio', min: 0, max: 255, def: 200 },
     ],
   },
   {
@@ -262,6 +356,7 @@ export const EFFECTS = [
       MOTION_SPEED('Geschwindigkeit', 40, { hint: 'höher = dichter / schneller' }),
       { key: 'duty', type: 'range', name: 'Dichte', min: 1, max: 80, unit: '%', def: 18, group: 'bewegung' },
       ADSR_BLOCK({ rfin: 2, rgap: 10, tempo: 0, rfout: 0 }),
+      ...AUDIO_BLOCK(),
     ],
   },
   {
@@ -304,10 +399,11 @@ export const V2_CATEGORIES = [
   { id: 'raum', name: 'Raum' },
   { id: 'bewegung', name: 'Bewegung' },
   { id: 'takt', name: 'Takt' },
+  { id: 'audio', name: 'Audio' },
 ]
 
-/** Base generators for Effekte 2.0 (docs/generators.md) — incl. Neon as takt special. */
-export const V2_GENERATOR_IDS = [3, 8, 9, 11, 14, 0, 5, 6, 12, 1, 2]
+/** Base generators for Effekte 2.0 (docs/generators.md) — incl. Neon + audio looks. */
+export const V2_GENERATOR_IDS = [3, 8, 9, 11, 14, 0, 5, 6, 12, 1, 2, 7, 10, 13]
 export const V2_GENERATORS = V2_GENERATOR_IDS.map((id) => effectById(id)).filter(Boolean)
 
 /** Catalogue groups for Effekte 2.0 list view. */
@@ -473,6 +569,24 @@ export function recipePresetSeeds () {
         mode: 2, pmode: 0, angle: 90, speed: 22, duty: 60, rwidth: 12,
         rfin: 2, rgap: 0, tempo: 100, rfout: 0,
       },
+    },
+    {
+      id: 'recipe-spectrum-bars',
+      name: 'Spektrum-Balken',
+      fx: 7,
+      p: { ...defaultParams(7), pmode: 0, mode: 0, rwidth: 12, again: 200 },
+    },
+    {
+      id: 'recipe-beat-flash',
+      name: 'Beat-Flash',
+      fx: 10,
+      p: { ...defaultParams(10), asrc: 5, pmode: 0, again: 220 },
+    },
+    {
+      id: 'recipe-bass-level',
+      name: 'Bass-Pegel',
+      fx: 13,
+      p: { ...defaultParams(13), asrc: 2, pmode: 0, angle: 90, again: 200, rwidth: 14 },
     },
   ]
 }

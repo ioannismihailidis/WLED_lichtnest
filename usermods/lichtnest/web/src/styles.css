@@ -16,11 +16,13 @@
   --mono:ui-monospace,'JetBrains Mono',SFMono-Regular,Menlo,monospace;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body,#app{height:100%}
+html,body,#app{height:100%;overflow:hidden;overscroll-behavior:none}
 body{
   margin:0;background:var(--bg);color:var(--text);
   font-family:var(--sans);
   -webkit-font-smoothing:antialiased;
+  /* App shell: scroll only inside .content — blocks mobile pull-to-refresh. */
+  position:fixed;inset:0;width:100%;
 }
 input[type=range]{accent-color:var(--accent)}
 ::-webkit-scrollbar{width:0;height:0}

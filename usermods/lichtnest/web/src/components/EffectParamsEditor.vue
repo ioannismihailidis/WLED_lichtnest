@@ -1,9 +1,6 @@
 <script setup>
-// Generic renderer for one effect's param list — extracted from Effekte.vue /
-// Playlists.vue so LayersEditor.vue can reuse it per-layer without triplicating the
-// switch over param types. Fully controlled: reads from `values` (the flat param pool —
-// lichtnest.p, a playlist step's `p`, or a layer's `p`) and emits a merge-patch on every
-// change; the caller decides how to persist it (live-post, playlist step, layer).
+// Generic renderer for one effect's param list — fully controlled: reads from `values`
+// and emits a merge-patch on every change.
 import { computed } from 'vue'
 import { rgbToHex, hexToRgb, plan } from '../wled.js'
 import { goPlan } from '../nav.js'
@@ -17,7 +14,7 @@ import AdsEnvelopeEditor from './AdsEnvelopeEditor.vue'
 import FxTimeline from './FxTimeline.vue'
 
 const props = defineProps({
-  params: { type: Array, default: () => [] },   // already filtered by `.show(values)`
+  params: { type: Array, default: () => [] },
   values: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['update'])
@@ -40,7 +37,6 @@ const sections = computed(() => {
 function rangeVal (p) { const v = props.values[p.key]; return typeof v === 'number' ? v : (p.def ?? p.min ?? 0) }
 function dispVal (p) { const v = rangeVal(p); return p.mul ? (v * p.mul).toFixed(1) : v }
 function selVal (p) { const v = props.values[p.key]; return v != null ? v : p.options[0].v }
-// marker origin: '' = auto (Mitte); otherwise a plan.points id. 255 (firmware sentinel) also means auto.
 function markerVal (p) { const v = props.values[p.key]; return (v != null && v !== 255) ? String(v) : '' }
 const colHex = (k, d) => rgbToHex(props.values[k] || d)
 function colVal (p) { return colHex(p.key, [255, 255, 255]) }
@@ -56,7 +52,7 @@ function setMarker (p, e) { const v = e.target.value; emit('update', { [p.key]: 
 function setToggle (p) { emit('update', { [p.key]: !props.values[p.key] }) }
 function setGrad (v) { emit('update', v) }
 function setKeys (p, arr) { emit('update', { [p.key]: arr }) }
-// Circular direction dial — 0° = right (matches cos/sin beam math in fxsim / firmware)
+
 function setAngle (p, deg) {
   const max = p.max ?? 360, min = p.min ?? 0
   let v = Math.round(deg)
@@ -135,7 +131,7 @@ const ANGLE_PRESETS = [
       </template>
       <template v-else-if="p.type === 'keyframes'">
         <PalettePicker v-if="p.withColor" param-type="keyframes" :param-key="p.key" :existing-keys="keysVal(p)" @update="setGrad" />
-        <KeyframeList :model-value="keysVal(p)" :v-min="p.vMin" :v-max="p.vMax" :v-step="p.vStep || 1" :v-unit="p.vUnit || ''" :label="p.label || 'Frequenz'" :with-color="p.withColor || false" @update="setKeys(p, $event)" />
+        <KeyframeList :model-value="keysVal(p)" :v-min="p.vMin" :v-max="p.vMax" :v-step="p.vStep || 1" :v-unit="p.vUnit || ''" :label="p.label || 'Frequenz'" :with-color="p.withColor || false" :max-keys="8" @update="setKeys(p, $event)" />
         <FxTimeline v-if="p.timeline" :kind="p.timeline" :values="values" :param-key="p.key" />
       </template>
       <template v-else-if="p.type === 'colorlist'">
@@ -167,7 +163,6 @@ const ANGLE_PRESETS = [
 .hint { margin: -4px 0 10px; font-size: 11px; color: var(--muted2); line-height: 1.35; }
 .color { width: 100%; height: 42px; border-radius: 11px; border: 1px solid var(--line2); background: var(--inset); cursor: pointer; padding: 4px; }
 .seg { display: flex; flex-wrap: wrap; gap: 6px; }
-.seg button { flex: 1 1 auto; min-width: 4.5em; }
 .seg button { flex: 1; padding: 10px 4px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); color: var(--muted2); font-weight: 600; font-size: 13px; cursor: pointer; }
 .seg button.on { background: rgba(240,162,60,.16); border-color: var(--accent); color: var(--accent); }
 .mksel { width: 100%; height: 42px; border-radius: 11px; background: var(--inset); border: 1px solid var(--line2); color: var(--text); font-size: 13px; font-weight: 600; padding: 0 12px; cursor: pointer; }
@@ -179,12 +174,11 @@ const ANGLE_PRESETS = [
 .sw.on span { transform: translateX(22px); }
 .adir { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .adial { width: 120px; height: 120px; border-radius: 50%; touch-action: none; cursor: grab; }
-.adial:active { cursor: grabbing; }
-.adial-svg { width: 100%; height: 100%; display: block; }
-.aring { fill: var(--inset); stroke: var(--line2); stroke-width: 2; }
-.aneedle { stroke: var(--accent); stroke-width: 3.5; stroke-linecap: round; }
+.adial-svg { width: 100%; height: 100%; }
+.aring { fill: none; stroke: var(--line2); stroke-width: 2; }
+.aneedle { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
 .adot { fill: var(--accent); }
 .aseg { display: flex; gap: 6px; width: 100%; }
-.aseg button { flex: 1; padding: 8px 4px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); color: var(--muted2); font-weight: 700; font-size: 15px; cursor: pointer; }
+.aseg button { flex: 1; padding: 8px 0; border-radius: 10px; background: var(--inset); border: 1px solid var(--line); color: var(--muted2); font-weight: 700; cursor: pointer; }
 .aseg button.on { background: rgba(240,162,60,.16); border-color: var(--accent); color: var(--accent); }
 </style>

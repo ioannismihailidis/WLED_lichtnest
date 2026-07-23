@@ -126,8 +126,15 @@ function applyState (s) {
     if (typeof m.on === 'boolean') wled.seg.on = m.on
     if (Array.isArray(m.col)) wled.seg.col = m.col
   }
+  if (s.AudioReactive && typeof s.AudioReactive.on === 'boolean') audioReactive.on = s.AudioReactive.on
   if (s.lichtnest) {
     if (typeof s.lichtnest.ph === 'number') syncDevicePhase(s.lichtnest.ph)
+    const au = s.lichtnest.audio
+    if (au && typeof au === 'object') {
+      lichtnest.audio.ok = !!au.ok
+      lichtnest.audio.lvl = au.lvl | 0
+      lichtnest.audio.peak = !!au.peak
+    }
     const clk = s.lichtnest.clock
     if (clk && typeof clk === 'object') {
       wled.clock.h = clk.h | 0
@@ -143,6 +150,7 @@ function applyState (s) {
       if (typeof s.lichtnest.fx === 'number') lichtnest.fx = s.lichtnest.fx
       if (s.lichtnest.p) lichtnest.p = { ...lichtnest.p, ...s.lichtnest.p }
       if (Array.isArray(s.lichtnest.layers)) lichtnest.layers = s.lichtnest.layers
+      if (Array.isArray(s.lichtnest.tl)) lichtnest.tl = s.lichtnest.tl
       rememberFx(lichtnest.fx)
     }
     if (q) {
@@ -204,7 +212,7 @@ function saveProject () {
         on: wled.on, bri: wled.bri, segments: wled.segments, ports: wled.info.ports,
         plan: { photo: plan.photo, photoData: plan.photoData, tubes: plan.tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax },
         playlists: playlists.list, presets: fxPresets.list, palettes: palettes.list,
-        lichtnest: { fx: lichtnest.fx, p: lichtnest.p, layers: lichtnest.layers },
+        lichtnest: { fx: lichtnest.fx, p: lichtnest.p, layers: lichtnest.layers, tl: lichtnest.tl },
       }))
     } catch (e) { /* localStorage quota — photo too big? */ }
   }, 400)
@@ -230,6 +238,7 @@ export function enterOffline () {
   palettes.list = Array.isArray(p.palettes) ? p.palettes : []; palettes.loaded = true
   presets.loaded = true
   lichtnest.fx = p.lichtnest?.fx ?? 3; lichtnest.p = p.lichtnest?.p || {}; lichtnest.layers = p.lichtnest?.layers || []
+  lichtnest.tl = Array.isArray(p.lichtnest?.tl) ? p.lichtnest.tl : []
   rememberFx(lichtnest.fx)
   wled.ready = true; wled.online = false; wled.error = ''
 }
@@ -254,6 +263,7 @@ function applyLocal (body) {
     if (o.fx !== undefined) lichtnest.fx = o.fx
     if (o.p) lichtnest.p = { ...lichtnest.p, ...o.p }
     if (o.layers !== undefined) lichtnest.layers = o.layers
+    if (o.tl !== undefined) lichtnest.tl = Array.isArray(o.tl) ? o.tl : []
   }
   saveProject()
 }
@@ -635,7 +645,10 @@ function normalizeFxPreset (raw) {
   const name = (raw.name || '').trim() || effectById(fx).name
   const entry = { id: raw.id || nextFxPresetId(), name, fx }
   if (fx === COMBINED_FX) entry.layers = cloneLayers(raw.layers)
-  else entry.p = cloneParams(raw.p && Object.keys(raw.p).length ? raw.p : defaultParams(fx))
+  else {
+    entry.p = cloneParams(raw.p && Object.keys(raw.p).length ? raw.p : defaultParams(fx))
+    if (Array.isArray(raw.tl) && raw.tl.length) entry.tl = JSON.parse(JSON.stringify(raw.tl))
+  }
   return entry
 }
 
@@ -686,12 +699,13 @@ export function ensureRecipePresets () {
 
 /** Deep-copied look ready for a playlist step or live apply. */
 export function materializePreset (preset) {
-  if (!preset) return { fx: 3, p: defaultParams(3), layers: [], name: '' }
+  if (!preset) return { fx: 3, p: defaultParams(3), layers: [], tl: [], name: '' }
   const fx = preset.fx != null ? +preset.fx : COMBINED_FX
   if (fx === COMBINED_FX) {
-    return { fx, p: {}, layers: cloneLayers(preset.layers), name: preset.name || '' }
+    return { fx, p: {}, layers: cloneLayers(preset.layers), tl: [], name: preset.name || '' }
   }
-  return { fx, p: cloneParams(preset.p && Object.keys(preset.p).length ? preset.p : defaultParams(fx)), layers: [], name: preset.name || '' }
+  const tl = Array.isArray(preset.tl) ? JSON.parse(JSON.stringify(preset.tl)) : []
+  return { fx, p: cloneParams(preset.p && Object.keys(preset.p).length ? preset.p : defaultParams(fx)), layers: [], tl, name: preset.name || '' }
 }
 
 /** Push preset values into all playlist steps that reference it. */
@@ -706,6 +720,7 @@ export function syncPresetToPlaylists (id, opts = {}) {
       it.fx = mat.fx
       it.p = mat.p
       it.layers = mat.layers
+      it.tl = mat.tl || []
       if (!it.name || (prevName != null && it.name === prevName) || it.name === mat.name) it.name = mat.name
     }
   }
@@ -716,10 +731,10 @@ export function detachPreset (it) {
   if (it && it.presetId != null) delete it.presetId
 }
 
-export function saveFxPreset (name, { fx, p, layers } = {}) {
+export function saveFxPreset (name, { fx, p, layers, tl } = {}) {
   const fxId = fx != null ? +fx : COMBINED_FX
   const clean = (name || '').trim() || (effectById(fxId).name + ' ' + (fxPresets.list.length + 1))
-  const entry = normalizeFxPreset({ id: nextFxPresetId(), name: clean, fx: fxId, p, layers })
+  const entry = normalizeFxPreset({ id: nextFxPresetId(), name: clean, fx: fxId, p, layers, tl })
   fxPresets.list.push(entry)
   savePlaylists()
   return entry.id
@@ -743,14 +758,19 @@ export function deleteFxPreset (id) {
 }
 
 /** Overwrite an existing preset and sync linked playlist steps. */
-export function updateFxPreset (id, { fx, p, layers } = {}) {
+export function updateFxPreset (id, { fx, p, layers, tl } = {}) {
   const c = resolveFxPreset(id); if (!c) return
   if (fx != null) c.fx = +fx
   if (c.fx === COMBINED_FX) {
     if (layers !== undefined) c.layers = cloneLayers(layers)
     delete c.p
+    delete c.tl
   } else {
     if (p !== undefined) c.p = cloneParams(p)
+    if (tl !== undefined) {
+      if (Array.isArray(tl) && tl.length) c.tl = JSON.parse(JSON.stringify(tl))
+      else delete c.tl
+    }
     delete c.layers
   }
   syncPresetToPlaylists(id)
@@ -848,29 +868,29 @@ function offPrevEffect (items, from) {
   }
   return -1
 }
-function stepSnap (it) { return it ? ({ fx: it.fx, p: it.p || {}, layers: it.layers || [], delay: it.delay || 0 }) : null }
+function stepSnap (it) { return it ? ({ fx: it.fx, p: it.p || {}, layers: it.layers || [], tl: it.tl || [], delay: it.delay || 0 }) : null }
 // step length in ms: pause (delay) + effect duration — impulse/strobe/solid/fill auto-derive,
 // everything else uses the set duration; transition rows use trDur
 export function stepDurationMs (it) {
   if (isTrItem(it)) return Math.max(50, (it.trDur || 1.2) * 1000)
   const p = it.p || {}
   const delayMs = Math.max(0, (it.delay || 0) * 1000)
-  if (it.fx === 1) return delayMs + Math.max(200, strobeDuration(p) * 1000)   // strobe: ends at the last keyframe
-  if (it.fx === 3) return delayMs + Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
-  if (it.fx === 0 || it.fx === 8) {
+  let sec = 0
+  if (it.fx === 1) sec = strobeDuration(p)
+  else if (it.fx === 3) sec = solidDuration(p)
+  else if (it.fx === 0 || it.fx === 8) {
     const g = tubeGeometry()
     const [cx, cy] = effectOrigin(p, g)
     const pts = []; for (const t of g) pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 })
     const umax = impulseUmax(p, pts, cx, cy)
-    const sec = it.fx === 8 ? fillDuration(p, umax) : impulseDuration(p, umax)
-    // Level/Tide → fillDuration 0 → fall through to playlist dur
-    if (sec > 0.05) return delayMs + Math.max(200, sec * 1000)
-  }
-  if (it.fx === 5) {
+    sec = it.fx === 8 ? fillDuration(p, umax) : impulseDuration(p, umax)
+  } else if (it.fx === 5) {
     const g = tubeGeometry()
     const path = buildMarblePath(g, p.dir || 0, p.hz ?? 8)
-    return delayMs + Math.max(200, marbleDuration(p, path.total) * 1000)
+    sec = marbleDuration(p, path.total)
   }
+  // snapshot `tl` only modulates params — it does not change step / effect duration
+  if (sec > 0.05) return delayMs + Math.max(200, sec * 1000)
   return delayMs + Math.max(1, it.dur || 10) * 1000
 }
 /** Total playlist length in ms (sum of stepDurationMs). */
@@ -1017,7 +1037,13 @@ export function playlistProgress (now) {
 // pool — see `layers` (array of { fx, p, marker, radius, falloff, blend, enabled,
 // sched }). Kept alongside `p` rather than nested in it, mirroring the firmware's
 // separate (non-recursive) FxLayer array.
-export const lichtnest = reactive({ fx: 3, p: {}, layers: [] })
+export const lichtnest = reactive({
+  fx: 3, p: {}, layers: [], tl: [],
+  // live mic meter from lichtnest.audio (refreshed with /json/state / WS)
+  audio: { ok: false, lvl: 0, peak: false },
+})
+/** Stock AudioReactive usermod enable flag from /json/state */
+export const audioReactive = reactive({ on: false })
 // Last manual config per effect id — drives the Effekte-list swatches and is
 // restored when switching effects so each keeps its own colours/params.
 const FX_LAST_KEY = 'zv_fx_last'
@@ -1048,21 +1074,34 @@ export function rememberFx (fxId = lichtnest.fx) {
   if (fxId == null) return
   const entry = { p: paramsForFx(fxId, lichtnest.p) }
   if (fxId === 4) entry.layers = cloneLayers(lichtnest.layers)
+  else if (Array.isArray(lichtnest.tl) && lichtnest.tl.length) entry.tl = JSON.parse(JSON.stringify(lichtnest.tl))
   fxLast[fxId] = entry
   persistFxLast()
 }
 /** Persist an editor draft without touching the live lichtnest pool (browse-before-apply). */
-export function rememberDraft (fxId, p, layers) {
+export function rememberDraft (fxId, p, layers, tl) {
   if (fxId == null) return
   const entry = { p: paramsForFx(fxId, p || {}) }
   if (fxId === 4) entry.layers = cloneLayers(layers)
+  else if (Array.isArray(tl) && tl.length) entry.tl = JSON.parse(JSON.stringify(tl))
   fxLast[fxId] = entry
   persistFxLast()
 }
+// note: empty tl omits the key so classic single-p looks stay compact in fxLast
 export function fxSnapshot (fxId) {
   const snap = fxLast[fxId]
-  if (snap) return { p: JSON.parse(JSON.stringify(snap.p || {})), layers: cloneLayers(snap.layers) }
-  return { p: paramsForFx(fxId, { ...defaultParams(fxId), ...lichtnest.p }), layers: fxId === 4 ? cloneLayers(lichtnest.layers) : [] }
+  if (snap) {
+    return {
+      p: JSON.parse(JSON.stringify(snap.p || {})),
+      layers: cloneLayers(snap.layers),
+      tl: Array.isArray(snap.tl) ? JSON.parse(JSON.stringify(snap.tl)) : [],
+    }
+  }
+  return {
+    p: paramsForFx(fxId, { ...defaultParams(fxId), ...lichtnest.p }),
+    layers: fxId === 4 ? cloneLayers(lichtnest.layers) : [],
+    tl: fxId === 4 ? [] : (Array.isArray(lichtnest.tl) ? JSON.parse(JSON.stringify(lichtnest.tl)) : []),
+  }
 }
 // what the device is showing RIGHT NOW: the playing step (full params from the
 // playlist file) while a playlist runs, else the manual effect (editor pool)
@@ -1076,9 +1115,9 @@ export function liveFxP () {
       const di = offNextEffect(items, wled.pl.idx + 1)
       it = di >= 0 ? items[di] : null
     }
-    if (it && it.fx != null) return { fx: it.fx, p: it.p || {}, delay: it.delay || 0, layers: it.layers || [] }
+    if (it && it.fx != null) return { fx: it.fx, p: it.p || {}, delay: it.delay || 0, layers: it.layers || [], tl: it.tl || [] }
   }
-  return { fx: lichtnest.fx, p: lichtnest.p, delay: 0, layers: lichtnest.layers }
+  return { fx: lichtnest.fx, p: lichtnest.p, delay: 0, layers: lichtnest.layers, tl: lichtnest.tl || [] }
 }
 
 /** Active playlist transition for the preview (from→to blend), or null. */
@@ -1131,33 +1170,52 @@ export const fxActions = {
       const d = defaultParams(fxId)
       lichtnest.p = { ...d, ...paramsForFx(fxId, lichtnest.p) }
     }
-    if (fxId === 4) lichtnest.layers = cloneLayers(snap?.layers)
-    else lichtnest.layers = []
+    if (fxId === 4) {
+      lichtnest.layers = cloneLayers(snap?.layers)
+      lichtnest.tl = []
+    } else {
+      lichtnest.layers = []
+      lichtnest.tl = Array.isArray(snap?.tl) ? JSON.parse(JSON.stringify(snap.tl)) : []
+    }
     rememberFx(fxId)
     const body = { fx: fxId, geo: tubeGeometry(), pts: pointGeometry(), p: paramsForFx(fxId, lichtnest.p) }
     if (fxId === 4) body.layers = lichtnest.layers
+    else body.tl = lichtnest.tl || []
     return postState({ lichtnest: body })
   },
   async setParam (key, value) {
     lichtnest.p = { ...lichtnest.p, [key]: value }
     rememberFx()
-    return postState({ lichtnest: { fx: lichtnest.fx, p: { [key]: value } } })
+    return postState({ lichtnest: { fx: lichtnest.fx, p: { [key]: value }, tl: lichtnest.tl || [] } })
   },
   async setParams (obj) {
-    lichtnest.p = { ...lichtnest.p, ...obj }
+    const next = { ...lichtnest.p, ...obj }
+    for (const k of Object.keys(obj)) if (obj[k] == null) delete next[k]
+    lichtnest.p = next
     rememberFx()
-    return postState({ lichtnest: { fx: lichtnest.fx, p: obj } })
+    return postState({ lichtnest: { fx: lichtnest.fx, p: obj, tl: lichtnest.tl || [] } })
+  },
+  async setTl (tl) {
+    lichtnest.tl = Array.isArray(tl) ? tl : []
+    rememberFx()
+    return postState({ lichtnest: { fx: lichtnest.fx, p: paramsForFx(lichtnest.fx, lichtnest.p), tl: lichtnest.tl } })
   },
   // "Kombiniert": replace the whole manual layer stack (fx is forced to 4)
   async setLayers (layers) {
     lichtnest.fx = 4
     lichtnest.layers = layers
+    lichtnest.tl = []
     rememberFx(4)
     return postState({ lichtnest: { fx: 4, layers, geo: tubeGeometry(), pts: pointGeometry() } })
   },
   // live-tweak the running playlist step (params only -> firmware keeps playing the step)
   async setStepParam (key, value) { lichtnest.p = { ...lichtnest.p, [key]: value }; return postState({ lichtnest: { p: { [key]: value } } }) },
-  async setStepParams (obj) { lichtnest.p = { ...lichtnest.p, ...obj }; return postState({ lichtnest: { p: obj } }) },
+  async setStepParams (obj) {
+    const next = { ...lichtnest.p, ...obj }
+    for (const k of Object.keys(obj)) if (obj[k] == null) delete next[k]
+    lichtnest.p = next
+    return postState({ lichtnest: { p: obj } })
+  },
   async setStepLayers (layers) { lichtnest.layers = layers; return postState({ lichtnest: { layers } }) },
   async pushGeometry () { return postState({ lichtnest: { geo: tubeGeometry() } }) },
 }

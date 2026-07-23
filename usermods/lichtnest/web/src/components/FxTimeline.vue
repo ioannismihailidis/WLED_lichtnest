@@ -1,6 +1,5 @@
 <script setup>
-// Temporal viz for Tube-Strobe (Hz + flash frames) and Solid/Atmen (colour + brightness).
-// Playhead follows previewElapsed from MiniPlan / TexturePreview.
+// Temporal viz for Tube-Strobe (Hz) and Solid/Atmen (colour + brightness).
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import {
   strobeKeys, strobePhaseAt, sampleCurve, solidKeys, solidColorAt, sampleColorAt, curvePhaseAt,
@@ -8,7 +7,7 @@ import {
 import { previewElapsed } from '../previewClock.js'
 
 const props = defineProps({
-  kind: { type: String, default: 'strobe' }, // 'strobe' | 'solid'
+  kind: { type: String, default: 'strobe' },
   values: { type: Object, default: () => ({}) },
   paramKey: { type: String, default: 'hzKeys' },
 })
@@ -72,7 +71,6 @@ const curvePath = computed(() => {
 
 const colourStops = computed(() => {
   if (props.kind !== 'solid') return ''
-  const keys = solidKeys(props.values)
   const D = duration.value
   const n = 48
   const stops = []
@@ -90,7 +88,6 @@ const flashRects = computed(() => {
   const D = duration.value
   const duty = Math.max(0.05, Math.min(0.95, (props.values.duty ?? 30) / 100))
   const rects = []
-  // Sample flash on/off over duration via integrated phase
   const steps = Math.min(200, Math.max(40, Math.ceil(D * 40)))
   let prevOn = false, start = 0
   for (let i = 0; i <= steps; i++) {
@@ -100,9 +97,7 @@ const flashRects = computed(() => {
     const frac = ph - flash
     const on = frac < duty
     if (on && !prevOn) start = t
-    if (!on && prevOn) {
-      rects.push({ x: (start / D) * W, w: Math.max(1, ((t - start) / D) * W) })
-    }
+    if (!on && prevOn) rects.push({ x: (start / D) * W, w: Math.max(1, ((t - start) / D) * W) })
     prevOn = on
   }
   if (prevOn) rects.push({ x: (start / D) * W, w: Math.max(1, ((D - start) / D) * W) })
@@ -110,14 +105,9 @@ const flashRects = computed(() => {
 })
 
 const headX = computed(() => (playheadT.value / duration.value) * W)
-
-// force redraw when elapsed ticks (raf from parent writes previewElapsed)
 const tick = ref(0)
 let raf = 0
-function loop () {
-  tick.value++
-  raf = requestAnimationFrame(loop)
-}
+function loop () { tick.value++; raf = requestAnimationFrame(loop) }
 onMounted(() => { raf = requestAnimationFrame(loop) })
 onUnmounted(() => cancelAnimationFrame(raf))
 watch(() => props.values, () => { tick.value++ }, { deep: true })
@@ -148,7 +138,6 @@ watch(() => props.values, () => { tick.value++ }, { deep: true })
 .line { fill: none; stroke: var(--accent); stroke-width: 1.6; }
 .head { stroke: #fff; stroke-width: 1.2; opacity: .85; }
 .strip { position: relative; height: 18px; border-radius: 6px; border: 1px solid var(--line); overflow: hidden; }
-.strip.colour { }
 .ph { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; transform: translateX(-1px); opacity: .9; }
 .strip-svg { width: 100%; height: 18px; display: block; border-radius: 6px; border: 1px solid var(--line); background: var(--inset); }
 .bg { fill: #0d0f13; }

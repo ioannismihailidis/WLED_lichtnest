@@ -1,6 +1,5 @@
 <script setup>
-// Shared ADSR editor for Fill / Twinkle / Impuls / … — binds pool keys
-// rfin / rgap / tempo / rfout (Attack·Decay·Sustain·Release).
+// Shared ADSR editor — binds pool keys rfin / rgap / tempo / rfout.
 import { computed } from 'vue'
 
 const props = defineProps({
@@ -21,17 +20,12 @@ const R = computed(() => num('rfout', 0))
 
 function set (k, e) { emit('update', { [k]: +e.target.value }) }
 
-// Mini curve: Attack → Decay → Sustain hold → Release (normalized to viewBox width)
 const pathD = computed(() => {
   const a = A.value, d = D.value, s = S.value / 100, r = R.value
-  const tot = Math.max(0.01, a + d + 12 + r)   // 12 units of sustain hold in the sketch
+  const tot = Math.max(0.01, a + d + 12 + r)
   const x = (t) => (t / tot) * 100
   const y = (v) => 28 - v * 24
-  const x0 = 0
-  const x1 = x(a)
-  const x2 = x(a + d)
-  const x3 = x(a + d + 12)
-  const x4 = x(a + d + 12 + r)
+  const x0 = 0, x1 = x(a), x2 = x(a + d), x3 = x(a + d + 12), x4 = x(a + d + 12 + r)
   const peak = y(1), sus = y(s), zero = y(0)
   return `M ${x0} ${zero} L ${x1} ${peak} L ${x2} ${sus} L ${x3} ${sus} L ${x4} ${zero}`
 })

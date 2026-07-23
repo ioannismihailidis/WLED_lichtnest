@@ -17,6 +17,8 @@ import TexturePreview from '../components/TexturePreview.vue'
 import PlanMarkers from '../components/PlanMarkers.vue'
 import EffectParamsEditor from '../components/EffectParamsEditor.vue'
 import LayersEditor from '../components/LayersEditor.vue'
+import FxSnapTimeline from '../components/FxSnapTimeline.vue'
+import { normalizeTl } from '../snaps.js'
 
 const SIDE_KIND = 'effects'
 
@@ -26,7 +28,10 @@ const editId = ref(3)
 const editPresetId = ref(null)
 const edit = computed(() => effectById(editId.value))
 const activePreset = computed(() => fxPresets.list.find((c) => c.id === editPresetId.value) || null)
-const draft = reactive({ p: {}, layers: [] })
+const draft = reactive({ p: {}, layers: [], tl: [] })
+const snapSel = ref(-1)
+const seekT = ref(null)
+const seekGen = ref(0)
 const catalogue = computed(() => v2CatalogueGroups())
 const hasTubes = computed(() => (wled.segments || []).length > 0)
 const needsPlace = computed(() => {
@@ -74,6 +79,7 @@ const editorDesc = computed(() => {
   return 'Bis zu vier Generatoren übereinander — Marker, Blend und Zeitplan pro Ebene.'
 })
 const isLayered = computed(() => editMode.value === 'new' || editId.value === COMBINED_FX)
+const showSnapTl = computed(() => !isLayered.value)
 const layerCount = computed(() => (draft.layers || []).length)
 const canSave = computed(() => {
   if (isLayered.value) return layerCount.value > 0
@@ -121,6 +127,8 @@ function loadDraft (id) {
   const snap = fxSnapshot(id)
   draft.p = snap.p
   draft.layers = snap.layers
+  draft.tl = snap.tl || []
+  snapSel.value = draft.tl.length ? 0 : -1
 }
 function open (id) {
   editMode.value = 'standard'
@@ -136,7 +144,9 @@ function openPreset (c) {
   editPresetId.value = c.id
   draft.p = mat.p
   draft.layers = mat.layers
-  rememberDraft(mat.fx, draft.p, draft.layers)
+  draft.tl = mat.tl || []
+  snapSel.value = draft.tl.length ? 0 : -1
+  rememberDraft(mat.fx, draft.p, draft.layers, draft.tl)
   enterEditor()
 }
 function openNew () {
@@ -145,30 +155,57 @@ function openNew () {
   editPresetId.value = null
   draft.p = {}
   draft.layers = []
-  rememberDraft(COMBINED_FX, draft.p, draft.layers)
+  draft.tl = []
+  snapSel.value = -1
+  rememberDraft(COMBINED_FX, draft.p, draft.layers, draft.tl)
   enterEditor()
 }
 function back () { view.value = 'list' }
 
-function persistDraft () { rememberDraft(editId.value, draft.p, draft.layers) }
+function persistDraft () { rememberDraft(editId.value, draft.p, draft.layers, draft.tl) }
+
+function syncSnapP () {
+  const i = snapSel.value
+  if (i < 0 || !Array.isArray(draft.tl) || i >= draft.tl.length) return
+  draft.tl = normalizeTl(draft.tl.map((s, k) => (k === i ? { ...s, p: JSON.parse(JSON.stringify(draft.p)) } : s)))
+}
 
 function onParamsUpdate (patch) {
   draft.p = { ...draft.p, ...patch }
+  syncSnapP()
   persistDraft()
-  if (isLive.value) fxActions.setParams(patch)
+  if (isLive.value) {
+    fxActions.setParams(patch)
+    if (draft.tl?.length) fxActions.setTl(draft.tl)
+  }
 }
 function onLayersUpdate (arr) {
   draft.layers = arr
   persistDraft()
   if (isLive.value) fxActions.setLayers(arr)
 }
+function onTlUpdate (tl) {
+  draft.tl = normalizeTl(tl)
+  persistDraft()
+  if (isLive.value) fxActions.setTl(draft.tl)
+}
+function onLoadSnap (p) {
+  draft.p = JSON.parse(JSON.stringify(p || {}))
+  persistDraft()
+}
+function onScrub (t) {
+  seekT.value = Math.max(0, +t || 0)
+  seekGen.value++
+}
 
 async function applyEffect () {
   persistDraft()
+  lichtnest.tl = Array.isArray(draft.tl) ? JSON.parse(JSON.stringify(draft.tl)) : []
   await fxActions.setEffect(editId.value)
   const snap = fxSnapshot(editId.value)
   draft.p = snap.p
   draft.layers = snap.layers
+  draft.tl = snap.tl || []
   pvRestart.value++
 }
 
@@ -207,6 +244,7 @@ function confirmSaveAs () {
     fx: editId.value,
     p: draft.p,
     layers: draft.layers,
+    tl: draft.tl,
   })
   saveOpen.value = false
   editMode.value = 'preset'
@@ -218,6 +256,7 @@ function saveCurrentPreset () {
     fx: editId.value,
     p: draft.p,
     layers: draft.layers,
+    tl: draft.tl,
   })
 }
 function openRename () {
@@ -345,8 +384,8 @@ async function onImportPresets (ev) {
       <div class="pvsticky">
         <button class="link" @click="back()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>Effekte</button>
         <div class="bigprev">
-          <MiniPlan v-if="previewMode === 'tubes'" :fx="editId" :p="draft.p" :layers="draft.layers" local :restart-key="pvRestart" class="pvcanvas" />
-          <TexturePreview v-else :fx="editId" :p="draft.p" :layers="draft.layers" local :restart-key="pvRestart" class="pvcanvas" />
+          <MiniPlan v-if="previewMode === 'tubes'" :fx="editId" :p="draft.p" :layers="draft.layers" :tl="draft.tl" local :restart-key="pvRestart" :seek-t="seekT" :seek-gen="seekGen" class="pvcanvas" />
+          <TexturePreview v-else :fx="editId" :p="draft.p" :layers="draft.layers" :tl="draft.tl" local :restart-key="pvRestart" :seek-t="seekT" :seek-gen="seekGen" class="pvcanvas" />
           <PlanMarkers v-if="showMarkers" :layout="previewMode === 'tubes' ? 'letterbox' : 'fill'" />
           <button v-if="!hasTubes" class="pvempty" @click="openPlan">
             <span class="pve1">Noch keine Tubes</span>
@@ -364,6 +403,15 @@ async function onImportPresets (ev) {
             <button :class="{ on: previewMode === 'texture' }" @click="previewMode = 'texture'">Textur</button>
           </div>
         </div>
+        <FxSnapTimeline
+          v-if="showSnapTl"
+          v-model="draft.tl"
+          v-model:selected="snapSel"
+          :params="draft.p"
+          @update:model-value="onTlUpdate"
+          @load-snap="onLoadSnap"
+          @scrub="onScrub"
+        />
       </div>
       <div class="ehead">
         <div class="ename-row">

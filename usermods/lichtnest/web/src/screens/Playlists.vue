@@ -131,6 +131,12 @@ function stepParams (fx) {
   for (const pr of (eff.params || [])) {
     if (pr.type === 'gradient') { out.cols = fadeCols(pool); out.cw = fadeCw(pool); continue }
     if (pr.type === 'layers') continue   // Kombiniert: lives in `it.layers`, not `it.p`
+    if (pr.type === 'adsr') {
+      for (const k of ['rfin', 'rgap', 'tempo', 'rfout']) {
+        if (pool[k] != null) out[k] = pool[k]
+      }
+      continue
+    }
     let v = pool[pr.key]
     if (v == null) v = pr.def != null ? pr.def : (pr.options ? pr.options[0].v : undefined)
     if (v == null) { if (pr.type === 'toggle') v = true; else if (pr.type === 'color') v = [39, 197, 255] }
@@ -140,11 +146,16 @@ function stepParams (fx) {
 }
 // Kombiniert: seed a new step from the current manual layer stack (empty if none yet)
 function stepLayers (fx) { return fx === 4 ? cloneLayers(lichtnest.layers) : [] }
+function stepTl (fx) {
+  if (fx === 4) return []
+  const tl = lichtnest.tl
+  return Array.isArray(tl) && tl.length ? JSON.parse(JSON.stringify(tl)) : []
+}
 function pushStep (fx, layers, name = '', opts = {}) {
   if (!open.value) return
   const step = {
     uid: uid(), kind: 'fx', fx, p: opts.p != null ? opts.p : stepParams(fx),
-    layers: layers || [], name, note: '',
+    layers: layers || [], tl: opts.tl != null ? opts.tl : stepTl(fx), name, note: '',
     delay: 0, dur: 30,
   }
   if (opts.presetId) step.presetId = opts.presetId
@@ -215,7 +226,7 @@ function setTrUnit (it, u) { it.trUnit = u; savePlaylists() }
 function addItem (fx) { pushStep(fx, stepLayers(fx)); addSheet.value = null }
 function addPreset (c) {
   const mat = materializePreset(c)
-  pushStep(mat.fx, mat.layers, mat.name || c.name || '', { p: mat.p, presetId: c.id })
+  pushStep(mat.fx, mat.layers, mat.name || c.name || '', { p: mat.p, tl: mat.tl, presetId: c.id })
   addSheet.value = null
 }
 function addTransition (trType) { pushTransition(trType); addSheet.value = null }
@@ -223,7 +234,7 @@ function saveStepAsPreset (it) {
   if (isTrItem(it) || it.fx == null) return
   if (it.fx === COMBINED_FX && !(it.layers || []).length) return
   const name = (it.name && it.name.trim()) || effectById(it.fx).name
-  const id = saveFxPreset(name, { fx: it.fx, p: it.p, layers: it.layers })
+  const id = saveFxPreset(name, { fx: it.fx, p: it.p, layers: it.layers, tl: it.tl })
   it.presetId = id
   savePlaylists()
 }
@@ -694,7 +705,7 @@ function confirmImport () {
 .pstep.on { background: var(--accent); color: #1a1206; border-color: transparent; }
 .addsticky { position: sticky; bottom: 0; z-index: 8; margin: 16px -20px -20px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom)); background: linear-gradient(180deg, transparent, var(--bg) 28%); }
 .addstep { width: 100%; height: 48px; border-radius: 13px; border: none; cursor: pointer; background: var(--accent); color: #1a1206; font-size: 14px; font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 8px; }
-.sheet { width: 100%; max-width: 400px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 16px; max-height: 80vh; overflow-y: auto; }
+.sheet { width: 100%; max-width: 400px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 16px; max-height: 80vh; overflow-y: auto; overscroll-behavior: contain; }
 .shtabs { display: flex; gap: 4px; background: var(--inset); border: 1px solid var(--line); border-radius: 11px; padding: 3px; margin-bottom: 14px; }
 .shtabs button { flex: 1; padding: 8px; border: none; border-radius: 9px; background: transparent; color: var(--muted2); font-weight: 700; font-size: 12px; cursor: pointer; }
 .shtabs button.on { background: rgba(240,162,60,.16); color: var(--accent); }
@@ -731,7 +742,7 @@ function confirmImport () {
 
 /* import picker modal */
 .modal { position: fixed; inset: 0; z-index: 50; background: rgba(8,9,11,.6); backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 20px; }
-.card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 18px; max-height: 80vh; overflow-y: auto; }
+.card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; padding: 18px; max-height: 80vh; overflow-y: auto; overscroll-behavior: contain; }
 .mhead { margin-bottom: 4px; }
 .mtitle { font-size: 16px; font-weight: 800; color: var(--text); }
 .impnote { font-size: 11px; color: var(--muted); margin: 0 0 10px; }

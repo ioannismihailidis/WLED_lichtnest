@@ -14,15 +14,16 @@ const props = defineProps({
   vUnit: { type: String, default: '' },
   label: { type: String, default: 'Frequenz' },
   withColor: { type: Boolean, default: false },
+  maxKeys: { type: Number, default: 8 },            // firmware ZV_MAXKF / ZV_CURVEKF
 })
 const emit = defineEmits(['update'])
-const MAXN = 12
+const MAXN = computed(() => props.maxKeys)
 
 const rows = computed(() => props.modelValue || [])
 const disp = (v) => props.vStep < 1 ? (+v).toFixed(1) : Math.round(v)
 const clone = () => rows.value.map((k) => ({ ...k, c: k.c ? k.c.slice() : undefined }))
 function commit (arr) {
-  emit('update', arr.map((k) => {
+  emit('update', arr.slice(0, MAXN.value).map((k) => {
     const o = { t: Math.max(0, +(+k.t || 0).toFixed(2)), v: +(+k.v).toFixed(2) }
     if (props.withColor) o.c = (k.c || [255, 255, 255]).map((x) => x | 0)
     return o
@@ -32,7 +33,7 @@ function setT (i, val) { const a = clone(); a[i].t = Math.max(0, +val || 0); com
 function setV (i, val) { const a = clone(); a[i].v = +val; commit(a) }
 function setC (i, hex) { const a = clone(); a[i].c = hexToRgb(hex); commit(a) }
 function add () {
-  if (rows.value.length >= MAXN) return
+  if (rows.value.length >= MAXN.value) return
   const a = clone(); const last = a[a.length - 1] || { t: 0, v: props.vMin, c: [255, 255, 255] }
   a.push({ t: +(last.t + 1).toFixed(2), v: last.v, c: (last.c || [255, 255, 255]).slice() }); commit(a)
 }

@@ -1,8 +1,17 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { wled, cfg, loadCfg, saveCfg, postState, persistTubes, tubesTotalForPort } from '../wled.js'
+import { wled, cfg, loadCfg, saveCfg, postState, persistTubes, tubesTotalForPort, lichtnest, audioReactive } from '../wled.js'
 import NumStepper from '../components/NumStepper.vue'
 import { confirmDialog } from '../confirm.js'
+
+// Gledopto Elite 2D-EXMU (GL-C-616WL) built-in I2S mic — not editable in UI
+const GLEDOPTO_MIC = { type: 1, pin: [32, 15, 14, -1] }
+const AGC_OPTS = [
+  { v: 0, l: 'Aus (manuell)' },
+  { v: 1, l: 'Normal' },
+  { v: 2, l: 'Vivid' },
+  { v: 3, l: 'Lazy' },
+]
 
 // WLED groups protocol-identical chips under one type id (e.g. WS2812B/13/15 = 22,
 // APA102/SK9822 = 51), so labels are grouped to map cleanly to the real WLED id.
@@ -34,9 +43,56 @@ const wifiPass = ref('')
 const apPass = ref('')
 let lastMax = 2000
 
-onMounted(async () => { await loadCfg(); if (cfg.data?.hw?.led?.maxpwr) lastMax = cfg.data.hw.led.maxpwr })
+onMounted(async () => {
+  await loadCfg()
+  if (cfg.data?.hw?.led?.maxpwr) lastMax = cfg.data.hw.led.maxpwr
+  ensureAr()
+})
 
 const c = computed(() => cfg.data)
+
+/** Ensure um.AudioReactive exists with Gledopto pin defaults. */
+function ensureAr () {
+  if (!c.value) return
+  if (!c.value.um) c.value.um = {}
+  if (!c.value.um.AudioReactive) {
+    c.value.um.AudioReactive = {
+      enabled: false,
+      'add-palettes': false,
+      digitalmic: { type: GLEDOPTO_MIC.type, pin: [...GLEDOPTO_MIC.pin] },
+      config: { squelch: 10, gain: 60, AGC: 0 },
+      sync: { port: 11988, mode: 0 },
+    }
+  }
+  const ar = c.value.um.AudioReactive
+  if (!ar.digitalmic) ar.digitalmic = { type: GLEDOPTO_MIC.type, pin: [...GLEDOPTO_MIC.pin] }
+  else {
+    ar.digitalmic.type = GLEDOPTO_MIC.type
+    ar.digitalmic.pin = [...GLEDOPTO_MIC.pin]
+  }
+  if (!ar.config) ar.config = { squelch: 10, gain: 60, AGC: 0 }
+  if (!ar.sync) ar.sync = { port: 11988, mode: 0 }
+  ar.sync.mode = 0 // local mic only — no UDP sound sync in product UX
+}
+const ar = computed(() => c.value?.um?.AudioReactive)
+const micOn = computed({
+  get: () => !!(ar.value?.enabled ?? audioReactive.on),
+  set: (v) => { ensureAr(); if (ar.value) ar.value.enabled = !!v },
+})
+const micGain = computed({
+  get: () => ar.value?.config?.gain ?? 60,
+  set: (v) => { if (ar.value?.config) ar.value.config.gain = v },
+})
+const micAgc = computed({
+  get: () => ar.value?.config?.AGC ?? 0,
+  set: (v) => { if (ar.value?.config) ar.value.config.AGC = v },
+})
+const micSquelch = computed({
+  get: () => ar.value?.config?.squelch ?? 10,
+  set: (v) => { if (ar.value?.config) ar.value.config.squelch = v },
+})
+const micLvlPct = computed(() => Math.round(((lichtnest.audio.lvl || 0) / 255) * 100))
+const micNeedsReboot = ref(false)
 const ins = computed(() => c.value?.hw?.led?.ins || [])
 const ablOn = computed({
   get: () => (c.value?.hw?.led?.maxpwr || 0) > 0,
@@ -47,10 +103,13 @@ const psuRec = computed(() => ((c.value?.hw?.led?.maxpwr || 0) / 1000).toFixed(1
 function busTubes (b) { return tubesTotalForPort(b.start, b.start + b.len) }
 
 // --- add / remove a port (= WLED bus). WLED rebuilds buses from the ins array. ---
-const GPIO_CANDIDATES = [16, 2, 4, 5, 13, 14, 15, 32, 33, 12, 0, 1, 3]
+// Gledopto 2D-EXMU: 14/15/32 = I2S mic (reserved). Prefer 16, 2, then DIY 13.
+const GPIO_RESERVED_MIC = [14, 15, 32]
+const GPIO_CANDIDATES = [16, 2, 13, 4, 5, 33, 12, 0, 1, 3]
 function freeGpio () {
   const used = new Set(ins.value.flatMap((b) => b.pin || []))
-  return GPIO_CANDIDATES.find((g) => !used.has(g)) ?? 4
+  GPIO_RESERVED_MIC.forEach((g) => used.add(g))
+  return GPIO_CANDIDATES.find((g) => !used.has(g)) ?? 16
 }
 function addPort () {
   const arr = c.value.hw.led.ins
@@ -78,6 +137,7 @@ function setIp (key, val) { const p = val.split('.').map((n) => parseInt(n, 10) 
 async function save () {
   if (!c.value) return
   busy.value = true; msg.value = ''
+  ensureAr()
   // recompute contiguous bus starts from the (possibly edited) lengths and shift
   // the segments of any bus that moved, so tubes keep driving their LEDs
   const arr = c.value.hw.led.ins
@@ -90,12 +150,27 @@ async function save () {
     if (delta !== 0) wled.segments.forEach((s) => { if (s.start >= oldStarts[i] && s.start < oldBoundary(i)) segPatch.push({ id: s.id, start: s.start + delta, stop: s.stop + delta }) })
     b.start = ns
   })
+  const arCfg = c.value.um.AudioReactive
+  const wasOn = audioReactive.on
   const partial = {
     id: { name: c.value.id.name, mdns: c.value.id.mdns },
     hw: { led: { maxpwr: c.value.hw.led.maxpwr, ins: arr } },
     nw: { ins: [{ ssid: c.value.nw.ins[0].ssid, ip: c.value.nw.ins[0].ip, gw: c.value.nw.ins[0].gw, sn: c.value.nw.ins[0].sn }] },
     ap: { ssid: c.value.ap.ssid, chan: c.value.ap.chan, hide: c.value.ap.hide },
     if: { sync: { send: { en: c.value.if?.sync?.send?.en } } },
+    um: {
+      AudioReactive: {
+        enabled: !!arCfg.enabled,
+        'add-palettes': !!arCfg['add-palettes'],
+        digitalmic: { type: GLEDOPTO_MIC.type, pin: [...GLEDOPTO_MIC.pin] },
+        config: {
+          squelch: arCfg.config?.squelch ?? 10,
+          gain: arCfg.config?.gain ?? 60,
+          AGC: arCfg.config?.AGC ?? 0,
+        },
+        sync: { port: arCfg.sync?.port ?? 11988, mode: 0 },
+      },
+    },
     // note: def.ps (boot preset) is left untouched here — it points at the
     // Lichtnest tube-layout preset so the tubes survive a reboot.
   }
@@ -103,6 +178,12 @@ async function save () {
   if (apPass.value) partial.ap.psk = apPass.value
   const ok = await saveCfg(partial)
   if (ok && segPatch.length) { await postState({ seg: segPatch }); persistTubes() }
+  // runtime toggle (no reboot) + mirror for UI
+  if (ok) {
+    await postState({ AudioReactive: { enabled: !!arCfg.enabled } })
+    audioReactive.on = !!arCfg.enabled
+    if (!!arCfg.enabled !== wasOn) micNeedsReboot.value = true
+  }
   busy.value = false
   msg.value = ok ? 'Gespeichert ✓' : 'Fehler beim Speichern'
   if (ok) { wifiPass.value = ''; apPass.value = ''; setTimeout(() => { msg.value = '' }, 2500) }
@@ -117,6 +198,33 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
     <p v-else-if="!cfg.loaded" class="note">Lade Konfiguration …</p>
 
     <template v-if="c">
+      <!-- MIKROFON (Gledopto 2D-EXMU I2S) -->
+      <div class="seclbl mono">MIKROFON</div>
+      <div class="panel pad">
+        <div class="row"><span class="lbl">Mikrofon<small>I2S · GPIO 32 / 15 / 14 · lokal</small></span>
+          <button class="sw" :class="{ on: micOn }" @click="micOn = !micOn"><span /></button></div>
+        <div class="row brd">
+          <span class="lbl">Eingangspegel</span>
+          <div class="meterwrap">
+            <div class="meter"><div class="fill" :style="{ width: micLvlPct + '%' }" :class="{ peak: lichtnest.audio.peak }" /></div>
+            <span class="mono muted">{{ micLvlPct }}%</span>
+          </div>
+        </div>
+        <template v-if="micOn">
+          <div class="row brd">
+            <span class="lbl">Verstärkung</span>
+            <NumStepper v-model="micGain" :min="1" :max="255" />
+          </div>
+          <label class="flbl">AGC</label>
+          <select class="sel" v-model.number="micAgc"><option v-for="o in AGC_OPTS" :key="o.v" :value="o.v">{{ o.l }}</option></select>
+          <div class="row">
+            <span class="lbl">Rauschschwelle<small>squelch</small></span>
+            <NumStepper v-model="micSquelch" :min="0" :max="100" />
+          </div>
+        </template>
+        <p v-if="micNeedsReboot" class="hint mono" style="color:var(--accent)">Nach Ein-/Ausschalten einmal <b>Neu starten</b>, damit der I2S-Treiber greift.</p>
+      </div>
+
       <!-- LEISTUNG -->
       <div class="seclbl mono">LEISTUNG</div>
       <div class="panel pad">
@@ -231,6 +339,10 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
 .lbl small { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
 .hint { font-size: 12px; color: var(--muted); padding: 0 0 12px; }
 .hint b { color: var(--accent); }
+.meterwrap { display: flex; align-items: center; gap: 10px; flex: 1; justify-content: flex-end; max-width: 220px; }
+.meter { flex: 1; height: 10px; border-radius: 999px; background: var(--inset); border: 1px solid var(--line2); overflow: hidden; }
+.meter .fill { height: 100%; background: var(--accent); transition: width .08s linear; }
+.meter .fill.peak { background: #e0614f; }
 
 .flbl { display: block; font-size: 12px; color: var(--muted2); margin: 12px 0 6px 2px; }
 .in { width: 100%; height: 42px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line2); color: var(--text); font-size: 14px; padding: 0 12px; outline: none; }

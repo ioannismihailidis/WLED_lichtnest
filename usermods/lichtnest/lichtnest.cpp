@@ -5,10 +5,11 @@
  *
  * - Exposes the physical LED outputs ("ports") to the custom UI (/json/info).
  * - Hosts our OWN spatial effect engine (docs/generators.md): named base
- *   effects (fx 0..6, 8, 9, 11, 12, 14), each with named parameters, rendered
- *   per-LED using the tube geometry (each LED's 2D position interpolated
- *   between the tube endpoints). Gravity: 5 Kugelbahn, 6 Pendel; Fill mode Level/Tide.
- *   Removed: 7, 10 chase, 13 scanner, 15 WLED.
+ *   effects (fx 0..6, 8, 9, 11, 12, 14) plus audio looks 7 Spektrum / 10 Beat-Impuls /
+ *   13 Bass-Pegel, each with named parameters, rendered per-LED using the tube
+ *   geometry (each LED's 2D position interpolated between the tube endpoints).
+ *   Gravity: 5 Kugelbahn, 6 Pendel; Fill mode Level/Tide.
+ *   Shared audio modulation: asrc / amod / again (via audioreactive getUMData).
  * - "fx": 4 ("Kombiniert") composites an ordered stack of up to ZV_MAXLAYERS
  *   base-effect LAYERS instead of one flat param set: each layer is a full
  *   effect (any base fx + its own params), optionally masked to a soft-edged
@@ -44,22 +45,24 @@
 
 #define ZV_MAXGEO   32
 #define ZV_MAXPTS   16
-#define ZV_MAXSTEPS 32
+#define ZV_MAXSTEPS 20   // playlist rows in RAM (32 overflowed DRAM; kept at 20)
 #define ZV_MAXSCHED 16   // playlists with a daily wall-clock schedule cached from FS
 #define ZV_MAXLAYERS 4   // layers per "Kombiniert" (layered) effect stack — each layer embeds a
-                          // full FxParams (~200B), so this multiplies PlStep size by ZV_MAXSTEPS;
+                          // full FxParams, so this multiplies PlStep size by ZV_MAXSTEPS;
                           // 6 overflowed ESP32 DRAM (measured), 4 covers the linear+radial+strobe
                           // use case plus one spare with comfortable headroom
 
 #define ZV_MAXCOL 8
 #define ZV_MAXKF  8      // keyframes per list (strobe hz over time / solid rate+colour over time)
 #define ZV_MAXPAL 8      // strobe palette colours
+#define ZV_MAXSNAP 4
+#define ZV_SHORT_FADE 0.35f
 // one keyframe: time (s), value, colour (colour only used by the solid)
 struct KF { float t = 0; float v = 0; uint32_t c = 0xFFFFFF; };
 
 // one effect + its full parameter set (union over all effects)
 struct FxParams {
-  uint8_t  fx = 3;                                          // generators 0..6,8,9,11,12,14; 4=layered; 7/10/13/15 removed
+  uint8_t  fx = 3;                                          // generators 0..14; 4=layered
   // impulse: colour gradient painted across each band — fcount colours + per-colour width
   uint8_t  fcount = 3;
   uint32_t fcols[ZV_MAXCOL] = { 0xFF5A3C, 0x7B3CFF, 0x27C5FF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF };
@@ -78,6 +81,17 @@ struct FxParams {
   uint8_t  cpar = 1;                                       // strobe: colours/tubes shown in parallel
   uint8_t  scount = 0; uint32_t scols[ZV_MAXPAL] = {0};    // strobe palette
   uint8_t  kcount = 0; KF keys[ZV_MAXKF];                  // strobe (t,hz) / solid (t,rate,colour) over time
+  // audio modulation (audioreactive): asrc 0=off · 1 vol · 2 bass · 3 mid · 4 treble · 5 beat
+  // amod 0=bri · 1=speed · 2=size · 3=level; again = depth 0..255 (0 = ignore)
+  uint8_t  asrc = 0, amod = 0, again = 0;
+};
+
+// snapshot timeline entry — wire: tl: [{ t, xf, p, lm?, lg?, lx? }]
+// xf on key i≥1: transition into that key (0 hart · 1 linear · 2 kurzer Fade)
+// lm/lg/lx on first key: loop mode (0 hold · 1 cycle · 2 pingpong) / return gap s / return xf
+struct FxSnap {
+  float t = 0; uint8_t xf = 0; FxParams p;
+  uint8_t lm = 1; float lg = 1.0f; uint8_t lx = 1;
 };
 
 // one layer within a "Kombiniert" (layered) effect: an ordinary base effect (not fx 4),
@@ -125,6 +139,7 @@ struct PlStep {
   uint8_t  trEase  = 0;
   uint8_t  trUnit  = 0;
   uint32_t trDurMs = 0;        // transition row duration (= step length while isTr)
+  float    tlEnd = 0;          // last snap t (0 = no timeline on this step)
 };
 
 class Lichtnest : public Usermod {
@@ -191,6 +206,23 @@ class Lichtnest : public Usermod {
     FxParams   _trFrom;           // outgoing params (classic path)
     LayerStack _trFromLayers;     // outgoing layer stack, if the outgoing step was Kombiniert
 
+    // active snapshot timelines (parsed from FS / JSON at step start — not stored in PlStep)
+    FxSnap _tl[ZV_MAXSNAP]; uint8_t _tlN = 0;
+    FxSnap _tlFrom[ZV_MAXSNAP]; uint8_t _tlFromN = 0;
+    FxSnap _tlL[ZV_MAXLAYERS][ZV_MAXSNAP]; uint8_t _tlLN[ZV_MAXLAYERS] = {0};
+    FxSnap _tlFromL[ZV_MAXLAYERS][ZV_MAXSNAP]; uint8_t _tlFromLN[ZV_MAXLAYERS] = {0};
+    float _stepTlEnd[ZV_MAXSTEPS] = {0};
+    float _manualTlEnd = 0;
+    FxParams _resolvedTo; float _resolvedToEl = -1.0f;
+    FxParams _resolvedFrom; float _resolvedFromEl = -1.0f;
+    FxParams _resolvedLayer[ZV_MAXLAYERS]; float _resolvedLayerEl[ZV_MAXLAYERS];
+    uint8_t _resolvedLayerN = 0; bool _resolvedLayerFrom = false; bool _resolvedLayerFrozen = false;
+    // O(1) rate-phase accumulators (∫rate via Euler) — avoid re-integrating every frame
+    float _ratePhTo = 0, _ratePhToAt = -1.0f;
+    float _ratePhFrom = 0, _ratePhFromAt = -1.0f;
+    float _ratePhLayer[ZV_MAXLAYERS]; float _ratePhLayerAt[ZV_MAXLAYERS];
+    float _ratePhLayerFrom[ZV_MAXLAYERS]; float _ratePhLayerFromAt[ZV_MAXLAYERS];
+
     // effects render deterministically from the step's elapsed time (matches the web sim),
     // so they auto-advance and stay in lock-step with the UI preview.
     uint32_t _manualStart = 0;         // activation time of the manual effect (its timeline)
@@ -206,6 +238,12 @@ class Lichtnest : public Usermod {
     bool     _mFlip[ZV_MAXGEO];
     float    _mTotal = 0;
     uint8_t  _mGeoN = 0, _mDir = 255, _mHz = 255;
+
+    // audioreactive snapshot (refreshed once per overlay frame)
+    bool     _arOk = false;
+    float    _arVol = 0, _arBass = 0, _arMid = 0, _arTreble = 0;
+    uint8_t  _arPeak = 0;
+    uint8_t  _arFft[16] = {0};
 
     // recompute the radial centre (average tube midpoint) after geometry changes
     void computeCenter() {
@@ -538,6 +576,233 @@ class Lichtnest : public Usermod {
       for (uint8_t i = 1; i < n; i++) if (t <= k[i].t) { float s = k[i].t - k[i - 1].t; float f = s > 0 ? (t - k[i - 1].t) / s : 0; return blendCol(k[i - 1].c, k[i].c, f); }
       return k[n - 1].c;
     }
+    static void snapLoopMeta(const FxSnap* snaps, uint8_t n, uint8_t& lm, float& lg, uint8_t& lx) {
+      lm = 1; lg = 1.0f; lx = 1;
+      if (!n) return;
+      lm = snaps[0].lm > 2 ? 1 : snaps[0].lm;
+      lg = snaps[0].lg; if (lg < 0) lg = 0; if (lg > 60) lg = 60;
+      lx = snaps[0].lx > 2 ? 1 : snaps[0].lx;
+    }
+    static float snapLastT(const FxSnap* snaps, uint8_t n) {
+      if (!n) return 0;
+      float t = snaps[n - 1].t;
+      return t < 0.5f ? 0.5f : t;
+    }
+    // full param-timeline period (playhead / wrap) — mirrors web snapDuration()
+    static float tlEndFromSnaps(const FxSnap* snaps, uint8_t n) {
+      if (!n) return 0;
+      float last = snapLastT(snaps, n);
+      if (n < 2) return last;
+      uint8_t lm, lx; float lg;
+      snapLoopMeta(snaps, n, lm, lg, lx);
+      if (lm == 0) return last;
+      if (lm == 2) { float d = 2.0f * last; return d < 0.5f ? 0.5f : d; }
+      float d = last + lg; return d < 0.5f ? 0.5f : d;
+    }
+    static bool usesRateIntegral(uint8_t fx) { return fx == 9 || fx == 11 || fx == 14; }
+    static float phaseRateOf(const FxParams& P) {
+      if (P.fx == 11) return (P.speed / 100.0f) * 90.0f;
+      if (P.fx == 9) return (P.speed / 100.0f) * 0.5f;
+      if (P.fx == 14) return (P.speed / 100.0f) * 0.25f;
+      return 0.0f;
+    }
+    // smoothstep — mirrors web snaps.js smooth01()
+    static float smooth01(float u) {
+      if (u < 0) u = 0; if (u > 1) u = 1;
+      return u * u * (3.0f - 2.0f * u);
+    }
+    // shortest-path angle lerp (degrees) → [0, 360)
+    static float lerpAngleDeg(float a, float b, float t) {
+      float d = fmodf(b - a, 360.0f);
+      if (d > 180.0f) d -= 360.0f;
+      if (d < -180.0f) d += 360.0f;
+      float r = a + d * t;
+      r = fmodf(r, 360.0f); if (r < 0) r += 360.0f;
+      return r;
+    }
+    static void mixParams(const FxParams& A, const FxParams& B, float u, FxParams& out) {
+      out = A;
+      float s = smooth01(u);
+      out.speed = (uint8_t)(lerpf(A.speed, B.speed, s) + 0.5f);
+      out.angle = (uint16_t)(lerpAngleDeg((float)A.angle, (float)B.angle, s) + 0.5f);
+      out.rwidth = (uint8_t)(lerpf(A.rwidth, B.rwidth, s) + 0.5f);
+      out.duty = (uint8_t)(lerpf(A.duty, B.duty, s) + 0.5f);
+      out.hz = (uint8_t)(lerpf(A.hz, B.hz, s) + 0.5f);
+      out.count = (uint8_t)(lerpf(A.count, B.count, s) + 0.5f);
+      out.interval = (uint8_t)(lerpf(A.interval, B.interval, s) + 0.5f);
+      out.tail = (uint8_t)(lerpf(A.tail, B.tail, s) + 0.5f);
+      out.cpar = (uint8_t)(lerpf(A.cpar, B.cpar, s) + 0.5f);
+      out.rfin = (uint8_t)(lerpf(A.rfin, B.rfin, s) + 0.5f);
+      out.rgap = (uint8_t)(lerpf(A.rgap, B.rgap, s) + 0.5f);
+      out.tempo = (uint8_t)(lerpf(A.tempo, B.tempo, s) + 0.5f);
+      out.rfout = (uint8_t)(lerpf(A.rfout, B.rfout, s) + 0.5f);
+      out.col = blendCol(A.col, B.col, s);
+      uint8_t fn = A.fcount > B.fcount ? A.fcount : B.fcount;
+      if (fn < 1) fn = 1;
+      if (fn > ZV_MAXCOL) fn = ZV_MAXCOL;
+      out.fcount = fn;
+      for (uint8_t i = 0; i < fn; i++) {
+        uint8_t ia = i < A.fcount ? i : (A.fcount ? A.fcount - 1 : 0);
+        uint8_t ib = i < B.fcount ? i : (B.fcount ? B.fcount - 1 : 0);
+        out.fcols[i] = blendCol(A.fcols[ia], B.fcols[ib], s);
+        out.fcw[i] = (uint8_t)(lerpf(A.fcw[ia], B.fcw[ib], s) + 0.5f);
+      }
+      uint8_t sn = A.scount > B.scount ? A.scount : B.scount;
+      if (sn > ZV_MAXPAL) sn = ZV_MAXPAL;
+      if (sn > 0) {
+        out.scount = sn;
+        for (uint8_t i = 0; i < sn; i++) {
+          uint8_t ia = i < A.scount ? i : (A.scount ? A.scount - 1 : 0);
+          uint8_t ib = i < B.scount ? i : (B.scount ? B.scount - 1 : 0);
+          uint32_t ca = A.scount ? A.scols[ia] : 0;
+          uint32_t cb = B.scount ? B.scols[ib] : 0;
+          out.scols[i] = blendCol(ca, cb, s);
+        }
+      }
+      // discrete (incl. bounce in width slot): switch at midpoint
+      if (s >= 0.5f) {
+        out.width = B.width;
+        out.pmode = B.pmode; out.mode = B.mode; out.dir = B.dir; out.origin = B.origin;
+        out.breathe = B.breathe; out.asrc = B.asrc; out.amod = B.amod; out.again = B.again;
+        if (B.kcount) {
+          out.kcount = B.kcount;
+          for (uint8_t i = 0; i < B.kcount; i++) out.keys[i] = B.keys[i];
+        }
+      } else {
+        out.width = A.width;
+      }
+    }
+    // blend A→B over [t0,t1] with xf — mirrors web blendGap()
+    static void blendGap(const FxParams& A, const FxParams& B, float t0, float t1, float t, uint8_t xf, FxParams& out) {
+      if (xf > 2) xf = 2;
+      if (xf == 0) { out = (t < t1) ? A : B; return; }
+      if (xf == 2) {
+        float fadeStart = t0 > t1 - ZV_SHORT_FADE ? t0 : t1 - ZV_SHORT_FADE;
+        if (t < fadeStart) { out = A; return; }
+        float denom = t1 - fadeStart; if (denom < 1e-4f) denom = 1e-4f;
+        float u = (t - fadeStart) / denom;
+        if (u < 0) u = 0; if (u > 1) u = 1;
+        mixParams(A, B, u, out);
+        return;
+      }
+      float span = t1 - t0; if (span < 1e-4f) span = 1e-4f;
+      float u = (t - t0) / span;
+      if (u < 0) u = 0; if (u > 1) u = 1;
+      mixParams(A, B, u, out);
+    }
+    // local timeline coordinate (already mapped) → params
+    static void resolveAtLocal(const FxSnap* snaps, uint8_t n, float t, uint8_t lm, float lg, uint8_t lx, FxParams& out) {
+      const FxSnap& last = snaps[n - 1];
+      float lastT = last.t;
+      if (n >= 2 && lm == 1 && lg > 1e-6f && t > lastT) {
+        float t1 = lastT + lg;
+        if (t > t1) t = t1;
+        blendGap(last.p, snaps[0].p, lastT, t1, t, lx, out);
+        return;
+      }
+      if (t <= snaps[0].t) { out = snaps[0].p; return; }
+      if (t >= lastT) { out = last.p; return; }
+      uint8_t i = 1;
+      while (i < n && t > snaps[i].t) i++;
+      blendGap(snaps[i - 1].p, snaps[i].p, snaps[i - 1].t, snaps[i].t, t, snaps[i].xf, out);
+    }
+    // mirrors web/src/snaps.js resolveSnap() — hold / cycle(+return gap) / pingpong
+    static void resolveSnap(const FxSnap* snaps, uint8_t n, float elapsed, const FxParams& fallback, FxParams& out) {
+      if (!n) { out = fallback; return; }
+      uint8_t lm, lx; float lg;
+      snapLoopMeta(snaps, n, lm, lg, lx);
+      float last = snapLastT(snaps, n);
+      float t = elapsed;
+      if (n < 2 || lm == 0) {
+        if (t < 0) t = 0;
+        if (t > last) t = last;
+      } else if (lm == 2) {
+        float D = 2.0f * last; if (D < 0.5f) D = 0.5f;
+        float u = fmodf(elapsed, D); if (u < 0) u += D;
+        if (u < 1e-6f && elapsed > 1e-6f) u = D;
+        t = (u <= last) ? u : (2.0f * last - u);
+      } else {
+        float D = last + lg; if (D < 0.5f) D = 0.5f;
+        t = fmodf(elapsed, D); if (t < 0) t += D;
+        if (t < 1e-6f && elapsed > 1e-6f) t = D;
+      }
+      resolveAtLocal(snaps, n, t, lm, lg, lx, out);
+      out.fx = fallback.fx;
+    }
+    // ∫ rate(resolve(τ)) dτ — absolute resync for seeks / large gaps only
+    static float integrateSnapRate(const FxSnap* snaps, uint8_t n, float elapsed, const FxParams& fallback) {
+      if (!(elapsed > 0.0f)) return 0.0f;
+      if (!n) return phaseRateOf(fallback) * elapsed;
+      FxParams tmp = fallback;
+      auto rateAt = [&](float te) -> float {
+        resolveSnap(snaps, n, te, fallback, tmp);
+        tmp.fx = fallback.fx;
+        return phaseRateOf(tmp);
+      };
+      auto samples = [&](float t0, float t1) -> float {
+        float span = t1 - t0; if (span <= 0) return 0.0f;
+        int nStep = (int)ceilf(span * 20.0f); if (nStep < 4) nStep = 4; if (nStep > 400) nStep = 400;
+        float acc = 0, prevT = t0, prevR = rateAt(t0);
+        for (int i = 1; i <= nStep; i++) {
+          float tt = t0 + span * ((float)i / (float)nStep);
+          float rr = rateAt(tt);
+          acc += 0.5f * (prevR + rr) * (tt - prevT);
+          prevT = tt; prevR = rr;
+        }
+        return acc;
+      };
+      uint8_t lm, lx; float lg;
+      snapLoopMeta(snaps, n, lm, lg, lx);
+      float last = snapLastT(snaps, n);
+      if (n < 2 || lm == 0) {
+        if (elapsed <= last) return samples(0.0f, elapsed);
+        float base = samples(0.0f, last);
+        resolveSnap(snaps, n, last, fallback, tmp);
+        tmp.fx = fallback.fx;
+        return base + phaseRateOf(tmp) * (elapsed - last);
+      }
+      float period = tlEndFromSnaps(snaps, n);
+      if (period <= 0.05f) return samples(0.0f, elapsed);
+      float nFull = floorf(elapsed / period);
+      float frac = elapsed - nFull * period;
+      float one = (nFull > 0.0f) ? samples(0.0f, period) : 0.0f;
+      return nFull * one + ((frac > 1e-6f) ? samples(0.0f, frac) : 0.0f);
+    }
+    void resetRatePhaseAcc() {
+      _ratePhTo = 0; _ratePhToAt = -1.0f;
+      _ratePhFrom = 0; _ratePhFromAt = -1.0f;
+      for (uint8_t i = 0; i < ZV_MAXLAYERS; i++) {
+        _ratePhLayer[i] = 0; _ratePhLayerAt[i] = -1.0f;
+        _ratePhLayerFrom[i] = 0; _ratePhLayerFromAt[i] = -1.0f;
+      }
+    }
+    // O(1) Euler advance of ∫rate; resync via integrateSnapRate on seek / large gaps
+    float tickSnapRatePhase(float& phaseAcc, float& phaseAt, const FxSnap* snaps, uint8_t n,
+                            float elRaw, const FxParams& resolved, const FxParams& fallback) {
+      FxParams rateP = resolved;
+      rateP.fx = fallback.fx;
+      float r = phaseRateOf(rateP);
+      if (phaseAt < 0.0f || elRaw + 1e-4f < phaseAt || elRaw - phaseAt > 0.35f) {
+        phaseAcc = (n > 0) ? integrateSnapRate(snaps, n, elRaw, fallback) : (r * elRaw);
+      } else {
+        float dt = elRaw - phaseAt;
+        if (dt > 0.0f) phaseAcc += dt * r;
+      }
+      phaseAt = elRaw;
+      return phaseAcc;
+    }
+    // bake effect phase for rate×time FX (elapsed arg to computeColor becomes phase units)
+    float bakeEffectPhase(const FxSnap* snaps, uint8_t n, float elRaw, float elWrapped,
+                          const FxParams& resolved, const FxParams& fallback,
+                          float& phaseAcc, float& phaseAt) {
+      FxParams rateP = resolved;
+      rateP.fx = fallback.fx;
+      if (usesRateIntegral(fallback.fx)) {
+        if (n > 0) return tickSnapRatePhase(phaseAcc, phaseAt, snaps, n, elRaw, resolved, fallback);
+        return phaseRateOf(rateP) * elWrapped;
+      }
+      return elWrapped;
+    }
 
     // --- impulse geometry ---------------------------------------------------
     // Distance from the emission origin. Radial: Euclidean distance from the named
@@ -546,13 +811,14 @@ class Lichtnest : public Usermod {
     // near edge of the unit square (historical default so classic linear Impuls is unchanged).
     float pulseDist(const FxParams& P, float x, float y) {
       float ox = _cx, oy = _cy;
-      if (P.origin != 255) pointPosition(P.origin, ox, oy);   // named marker, if it still exists
+      if (P.origin != 255) pointPosition(P.origin, ox, oy);
+      bool hasOrigin = P.origin != 255;
       if (P.pmode == 1) {
         float dx = x - ox, dy = y - oy; return sqrtf(dx * dx + dy * dy);
       }
       float ax = cosf(P.angle * 3.14159265f / 180.0f), ay = sinf(P.angle * 3.14159265f / 180.0f);
-      float u0 = (P.origin != 255) ? (ox * ax + oy * ay)
-                                   : ((ax < 0 ? ax : 0) + (ay < 0 ? ay : 0));
+      float u0 = hasOrigin ? (ox * ax + oy * ay)
+                           : ((ax < 0 ? ax : 0) + (ay < 0 ? ay : 0));
       return x * ax + y * ay - u0;
     }
     float pulseUmax(const FxParams& P) {
@@ -565,8 +831,8 @@ class Lichtnest : public Usermod {
     // 0..1 soft-edge mask around a layer's marker; radius 0 (default) = unrestricted
     float layerMask(const FxLayer& L, float x, float y) {
       if (L.radius == 0) return 1.0f;
-      float mx = _cx, my = _cy;                            // default: auto centre (tube centroid)
-      if (L.marker != 255) pointPosition(L.marker, mx, my); // else: named marker, if it still exists
+      float mx = _cx, my = _cy;
+      if (L.marker != 255) pointPosition(L.marker, mx, my);
       float dx = x - mx, dy = y - my;
       float d = sqrtf(dx * dx + dy * dy);
       float rf = L.radius / 100.0f;
@@ -585,20 +851,41 @@ class Lichtnest : public Usermod {
     }
     // how long a layer's OWN effect naturally takes before it repeats — impulse/strobe/
     // solid/fill auto-loop on this (like the classic single-effect step); others free-run
+    // effect loop length only — snapshot `tl` does not extend this
     float layerNaturalDuration(const FxParams& P) {
-      if (P.fx == 0) return impulseDur(P);
+      if (P.fx == 0) return P.width ? 0.0f : impulseDur(P);
       if (P.fx == 1) return strobeDur(P);
       if (P.fx == 3) return solidDur(P);
       if (P.fx == 5) return marbleDur(P);
       if (P.fx == 8) return fillDur(P);
       return 0.0f;
     }
+    void prepareLayerResolve(LayerStack& LS, float baseElapsed, bool frozen, bool fromBuf) {
+      const FxSnap (*tlArr)[ZV_MAXSNAP] = fromBuf ? _tlFromL : _tlL;
+      const uint8_t* tlN = fromBuf ? _tlFromLN : _tlLN;
+      _resolvedLayerN = LS.count;
+      _resolvedLayerFrom = fromBuf;
+      _resolvedLayerFrozen = frozen;
+      for (uint8_t i = 0; i < LS.count; i++) {
+        FxLayer& L = LS.layers[i];
+        float natural = layerNaturalDuration(L.p);
+        // params follow raw step time; effect phase uses natural wrap (or ∫rate under tl)
+        float elapsed = frozen ? natural : ((natural > 0.05f) ? fmodf(baseElapsed, natural) : baseElapsed);
+        float paramEl = frozen ? natural : baseElapsed;
+        if (tlN[i]) resolveSnap(tlArr[i], tlN[i], paramEl, L.p, _resolvedLayer[i]);
+        else _resolvedLayer[i] = L.p;
+        if (L.marker != 255) _resolvedLayer[i].origin = L.marker;
+        float& phAcc = fromBuf ? _ratePhLayerFrom[i] : _ratePhLayer[i];
+        float& phAt = fromBuf ? _ratePhLayerFromAt[i] : _ratePhLayerAt[i];
+        _resolvedLayerEl[i] = bakeEffectPhase(tlArr[i], tlN[i], paramEl, elapsed, _resolvedLayer[i], L.p, phAcc, phAt);
+      }
+    }
     // composite every enabled+gated layer of a stack at one pixel (additive/max/screen,
     // clamped). `frozen` renders each layer at its own natural end instead of following
     // `baseElapsed` — used for the outgoing side of a playlist crossfade, mirroring how
     // classic effects freeze at stepSeconds() for the duration of the transition.
     // `along` = 0..1 electrical position on the current tube (Kugelbahn).
-    uint32_t renderStack(LayerStack& LS, float baseElapsed, bool frozen, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal, float along) {
+    uint32_t renderStack(LayerStack& LS, float baseElapsed, bool frozen, bool fromBuf, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal, float along) {
       uint32_t acc = 0;
       for (uint8_t i = 0; i < LS.count; i++) {
         FxLayer& L = LS.layers[i];
@@ -606,16 +893,10 @@ class Lichtnest : public Usermod {
         float natural = layerNaturalDuration(L.p);
         float gateT = frozen ? natural : baseElapsed;
         if (!layerGateOpen(L, gateT)) continue;
+        float elapsed = _resolvedLayerEl[i];
         float mask = layerMask(L, x, y);
         if (mask <= 0.0f) continue;
-        float elapsed = frozen ? natural : ((natural > 0.05f) ? fmodf(baseElapsed, natural) : baseElapsed);
-        // Layer marker doubles as the spatial origin for Impuls/Fill/Spot/Wave/Noise/
-        // Wave/Spotlight (any effect that honours P.origin) — mirrors web resolveMarker.
-        // Without this, a layer Marker only drove the radius mask and Impuls ignored it.
-        uint8_t savedOrigin = L.p.origin;
-        if (L.marker != 255) L.p.origin = L.marker;
-        uint32_t c = computeColor(L.p, elapsed, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, along);
-        L.p.origin = savedOrigin;
+        uint32_t c = computeColor(_resolvedLayer[i], elapsed, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, along);
         if (mask < 1.0f) c = scaleCol(c, mask);
         acc = combineBlend(L.blend, acc, c);
       }
@@ -675,8 +956,14 @@ class Lichtnest : public Usermod {
     }
 
     // --- effect step durations (auto-advance) -------------------------------
-    static float strobeDur(const FxParams& P) { float t = P.kcount ? P.keys[P.kcount - 1].t : 2.0f; return t < 0.5f ? 0.5f : t; }
-    static float solidDur(const FxParams& P)  { float t = P.kcount ? P.keys[P.kcount - 1].t : 4.5f; return t < 0.5f ? 0.5f : t; }
+    static float strobeDur(const FxParams& P) {
+      float t = P.kcount ? P.keys[P.kcount - 1].t : 2.0f;
+      return t < 0.5f ? 0.5f : t;
+    }
+    static float solidDur(const FxParams& P) {
+      float t = P.kcount ? P.keys[P.kcount - 1].t : 4.5f;
+      return t < 0.5f ? 0.5f : t;
+    }
     float impulseDur(const FxParams& P) {
       float Nn = P.count < 1 ? 1 : P.count;
       float iv = P.interval * 0.1f; if (iv < 0.05f) iv = 0.05f;
@@ -690,6 +977,7 @@ class Lichtnest : public Usermod {
     // the file's `dur`. Only called for the classic (non-layered)
     // path; a layered step's own duration handling lives in handleOverlayDraw/loop() via
     // activeLayers()/renderStack().
+    // effect auto-duration only — snapshot `tl` modulates params, not loop length
     float stepSeconds(const FxParams& P) {
       // bounce (width≠0): continuous travel — no natural end, use playlist `dur`
       if (P.fx == 0) return P.width ? 0.0f : impulseDur(P);
@@ -781,7 +1069,6 @@ class Lichtnest : public Usermod {
       }
       return false;
     }
-    // resolve a named marker (or tube centroid) into ox/oy — shared by mpulse/split
     void markerXY(const FxParams& P, float& ox, float& oy) const {
       ox = _cx; oy = _cy;
       if (P.origin != 255) pointPosition(P.origin, ox, oy);
@@ -799,12 +1086,59 @@ class Lichtnest : public Usermod {
       return (t < span) ? t : (2.0f * span - t);
     }
 
+    void refreshAudio() {
+      _arOk = false; _arVol = _arBass = _arMid = _arTreble = 0; _arPeak = 0;
+      memset(_arFft, 0, sizeof(_arFft));
+      um_data_t* um = nullptr;
+      if (!UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) || !um || !um->u_data) return;
+      _arOk = true;
+      if (um->u_data[0]) _arVol = fminf(1.0f, fmaxf(0.0f, (*((float*)um->u_data[0])) / 255.0f));
+      if (um->u_data[2]) memcpy(_arFft, um->u_data[2], 16);
+      if (um->u_data[3]) _arPeak = *((uint8_t*)um->u_data[3]) ? 1 : 0;
+      auto avg = [&](uint8_t a, uint8_t b) -> float {
+        float s = 0; uint8_t n = 0;
+        for (uint8_t i = a; i <= b && i < 16; i++) { s += _arFft[i]; n++; }
+        return n ? (s / (n * 255.0f)) : 0.0f;
+      };
+      _arBass = avg(0, 2); _arMid = avg(3, 8); _arTreble = avg(9, 15);
+    }
+    // 0..1 from asrc; 0 if off / no AR
+    float audioSrc(uint8_t asrc) const {
+      if (!_arOk || asrc == 0) return 0.0f;
+      switch (asrc) {
+        case 1: return _arVol;
+        case 2: return _arBass;
+        case 3: return _arMid;
+        case 4: return _arTreble;
+        case 5: return _arPeak ? 1.0f : 0.0f;
+        default: return 0.0f;
+      }
+    }
+    // depth blend: again=0 → 1 (no mod); again=255 → pure signal
+    float audioFactor(const FxParams& P) const {
+      if (P.asrc == 0 || P.again == 0) return 1.0f;
+      float depth = P.again / 255.0f;
+      return 1.0f - depth + depth * audioSrc(P.asrc);
+    }
+    void audioMods(const FxParams& P, float& briMul, float& spdMul, float& szMul, float& lvlMul) const {
+      briMul = spdMul = szMul = lvlMul = 1.0f;
+      if (P.asrc == 0 || P.again == 0) return;
+      float af = audioFactor(P);
+      if (P.amod == 0) briMul = af;
+      else if (P.amod == 1) spdMul = fmaxf(0.05f, af);
+      else if (P.amod == 2) szMul = fmaxf(0.05f, af);
+      else if (P.amod == 3) lvlMul = af;
+    }
+
     // render one pixel of effect P at `elapsed` seconds into its step (deterministic; mirrors fxsim/gravity.js)
     // `along` = 0..1 electrical position on the current tube (used by Kugelbahn)
     uint32_t computeColor(const FxParams& P, float elapsed, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal, float along) {
+      float briMul, spdMul, szMul, lvlMul;
+      audioMods(P, briMul, spdMul, szMul, lvlMul);
       switch (P.fx) {
         case 0: { // Impuls — bands over 2D (linear/radial) or LED chain; optional travel easing via mode
-          if (P.speed == 0) return 0;
+          float spd = P.speed * spdMul;
+          if (spd < 0.5f) return 0;
           float d, umax;
           if (P.pmode == 2) {
             float N = chainTotal ? (float)chainTotal : 1.0f;
@@ -815,9 +1149,9 @@ class Lichtnest : public Usermod {
             d = pulseDist(P, x, y);
             umax = pulseUmax(P);
           }
-          float v = (P.speed / 100.0f) * 0.6f;
+          float v = (spd / 100.0f) * 0.6f;
           float iv = P.interval * 0.1f; if (iv < 0.05f) iv = 0.05f;
-          float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
+          float w = (P.rwidth * szMul) / 100.0f; if (w < 0.02f) w = 0.02f;
           float travel = umax + w; if (travel < 0.001f) travel = 0.001f;
           bool bounce = P.width != 0;
           uint8_t Nn = P.count < 1 ? 1 : P.count;
@@ -841,17 +1175,18 @@ class Lichtnest : public Usermod {
           if (bestg > 1.0f) return 0;
           float A = P.rfin * 0.1f, Dec = P.rgap * 0.1f, Rel = P.rfout * 0.1f;
           float S = P.tempo / 100.0f; if (S < 0) S = 0; if (S > 1) S = 1;
-          float bri = envelopeUnit(bestg, A, Dec, S, Rel);
+          float bri = envelopeUnit(bestg, A, Dec, S, Rel) * briMul;
           if (bri <= 0.0f) return 0;
           return scaleCol(gradN(P, bestg), bri);
         }
         case 1: { // Tube-Strobe — frequency follows the keyframes; cpar colours across the tubes
           KF defk[2]; const KF* K = P.keys; uint8_t n = P.kcount;
           if (!n) { defk[0].t = 0; defk[0].v = 2; defk[1].t = 2; defk[1].v = 10; K = defk; n = 2; }   // = web DEF_HZKEYS
-          float phase = curvePhase(K, n, elapsed);
+          float phase = curvePhase(K, n, elapsed * spdMul);
           long flash = (long)floorf(phase);
           if ((phase - (float)flash) >= (P.duty / 100.0f)) return 0;   // off part of the flash cycle
-          return strobeColor(P, tubeIdx, tubeTotal, flash);
+          uint32_t c = strobeColor(P, tubeIdx, tubeTotal, flash);
+          return (briMul < 0.999f) ? scaleCol(c, briMul) : c;
         }
         case 2: { // Neon flicker — hard steps or faded lerp; ADSR = soft fade-in + sustain
           float tempo = 2.0f + (P.speed / 100.0f) * 18.0f;
@@ -887,8 +1222,8 @@ class Lichtnest : public Usermod {
           }
           uint32_t col = sampleKC(K, n, elapsed);
           float b = 1.0f;
-          if (P.breathe) { float ph = 6.2831853f * curvePhase(K, n, elapsed); b = 0.25f + 0.75f * (0.5f + 0.5f * sinf(ph)); }
-          return scaleCol(col, b);
+          if (P.breathe) { float ph = 6.2831853f * curvePhase(K, n, elapsed * spdMul); b = 0.25f + 0.75f * (0.5f + 0.5f * sinf(ph)); }
+          return scaleCol(col, b * briMul);
         }
         case 5: { // Kugelbahn — marbles roll down each tube (gravity), air-gap to next tube
           if (P.speed == 0 || geoCount == 0 || tubeIdx >= geoCount) return 0;
@@ -964,39 +1299,61 @@ class Lichtnest : public Usermod {
           float gph = u; if (gph < 0) gph = 0; if (gph > 1) gph = 1;
           return scaleCol(gradN(P, gph), bri);
         }
-        case 7: // removed Gradient Sweep
-          return 0;
+        case 7: { // Spektrum — GEQ bands along tube (or across tubes when pmode=2)
+          uint8_t band;
+          if (P.pmode == 2 && tubeTotal > 1) band = (uint8_t)((tubeIdx * 16u) / tubeTotal);
+          else band = (uint8_t)(along * 15.99f);
+          if (band > 15) band = 15;
+          float lvl = _arOk ? (_arFft[band] / 255.0f) : 0.0f;
+          float sens = P.again ? (P.again / 255.0f) : 1.0f;
+          float intens = fminf(1.0f, lvl * (0.35f + 0.65f * sens));
+          if (intens < 0.01f) return 0;
+          float soft = (P.rwidth * szMul) / 100.0f; if (soft < 0.02f) soft = 0.02f;
+          if (P.mode == 0) { // bar from electrical start
+            if (along > intens + soft) return 0;
+            float k = intens * briMul;
+            if (along > intens - soft) {
+              float den = 2.0f * soft; if (den < 1e-4f) den = 1e-4f;
+              k *= (intens + soft - along) / den;
+            }
+            if (k <= 0.0f) return 0;
+            return scaleCol(gradN(P, band / 15.0f), k);
+          }
+          return scaleCol(gradN(P, band / 15.0f), intens * briMul);
+        }
         case 8: { // Fill — Reveal / Wasserstand / Gezeiten
           float d = pulseDist(P, x, y);
-          float soft = P.rwidth / 100.0f; if (soft < 0.02f) soft = 0.02f;
+          float soft = (P.rwidth * szMul) / 100.0f; if (soft < 0.02f) soft = 0.02f;
           float umax = pulseUmax(P); if (umax < 0.001f) umax = 0.001f;
           float A = P.rfin * 0.1f, Dec = P.rgap * 0.1f, R = P.rfout * 0.1f;
           float S = P.tempo / 100.0f; if (S < 0) S = 0; if (S > 1) S = 1;
+          float spd = P.speed * spdMul;
 
           if (P.mode == 2) { // Tide
-            float hz = 0.05f + (P.speed / 100.0f) * 0.45f;
+            float hz = 0.05f + (spd / 100.0f) * 0.45f;
             float amp = P.duty / 100.0f; if (amp < 0.05f) amp = 0.05f; if (amp > 1) amp = 1;
-            float h = umax * (0.5f + 0.5f * amp * sinf(6.2831853f * hz * elapsed));
+            float h = umax * (0.5f + 0.5f * amp * sinf(6.2831853f * hz * elapsed)) * lvlMul;
             if (d > h + soft) return 0;
             float env = S;
             if (A > 0.0f && elapsed < A) env = S * (elapsed / A);
             if (env <= 0.0f) return 0;
-            float k = env;
+            float k = env * briMul;
             if (d > h - soft) k *= (h + soft - d) / (2.0f * soft);
             if (k < 0) k = 0;
             float gph = d / umax; if (gph < 0) gph = 0; if (gph > 1) gph = 1;
             return scaleCol(gradN(P, gph), k);
           }
           if (P.mode == 1) { // Wasserstand — pour then hold
-            if (P.speed == 0) return 0;
-            float v = (P.speed / 100.0f) * 0.6f;
+            if (spd < 0.5f) return 0;
+            float v = (spd / 100.0f) * 0.6f;
             float front = v * elapsed; if (front > umax) front = umax;
+            front *= lvlMul;
             if (d >= front + soft) return 0;
             float tLocal = (front > 1e-4f) ? (elapsed - d / v) : elapsed;
             if (tLocal < 0) tLocal = 0;
             float env = envelopeAt(tLocal, A, Dec, S, 0.0f);
             if (env <= 0.0f) return 0;
-            float k = env;
+            float k = env * briMul;
             if (d > front - soft) {
               float den = 2.0f * soft; if (den < 1e-4f) den = 1e-4f;
               k *= (front + soft - d) / den;
@@ -1007,9 +1364,9 @@ class Lichtnest : public Usermod {
           }
 
           // Reveal — wavefront + ADSR (+ global release)
-          if (P.speed == 0) return 0;
-          float v = (P.speed / 100.0f) * 0.6f;
-          float front = v * elapsed;
+          if (spd < 0.5f) return 0;
+          float v = (spd / 100.0f) * 0.6f;
+          float front = v * elapsed * lvlMul;
           if (d >= front) return 0;
           float tFill = (umax + soft) / v;
           float tRel0 = tFill + A + Dec;
@@ -1027,22 +1384,39 @@ class Lichtnest : public Usermod {
           if (env <= 0.0f) return 0;
           float gph = d / umax; if (gph < 0) gph = 0; if (gph > 1) gph = 1;
           uint32_t col = gradN(P, gph);
-          float k = env;
+          float k = env * briMul;
           if (d > front - soft) k *= (front - d) / soft;
           if (k >= 1.0f) return col;
           return scaleCol(col, k);
         }
         case 9: { // Welle — continuous sine wave across the plan (linear or radial)
           float d = pulseDist(P, x, y);
-          float lambda = P.rwidth / 100.0f; if (lambda < 0.08f) lambda = 0.08f;
-          float rate = (P.speed / 100.0f) * 0.5f;
-          float ph = rate * elapsed - d / lambda;
-          float intens = 0.5f + 0.5f * sinf(6.2831853f * ph);
+          float lambda = (P.rwidth * szMul) / 100.0f; if (lambda < 0.08f) lambda = 0.08f;
+          // elapsed is travel phase (∫rate or rate×t); live audio scales it
+          float ph = elapsed * spdMul - d / lambda;
+          float intens = (0.5f + 0.5f * sinf(6.2831853f * ph)) * briMul;
           ph -= floorf(ph);
           return scaleCol(gradN(P, ph), intens);
         }
-        case 10: // removed Tube Chase
-          return 0;
+        case 10: { // Beat-Impuls — volume/beat flashes the tube
+          uint8_t src = P.asrc ? P.asrc : 5;
+          float sig = audioSrc(src);
+          if (src == 5) sig = fmaxf(sig, audioSrc(1)); // beat or fall back to volume
+          float sens = P.again ? (P.again / 255.0f) : 1.0f;
+          float bri = sig * sens * briMul;
+          if (bri < 0.02f) return 0;
+          float soft = (P.rwidth * szMul) / 100.0f; if (soft < 0.02f) soft = 0.02f;
+          if (P.pmode == 2) { // bar height along tube
+            if (along > bri + soft) return 0;
+            float k = bri;
+            if (along > bri - soft) {
+              float den = 2.0f * soft; if (den < 1e-4f) den = 1e-4f;
+              k *= (bri + soft - along) / den;
+            }
+            return scaleCol(gradN(P, along), k);
+          }
+          return scaleCol(gradN(P, along), bri);
+        }
         case 11: { // Spotlight — directed soft cone; speed = rotation (°/s)
           float ox, oy; markerXY(P, ox, oy);
           float dx = x - ox, dy = y - oy;
@@ -1050,7 +1424,8 @@ class Lichtnest : public Usermod {
           float gph = dist; if (gph > 1.0f) gph = 1.0f;
           uint32_t base = effectCol(P, gph);
           if (dist < 1e-4f) return base;
-          float rot = (P.speed / 100.0f) * 90.0f * elapsed;
+          // elapsed is rotation degrees (∫ω or ω×t) — never speed×rawTime under tl
+          float rot = elapsed;
           float bx = cosf((P.angle + rot) * 3.14159265f / 180.0f), by = sinf((P.angle + rot) * 3.14159265f / 180.0f);
           float cA = (dx * bx + dy * by) / dist;
           if (cA > 1.0f) cA = 1.0f; if (cA < -1.0f) cA = -1.0f;
@@ -1063,7 +1438,7 @@ class Lichtnest : public Usermod {
         }
         case 12: { // Twinkle — per-LED phase offset + period; ADSR envelope + palette
           // optional cluster: rwidth > 0 limits sparks to a disc around the marker
-          float clusterR = P.rwidth / 100.0f;
+          float clusterR = (P.rwidth * szMul) / 100.0f;
           if (clusterR > 0.001f) {
             float ox, oy; markerXY(P, ox, oy);
             float dx = x - ox, dy = y - oy;
@@ -1073,7 +1448,9 @@ class Lichtnest : public Usermod {
           float S = P.tempo / 100.0f; if (S < 0) S = 0; if (S > 1) S = 1;
           float envLen = A + Dec + Rel; if (envLen < 0.05f) envLen = 0.05f;
           float dens = P.duty / 100.0f; if (dens < 0.01f) dens = 0.01f;
-          float speedK = 0.35f + (1.0f - P.speed / 100.0f) * 2.65f;   // 0.35..3.0 s base gap
+          dens = fminf(1.0f, dens * (0.35f + 0.65f * lvlMul));
+          float spd = fminf(100.0f, P.speed * spdMul);
+          float speedK = 0.35f + (1.0f - spd / 100.0f) * 2.65f;   // 0.35..3.0 s base gap
           float gapMean = speedK * (1.15f - dens * 0.95f);             // denser → shorter idle
           uint32_t h0 = zvHash((uint32_t)chainIdx, 0);
           float period = envLen + gapMean * (0.45f + ((h0 & 255u) / 255.0f) * 1.1f);
@@ -1082,16 +1459,32 @@ class Lichtnest : public Usermod {
           uint32_t cycle = (uint32_t)floorf(tAdj / period);
           float tIn = tAdj - (float)cycle * period; if (tIn < 0) tIn += period;
           if (tIn >= envLen) return 0;
-          float bri = envelopeAt(tIn, A, Dec, S, Rel);
+          float bri = envelopeAt(tIn, A, Dec, S, Rel) * briMul;
           if (bri <= 0) return 0;
           uint32_t h1 = zvHash((uint32_t)chainIdx, cycle);
           return scaleCol(gradN(P, (h1 & 255u) / 255.0f), bri);
         }
-        case 13: // removed Scanner
-          return 0;
+        case 13: { // Bass-Pegel — low-band energy as Wasserstand
+          float src = audioSrc(P.asrc ? P.asrc : 2);
+          float sens = P.again ? (P.again / 255.0f) : 1.0f;
+          float level = fminf(1.0f, src * (0.35f + 0.65f * sens)) * lvlMul;
+          float d = pulseDist(P, x, y);
+          float soft = (P.rwidth * szMul) / 100.0f; if (soft < 0.02f) soft = 0.02f;
+          float umax = pulseUmax(P); if (umax < 0.001f) umax = 0.001f;
+          float h = umax * level;
+          if (d > h + soft) return 0;
+          float k = briMul;
+          if (d > h - soft) {
+            float den = 2.0f * soft; if (den < 1e-4f) den = 1e-4f;
+            k *= (h + soft - d) / den;
+          }
+          if (k <= 0.0f) return 0;
+          float gph = d / umax; if (gph < 0) gph = 0; if (gph > 1) gph = 1;
+          return scaleCol(gradN(P, gph), k);
+        }
         case 14: { // Noise / Drift — types via mode; optional attract/repel via dir + duty
           float sc = 1.0f + (P.rwidth / 100.0f) * 6.0f;          // spatial scale 1..7
-          float drift = (P.speed / 100.0f) * 0.25f * elapsed;
+          float drift = elapsed;                                  // baked drift phase (∫ or rate×t)
           float ox, oy; markerXY(P, ox, oy);
           float nx, ny;
           if (P.pmode == 1) {
@@ -1134,7 +1527,7 @@ class Lichtnest : public Usermod {
   public:
     static const char UI_VERSION[];
 
-    void setup() override { loadGeometryFile(); initDone = true; }
+    void setup() override { resetRatePhaseAcc(); loadGeometryFile(); initDone = true; }
     void connected() override {}
 
     void loop() override {
@@ -1151,6 +1544,7 @@ class Lichtnest : public Usermod {
     // render our effect over all placed tubes, overriding the stock FX
     void handleOverlayDraw() override {
       if (!enabled || geoCount == 0) return;
+      refreshAudio();
       uint16_t chainTotal = strip.getLengthTotal();
       uint32_t nowMs = millis();
 
@@ -1176,9 +1570,24 @@ class Lichtnest : public Usermod {
       }
       else { elToRaw = (nowMs - _manualStart) / 1000.0f; }
       float elTo = elToRaw;
-      if (!toLayered) { float D = stepSeconds(to); if (D > 0.05f) elTo = fmodf(elToRaw, D); }
+      if (!toLayered) {
+        float D = stepSeconds(to);
+        if (D > 0.05f) elTo = fmodf(elToRaw, D);
+        // params follow raw step time; rate FX bake ∫rate into _resolvedToEl
+        if (_tlN > 0) resolveSnap(_tl, _tlN, elToRaw, to, _resolvedTo);
+        else _resolvedTo = to;
+        _resolvedToEl = bakeEffectPhase(_tl, _tlN, elToRaw, elTo, _resolvedTo, to, _ratePhTo, _ratePhToAt);
+      }
       bool fromLayered = tr && _trFromLayers.count > 0;
-      float elFrom = (tr && !fromLayered) ? stepSeconds(_trFrom) : 0.0f;   // outgoing effect rendered at its end (near black)
+      float elFrom = 0.0f;
+      if (tr && !fromLayered) {
+        elFrom = stepSeconds(_trFrom);
+        if (_tlFromN > 0) resolveSnap(_tlFrom, _tlFromN, elFrom > 0.05f ? elFrom : 0.0f, _trFrom, _resolvedFrom);
+        else _resolvedFrom = _trFrom;
+        _resolvedFromEl = bakeEffectPhase(_tlFrom, _tlFromN, elFrom > 0.05f ? elFrom : 0.0f, elFrom, _resolvedFrom, _trFrom, _ratePhFrom, _ratePhFromAt);
+      }
+      if (toLayered) prepareLayerResolve(toLS, elToRaw, false, false);
+      if (tr && fromLayered) prepareLayerResolve(_trFromLayers, 0.0f, true, true);
 
       for (uint8_t g = 0; g < geoCount; g++) {
         if (geoId[g] >= strip.getSegmentsNum()) continue;
@@ -1192,11 +1601,11 @@ class Lichtnest : public Usermod {
           uint32_t c;
           uint32_t cTo;
           if (toWait) cTo = 0;                                                          // pause -> black
-          else if (toLayered) cTo = renderStack(toLS, elToRaw, false, x, y, i, chainTotal, g, geoCount, f);
-          else cTo = computeColor(to, elTo, x, y, i, chainTotal, g, geoCount, f);
+          else if (toLayered) cTo = renderStack(toLS, elToRaw, false, false, x, y, i, chainTotal, g, geoCount, f);
+          else cTo = computeColor(_resolvedTo, _resolvedToEl, x, y, i, chainTotal, g, geoCount, f);
           if (tr) {
-            uint32_t a = fromLayered ? renderStack(_trFromLayers, 0.0f, true, x, y, i, chainTotal, g, geoCount, f)
-                                     : computeColor(_trFrom, elFrom, x, y, i, chainTotal, g, geoCount, f);
+            uint32_t a = fromLayered ? renderStack(_trFromLayers, 0.0f, true, true, x, y, i, chainTotal, g, geoCount, f)
+                                     : computeColor(_resolvedFrom, _resolvedFromEl, x, y, i, chainTotal, g, geoCount, f);
             c = applyTransition(a, cTo, trProg, x, y, i, g);
           } else {
             c = cTo;
@@ -1233,7 +1642,8 @@ class Lichtnest : public Usermod {
       o["ph"] = elMs / 1000.0f;            // seconds into the current step (effects render from elapsed)
       JsonObject p = o.createNestedObject("p");
       writeParams(p, A);
-      if (AL.count > 0) writeLayers(o.createNestedArray("layers"), AL);
+      if (_tlN > 0) writeTlArr(o.createNestedArray("tl"), _tl, _tlN);
+      if (AL.count > 0) writeLayers(o.createNestedArray("layers"), AL, _tlL, _tlLN);
       // device wall clock (NTP / browser JSON time) for schedule UI
       JsonObject clk = o.createNestedObject("clock");
       clk["h"] = (uint8_t)hour(localTime);
@@ -1241,6 +1651,12 @@ class Lichtnest : public Usermod {
       clk["s"] = (uint8_t)second(localTime);
       clk["ok"] = clockOk();
       // live playback state for the UI's player
+      // live mic level for System / Start meters (0..255)
+      refreshAudio();
+      JsonObject au = o.createNestedObject("audio");
+      au["ok"] = _arOk;
+      au["lvl"] = (uint8_t)fminf(255.0f, _arVol * 255.0f + 0.5f);
+      au["peak"] = _arPeak ? true : false;
       JsonObject pl = o.createNestedObject("pl");
       pl["active"] = _plActive;
       pl["loop"]   = _plLoop;
@@ -1273,7 +1689,7 @@ class Lichtnest : public Usermod {
       if (o.containsKey("loop"))   _plLoop = o["loop"] | _plLoop;
       if (o.containsKey("reload") && (o["reload"] | false)) {
         refreshSchedCache();
-        if (_plActive) { uint8_t i = _plIdx; loadPlaylist(_plId); if (i < _stepCount) _plIdx = i; }
+        if (_plActive) { uint8_t i = _plIdx; loadPlaylist(_plId); if (i < _stepCount) { _plIdx = i; loadActiveTl(i); } }
       }
       if (o.containsKey("play")) {
         const char* id = o["play"] | (const char*)nullptr;
@@ -1292,13 +1708,30 @@ class Lichtnest : public Usermod {
         _plActive = false; _trActive = false;
         _manual.fx = o["fx"] | _manual.fx;
         parseParams(o["p"], _manual);
-        if (o.containsKey("layers")) parseLayers(o["layers"], _manualLayers);
+        _tlN = 0; _manualTlEnd = 0;
+        for (uint8_t li = 0; li < ZV_MAXLAYERS; li++) _tlLN[li] = 0;
+        if (o.containsKey("tl")) {
+          if (o["tl"].isNull()) _tlN = 0;
+          else _tlN = parseTlArr(o["tl"], _tl, ZV_MAXSNAP);
+          _manualTlEnd = tlEndFromSnaps(_tl, _tlN);
+        }
+        if (o.containsKey("layers")) parseLayers(o["layers"], _manualLayers, _tlL, _tlLN);
         else if (_manual.fx != 4) _manualLayers.count = 0;   // leaving "Kombiniert" without new layers -> clear the stack
         _manualStart = millis();            // restart the manual effect's timeline
+        resetRatePhaseAcc();
         _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;   // fresh Zufall-strobe state
       } else {
         if (o.containsKey("p")) parseParams(o["p"], activeParams());
-        if (o.containsKey("layers")) parseLayers(o["layers"], activeLayers());
+        if (o.containsKey("tl")) {
+          if (o["tl"].isNull()) {
+            _tlN = 0; _manualTlEnd = 0;
+            for (uint8_t li = 0; li < ZV_MAXLAYERS; li++) _tlLN[li] = 0;
+          } else {
+            _tlN = parseTlArr(o["tl"], _tl, ZV_MAXSNAP);
+            _manualTlEnd = tlEndFromSnaps(_tl, _tlN);
+          }
+        }
+        if (o.containsKey("layers")) parseLayers(o["layers"], activeLayers(), _tlL, _tlLN);
       }
 
       // --- geometry ---
@@ -1398,6 +1831,7 @@ class Lichtnest : public Usermod {
       P.tail = p["tail"] | P.tail; P.dir = p["dir"] | P.dir; P.tempo = p["tempo"] | P.tempo; P.breathe = p["breathe"] | P.breathe;
       P.rfin = p["rfin"] | P.rfin; P.rfout = p["rfout"] | P.rfout; P.rwidth = p["rwidth"] | P.rwidth; P.rgap = p["rgap"] | P.rgap;
       P.count = p["count"] | P.count; P.interval = p["interval"] | P.interval; P.cpar = p["cpar"] | P.cpar;
+      P.asrc = p["asrc"] | P.asrc; P.amod = p["amod"] | P.amod; P.again = p["again"] | P.again;
       JsonArray sc = p["scols"];                             // strobe palette
       if (!sc.isNull()) { P.scount = 0; for (JsonVariant v : sc) { if (P.scount >= ZV_MAXPAL) break; if (v.is<JsonArray>() && v.size() >= 3) P.scols[P.scount++] = RGBW32((uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], 0); } }
       // keyframes: strobe (fx1) uses hzKeys (t,v); solid (fx3) uses keys (t,v,c). Parse ONLY the
@@ -1430,6 +1864,7 @@ class Lichtnest : public Usermod {
       p["tail"] = P.tail; p["dir"] = P.dir; p["tempo"] = P.tempo; p["breathe"] = P.breathe;
       p["rfin"] = P.rfin; p["rfout"] = P.rfout; p["rwidth"] = P.rwidth; p["rgap"] = P.rgap;
       p["count"] = P.count; p["interval"] = P.interval; p["cpar"] = P.cpar;
+      p["asrc"] = P.asrc; p["amod"] = P.amod; p["again"] = P.again;
       if (P.scount) {                                       // strobe palette
         JsonArray sc = p.createNestedArray("scols");
         for (uint8_t i = 0; i < P.scount; i++) { JsonArray a = sc.createNestedArray(); a.add(cR(P.scols[i])); a.add(cG(P.scols[i])); a.add(cB(P.scols[i])); }
@@ -1443,17 +1878,110 @@ class Lichtnest : public Usermod {
         }
       }
     }
+    static uint8_t parseTlArr(JsonVariant v, FxSnap* out, uint8_t maxN) {
+      JsonArray arr = v.as<JsonArray>();
+      if (arr.isNull()) return 0;
+      uint8_t n = 0;
+      uint8_t lm = 1; float lg = 1.0f; uint8_t lx = 1;
+      bool haveMeta = false;
+      for (JsonObject so : arr) {
+        if (n >= maxN) break;
+        out[n].t = so["t"] | 0.0f;
+        int xf = so["xf"] | 0;
+        out[n].xf = (uint8_t)constrain(xf, 0, 2);
+        out[n].p = FxParams();
+        JsonObject po = so["p"];
+        if (!po.isNull()) parseParams(po, out[n].p);
+        if (!haveMeta && (!so["lm"].isNull() || !so["lg"].isNull() || !so["lx"].isNull())) {
+          lm = (uint8_t)constrain((int)(so["lm"] | 1), 0, 2);
+          lg = so["lg"] | 1.0f; if (lg < 0) lg = 0; if (lg > 60) lg = 60;
+          lx = (uint8_t)constrain((int)(so["lx"] | 1), 0, 2);
+          haveMeta = true;
+        }
+        out[n].lm = 1; out[n].lg = 1.0f; out[n].lx = 1;
+        n++;
+      }
+      for (uint8_t i = 1; i < n; i++) {
+        FxSnap kf = out[i]; int8_t j = (int8_t)i - 1;
+        while (j >= 0 && out[j].t > kf.t) { out[j + 1] = out[j]; j--; }
+        out[j + 1] = kf;
+      }
+      if (n) { out[0].lm = lm; out[0].lg = lg; out[0].lx = lx; }
+      // nudge duplicate times (mirrors web normalizeTl)
+      for (uint8_t i = 1; i < n; i++) {
+        if (out[i].t <= out[i - 1].t) out[i].t = out[i - 1].t + 0.01f;
+      }
+      return n;
+    }
+    static void writeTlArr(JsonArray arr, const FxSnap* snaps, uint8_t n) {
+      for (uint8_t i = 0; i < n; i++) {
+        JsonObject so = arr.createNestedObject();
+        so["t"] = snaps[i].t;
+        so["xf"] = snaps[i].xf;
+        if (i == 0) {
+          so["lm"] = snaps[0].lm;
+          so["lg"] = snaps[0].lg;
+          so["lx"] = snaps[0].lx;
+        }
+        JsonObject po = so.createNestedObject("p");
+        writeParams(po, snaps[i].p);
+      }
+    }
+    void clearActiveTl() {
+      _tlN = 0;
+      for (uint8_t li = 0; li < ZV_MAXLAYERS; li++) _tlLN[li] = 0;
+    }
+    void copyTlToFrom() {
+      _tlFromN = _tlN;
+      for (uint8_t i = 0; i < _tlN; i++) _tlFrom[i] = _tl[i];
+      for (uint8_t li = 0; li < ZV_MAXLAYERS; li++) {
+        _tlFromLN[li] = _tlLN[li];
+        for (uint8_t j = 0; j < _tlLN[li]; j++) _tlFromL[li][j] = _tlL[li][j];
+      }
+    }
+    void loadActiveTl(int stepIdx) {
+      clearActiveTl();
+      if (stepIdx < 0 || stepIdx >= _stepCount || _plId[0] == '\0') return;
+      if (!WLED_FS.exists("/lichtnest_playlists.json")) return;
+      File f = WLED_FS.open("/lichtnest_playlists.json", "r");
+      if (!f) return;
+      size_t sz = f.size();
+      size_t cap = sz * 4 + 3072; if (cap > 40960) cap = 40960;
+      DynamicJsonDocument doc(cap);
+      if (deserializeJson(doc, f) != DeserializationError::Ok) { f.close(); return; }
+      f.close();
+      JsonArray list = doc["list"];
+      if (list.isNull()) return;
+      JsonObject pl;
+      for (JsonObject p : list) if (strcmp(p["id"] | "", _plId) == 0) { pl = p; break; }
+      if (pl.isNull()) return;
+      JsonArray items = pl["items"];
+      if (items.isNull() || stepIdx >= (int)items.size()) return;
+      JsonObject it = items[stepIdx];
+      if (it.isNull() || (strcmp(it["kind"] | "fx", "tr") == 0)) return;
+      if (!it["tl"].isNull()) _tlN = parseTlArr(it["tl"], _tl, ZV_MAXSNAP);
+      JsonArray layers = it["layers"];
+      if (!layers.isNull()) {
+        uint8_t li = 0;
+        for (JsonObject lo : layers) {
+          if (li >= ZV_MAXLAYERS) break;
+          if (!lo["tl"].isNull()) _tlLN[li] = parseTlArr(lo["tl"], _tlL[li], ZV_MAXSNAP);
+          li++;
+        }
+      }
+    }
     // "Kombiniert" layer stack: each entry reuses parseParams/writeParams for its own
     // `p`, plus the layer's own marker/radius/falloff/blend/enabled/sched fields.
     // sched.period/duration travel the wire in whole SECONDS (float); stored internally
     // in tenths of a second, matching the firmware's other decisecond fields (e.g. `interval`).
-    static void parseLayers(JsonVariant v, LayerStack& LS) {
+    static void parseLayers(JsonVariant v, LayerStack& LS, FxSnap (*tlOut)[ZV_MAXSNAP] = nullptr, uint8_t* tlOutN = nullptr) {
       JsonArray arr = v.as<JsonArray>();
       if (arr.isNull()) return;   // key absent from this patch -> leave the stack as-is
       LS.count = 0;
+      if (tlOutN) for (uint8_t li = 0; li < ZV_MAXLAYERS; li++) tlOutN[li] = 0;
       for (JsonObject lo : arr) {
         if (LS.count >= ZV_MAXLAYERS) break;
-        FxLayer& L = LS.layers[LS.count++];
+        FxLayer& L = LS.layers[LS.count];
         L = FxLayer();            // fresh replace (not a merge) — mirrors the array-replace semantics of `layers`
         L.p.fx = lo["fx"] | (uint8_t)0;
         parseParams(lo["p"], L.p);
@@ -1462,21 +1990,26 @@ class Lichtnest : public Usermod {
         L.falloff = lo["falloff"] | (uint8_t)20;
         L.blend   = lo["blend"]   | (uint8_t)0;
         L.enabled = lo["enabled"] | true;
+        if (tlOut && tlOutN && !lo["tl"].isNull()) {
+          tlOutN[LS.count] = parseTlArr(lo["tl"], tlOut[LS.count], ZV_MAXSNAP);
+        }
         JsonObject sc = lo["sched"];
         if (!sc.isNull()) {
           L.schedMode = sc["mode"] | (uint8_t)0;
           float per = sc["period"]   | 30.0f; L.period   = (uint16_t)(per * 10.0f + 0.5f);
           float dur = sc["duration"] | 4.0f;  L.duration = (uint16_t)(dur * 10.0f + 0.5f);
         }
+        LS.count++;
       }
     }
-    static void writeLayers(JsonArray arr, LayerStack& LS) {
+    static void writeLayers(JsonArray arr, LayerStack& LS, const FxSnap (*tlIn)[ZV_MAXSNAP] = nullptr, const uint8_t* tlInN = nullptr) {
       for (uint8_t i = 0; i < LS.count; i++) {
         FxLayer& L = LS.layers[i];
         JsonObject lo = arr.createNestedObject();
         lo["fx"] = L.p.fx;
         JsonObject p = lo.createNestedObject("p");
         writeParams(p, L.p);
+        if (tlIn && tlInN && tlInN[i] > 0) writeTlArr(lo.createNestedArray("tl"), tlIn[i], tlInN[i]);
         lo["marker"] = L.marker; lo["radius"] = L.radius; lo["falloff"] = L.falloff;
         lo["blend"] = L.blend; lo["enabled"] = L.enabled;
         JsonObject sc = lo.createNestedObject("sched");
@@ -1524,7 +2057,9 @@ class Lichtnest : public Usermod {
       _trActive = false;
       _plIdx = (uint8_t)idx;
       _plStepStart = millis();
+      resetRatePhaseAcc();
       _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;
+      loadActiveTl(idx);
     }
     // play transition row trIdx, blending fromEffect → destination effect after the row
     void enterTransition(int fromEffectIdx, int trIdx) {
@@ -1544,6 +2079,8 @@ class Lichtnest : public Usermod {
       }
       _trFrom = _steps[fromEffectIdx].p;
       _trFromLayers = _steps[fromEffectIdx].ls;
+      copyTlToFrom();
+      loadActiveTl(dest);
       _trToIdx = (uint8_t)dest;
       _trType = _steps[trIdx].trType;
       _trDurMs = _steps[trIdx].trDurMs > 0 ? _steps[trIdx].trDurMs : 1000;
@@ -1555,6 +2092,7 @@ class Lichtnest : public Usermod {
       if (_trType == TR_CASCADE) buildTubeOrder();
       _plIdx = (uint8_t)trIdx;
       _plStepStart = millis();
+      resetRatePhaseAcc();
       _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;
     }
     // advance after the current row finishes (or on next): effect→transition→effect, or hard cut
@@ -1570,13 +2108,16 @@ class Lichtnest : public Usermod {
       if (_steps[n].isTr) enterTransition(_plIdx, n);
       else if (_steps[n].trDurMs > 0) {
         // legacy: transition params still on the destination effect row
+        copyTlToFrom();
         _trFrom = _steps[_plIdx].p; _trFromLayers = _steps[_plIdx].ls;
+        loadActiveTl(n);
         _trToIdx = (uint8_t)n;
         _trType = _steps[n].trType; _trDurMs = _steps[n].trDurMs;
         _trDir = _steps[n].trDir; _trEase = _steps[n].trEase; _trUnit = _steps[n].trUnit;
         _trActive = true; _trStart = millis();
         if (_trType == TR_CASCADE) buildTubeOrder();
         _plIdx = (uint8_t)n; _plStepStart = millis();
+        resetRatePhaseAcc();
         _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;
       } else enterEffect(n);
     }
@@ -1749,6 +2290,7 @@ class Lichtnest : public Usermod {
       _plSchedHour = (uint8_t)constrain(sh, 0, 23);
       _plSchedMinute = (uint8_t)constrain(sm, 0, 59);
       _stepCount = 0;
+      memset(_stepTlEnd, 0, sizeof(_stepTlEnd));
       JsonArray items = pl["items"];
       for (JsonObject it : items) {
         if (_stepCount >= ZV_MAXSTEPS) break;
@@ -1772,6 +2314,13 @@ class Lichtnest : public Usermod {
           s.p.fx = it["fx"] | 3;
           parseParams(it["p"], s.p);
           parseLayers(it["layers"], s.ls);
+          s.tlEnd = 0;
+          if (!it["tl"].isNull()) {
+            FxSnap tmp[ZV_MAXSNAP];
+            uint8_t tn = parseTlArr(it["tl"], tmp, ZV_MAXSNAP);
+            s.tlEnd = tlEndFromSnaps(tmp, tn);
+          }
+          _stepTlEnd[_stepCount] = s.tlEnd;
           float durS = it["dur"] | 10.0f; s.durMs = (uint32_t)(durS * 1000.0f);
           float delS = it["delay"] | 0.0f; s.delayMs = delS > 0 ? (uint32_t)(delS * 1000.0f) : 0;
           // legacy: transition fields on the effect itself (pre row-based model) — kept so
@@ -1827,7 +2376,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.2";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.3";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);

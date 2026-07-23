@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { wled, actions, liveFxP } from '../wled.js'
+import { wled, actions, liveFxP, lichtnest, audioReactive } from '../wled.js'
 import { effectById } from '../effects.js'
 import MiniPlan from '../components/MiniPlan.vue'
 import PlaylistPlayer from '../components/PlaylistPlayer.vue'
@@ -8,6 +8,8 @@ import PlaylistPlayer from '../components/PlaylistPlayer.vue'
 const emit = defineEmits(['navigate'])
 
 const briPct = computed(() => Math.round((wled.bri / 255) * 100))
+const micOn = computed(() => audioReactive.on || lichtnest.audio.ok)
+const micLvlPct = computed(() => Math.round(((lichtnest.audio.lvl || 0) / 255) * 100))
 const eff = computed(() => effectById(liveFxP().fx))   // playing step while a playlist runs
 const fx = computed(() => eff.value.name)
 const ledCount = computed(() => wled.info.leds?.count ?? 0)
@@ -72,6 +74,18 @@ const paramSummary = computed(() => {
       <input type="range" min="0" max="255" :value="wled.bri" @input="actions.setBri(+$event.target.value)" style="width:100%;height:26px">
     </div>
 
+    <!-- mic level (when AudioReactive is on) -->
+    <div v-if="micOn" class="panel pad mic" @click="emit('navigate', 'system')">
+      <div class="row">
+        <span class="rowlbl">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"><rect x="9" y="2" width="6" height="11" rx="3" /><path d="M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8" /></svg>
+          Mikrofon
+        </span>
+        <span class="mono val" :class="{ peak: lichtnest.audio.peak }">{{ micLvlPct }}%</span>
+      </div>
+      <div class="meter"><div class="fill" :style="{ width: micLvlPct + '%' }" :class="{ peak: lichtnest.audio.peak }" /></div>
+    </div>
+
     <!-- stats -->
     <div class="stats">
       <div class="stat"><div class="mono num">{{ ledCount }}</div><div class="sub">LEDs gesamt</div></div>
@@ -99,9 +113,14 @@ const paramSummary = computed(() => {
 
 .pad { padding: 16px 18px; }
 .bri { margin-top: 14px; }
+.mic { margin-top: 10px; cursor: pointer; }
 .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .rowlbl { font-size: 13px; font-weight: 600; color: var(--text2); display: flex; align-items: center; gap: 9px; }
 .val { font-size: 13px; color: var(--text); }
+.val.peak { color: #e0614f; }
+.meter { height: 10px; border-radius: 999px; background: var(--inset); border: 1px solid var(--line); overflow: hidden; }
+.meter .fill { height: 100%; background: var(--accent); transition: width .08s linear; }
+.meter .fill.peak { background: #e0614f; }
 
 .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 14px; }
 .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }

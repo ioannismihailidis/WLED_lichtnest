@@ -8,17 +8,25 @@ import { fxColor, phaseRate, strobePhaseAt, strobeDuration, solidPhaseAt, solidD
 import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulseUmax, fillDuration, fillColorAt } from '../impulse.js'
 import { buildMarblePath, marbleLedS, marblePositions, marbleColorAt, marbleDuration, pendulumColorAt } from '../gravity.js'
 import { applyTransition, buildTubeOrder } from '../transitions.js'
-import { sampleEffect } from '../previewSample.js'
+import { sampleEffect, beginSampleFrame } from '../previewSample.js'
 import { setPreviewElapsed } from '../previewClock.js'
 
 // optional fx/p override (e.g. a playlist step); `local` free-runs its own clock;
 // bumping `restartKey` replays from 0. `timeline` is kept for callers (playlist step length)
 // but continuous effects must NOT wrap on it — that caused a visible jump every N seconds.
-const props = defineProps({ fx: { type: Number, default: null }, p: { type: Object, default: null }, layers: { type: Array, default: null }, delay: { type: Number, default: 0 }, local: { type: Boolean, default: false }, restartKey: { type: Number, default: 0 }, timeline: { type: Number, default: 8 } })
+const props = defineProps({
+  fx: { type: Number, default: null }, p: { type: Object, default: null }, layers: { type: Array, default: null },
+  tl: { type: Array, default: null }, delay: { type: Number, default: 0 }, local: { type: Boolean, default: false },
+  restartKey: { type: Number, default: 0 },
+  seekT: { type: Number, default: null },
+  seekGen: { type: Number, default: 0 },
+  timeline: { type: Number, default: 8 },
+})
 // no props + non-local = live device mirror -> playing step (full file params) while a playlist runs
 const efx = () => (props.fx != null ? props.fx : (props.local ? lichtnest.fx : liveFxP().fx))
 const ep = () => (props.p != null ? props.p : (props.local ? lichtnest.p : liveFxP().p))
 const elayers = () => (props.layers != null ? props.layers : (props.local ? lichtnest.layers : liveFxP().layers))
+const etl = () => (props.tl != null ? props.tl : (props.local ? lichtnest.tl : liveFxP().tl))
 const edelay = () => (props.fx != null ? props.delay : (props.local ? 0 : (liveFxP().delay || 0)))
 const CORNERS = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }]
 // radial origin: a named marker if `p.origin` picks one, else the placed tubes' centroid
@@ -27,9 +35,9 @@ function origin (p) {
   for (const s of (wled.segments || [])) { const c = plan.tubes[s.id]; if (c) list.push(c) }
   return effectOrigin(p, list)
 }
-let lph = 0, lts = 0, lelapsed = 0
+let lph = 0, lts = 0, lraw = 0
 let sTs = 0, sElapsed = 0   // free-running raw clock for the "Kombiniert" (layered) path
-// natural finite duration (mirrors firmware stepSeconds) — 0 = continuous / free-run, no wrap
+// natural finite duration — snapshot `tl` does not extend this
 const stepDur = (fx, p, umax, pathTotal = 1) => (
   fx === 0 ? impulseDuration(p, umax)
     : fx === 1 ? strobeDuration(p)
@@ -42,34 +50,38 @@ function frame (fx, p, umax, pathTotal = 1) {
   const now = performance.now(); let dt = lts ? (now - lts) / 1000 : 0; lts = now
   if (!(dt > 0 && dt < 1)) dt = 0
   const delay = edelay()
-  let elapsed
-  if (!props.local && wled.pl.active && wled.pl.durMs > 0) {   // overall preview: follow the running step
-    elapsed = Math.min(wled.pl.durMs, wled.pl.elapsedMs + (Date.now() - wled.pl.syncAt)) / 1000
+  let paramElapsed
+  if (!props.local && wled.pl.active && wled.pl.durMs > 0) {
+    paramElapsed = Math.min(wled.pl.durMs, wled.pl.elapsedMs + (Date.now() - wled.pl.syncAt)) / 1000
   } else {
-    const dur = stepDur(fx, p, umax, pathTotal)
-    // only impulse/strobe/solid/fill/marble wrap (seamless black→black or keyframe cycle);
-    // ambient effects free-run so their phase never jumps (matches firmware)
-    if (dur > 0.05) lelapsed = (lelapsed + dt) % (delay + dur)
-    else lelapsed += dt
-    elapsed = lelapsed
+    lraw += dt
+    paramElapsed = lraw
   }
-  elapsed -= delay
-  const wait = elapsed < 0                                     // in the pause before the effect
-  if (wait) elapsed = 0
+  paramElapsed -= delay
+  const wait = paramElapsed < 0
+  if (wait) paramElapsed = 0
+  const dur = stepDur(fx, p, umax, pathTotal)
+  const elapsed = (!wait && dur > 0.05) ? (paramElapsed % dur) : paramElapsed
   let phase
   if (fx === 1) phase = strobePhaseAt(p, elapsed)
   else if (fx === 3) phase = solidPhaseAt(p, elapsed)
   else if (fx === 2 || fx === 5 || fx === 6 || fx === 9 || fx === 11 || fx === 12 || fx === 14) phase = elapsed * phaseRate(fx, p, wled.info.leds?.count || 1)
   else { lph += dt * phaseRate(fx, p, wled.info.leds?.count || 1); phase = lph }
-  return { elapsed, phase, wait }
+  return { elapsed, paramElapsed, phase, wait }
 }
-watch(() => props.restartKey, () => { lph = 0; lts = 0; lelapsed = 0; sTs = 0; sElapsed = 0 })
+watch(() => props.restartKey, () => { lph = 0; lts = 0; lraw = 0; sTs = 0; sElapsed = 0 })
+watch(() => props.seekGen, () => {
+  const t = props.seekT
+  if (t == null || !(t >= 0)) return
+  lraw = t; sElapsed = t; lts = 0; sTs = 0
+})
 
 const canvas = ref(null)
 let raf = 0
 let buf = null, bctx = null
 
 function draw () {
+  beginSampleFrame()
   const c = canvas.value
   if (!c) { raf = requestAnimationFrame(draw); return }
   const dpr = Math.min(2, window.devicePixelRatio || 1)
@@ -150,22 +162,22 @@ function draw () {
     return
   }
 
-  const [cx, cy] = origin(pp)
   const geo = tubeGeometry()
+  const [cx0, cy0] = origin(pp)
   let umax = 1
   if (fx === 0 || fx === 6 || fx === 8) {
     const pts = []
     const src = (fx === 6 && geo.length) ? geo : null
     if (src) for (const t of src) pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 })
-    umax = impulseUmax(pp, pts.length ? pts : CORNERS, cx, cy)
+    umax = impulseUmax(pp, pts.length ? pts : CORNERS, cx0, cy0)
   }
   const marblePath = fx === 5
     ? buildMarblePath(geo.length ? geo : CORNERS.map((c) => ({ x1: c.x, y1: c.y, x2: c.x, y2: c.y })), pp.dir || 0, pp.hz ?? 8)
     : null
-  const { elapsed, phase: t, wait } = frame(fx, pp, umax, marblePath ? marblePath.total : 1)
-  setPreviewElapsed(elapsed)
-  const positions = fx === 0 ? impulsePositions(pp, elapsed) : (fx === 5 ? marblePositions(pp, elapsed, marblePath.total) : null)
-  const rp = fx === 3 ? { ...pp, color: solidColorAt(pp, elapsed) } : pp   // solid: colour over time
+  const { elapsed, paramElapsed, wait } = frame(fx, pp, umax, marblePath ? marblePath.total : 1)
+  setPreviewElapsed(paramElapsed)
+  const list = geo.length ? geo : CORNERS.map((c, i) => ({ x1: c.x, y1: c.y, x2: c.x, y2: c.y, start: i, leds: 1 }))
+  const originFn = (p) => effectOrigin(p, geo)
   const img = bctx.createImageData(bw, bh)
   for (let gy = 0; gy < bh; gy++) {
     for (let gx = 0; gx < bw; gx++) {
@@ -174,11 +186,9 @@ function draw () {
       const tubeIdx = Math.min(N - 1, Math.floor(x * N))         // map x to a real tube (strobe is per-tube)
       let col = [22, 24, 28]
       if (on && !wait) {
-        if (fx === 0) col = impulseColorAt(positions, pp, impulseDist(pp, x, y, cx, cy, idx, total), umax)
-        else if (fx === 5) col = marbleColorAt(positions, pp, marbleLedS(marblePath, tubeIdx, x), marblePath)
-        else if (fx === 6) col = pendulumColorAt(pp, x, y, cx, cy, elapsed, umax)
-        else if (fx === 8) col = fillColorAt(pp, impulseDist(pp, x, y, cx, cy), elapsed, umax)
-        else col = fxColor(fx, rp, x, y, idx, total, tubeIdx, N, t, cx, cy, x)
+        col = sampleEffect({ fx, p: pp, layers: elayers(), tl: etl() }, {
+          x, y, pix: idx, tubeIdx, nTubes: N, total, list, originFn, along: x, elapsed, paramElapsed, frozen: false,
+        })
       }
       const o = (gy * bw + gx) * 4
       img.data[o] = col[0] | 0; img.data[o + 1] = col[1] | 0; img.data[o + 2] = col[2] | 0; img.data[o + 3] = 255

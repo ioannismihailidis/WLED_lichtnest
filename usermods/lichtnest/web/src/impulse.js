@@ -73,9 +73,31 @@ export function impulseDuration (p, umax) {
   return (N - 1) * iv + (umax + w) / v + 0.2
 }
 
+function previewAudioMods (p) {
+  // keep in sync with fxsim.simAudioMods (avoid circular import at module eval)
+  let briMul = 1, szMul = 1
+  const asrc = p.asrc || 0, again = p.again || 0
+  if (!asrc || !again) return { briMul, szMul, lvlMul: 1, spdMul: 1 }
+  const t = performance.now() / 1000
+  let sig = 0.4 + 0.4 * (0.5 + 0.5 * Math.sin(t * 3.2))
+  if (asrc === 5) sig = (Math.sin(t * 6.2) > 0.82) ? 1 : 0
+  else if (asrc === 2) sig = 0.35 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2.1))
+  else if (asrc === 3) sig = 0.3 + 0.4 * (0.5 + 0.5 * Math.sin(t * 4.7))
+  else if (asrc === 4) sig = 0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t * 9.3))
+  const af = 1 - again / 255 + (again / 255) * sig
+  const amod = p.amod || 0
+  let spdMul = 1, lvlMul = 1
+  if (amod === 0) briMul = af
+  else if (amod === 1) spdMul = Math.max(0.05, af)
+  else if (amod === 2) szMul = Math.max(0.05, af)
+  else if (amod === 3) lvlMul = af
+  return { briMul, spdMul, szMul, lvlMul }
+}
+
 // colour at distance d: frontmost covering band, gradient across its width (black→colour→black)
 export function impulseColorAt (positions, p, d, umax = 1) {
-  const w = impulseWidth(p)
+  const { briMul, szMul } = previewAudioMods(p)
+  const w = Math.max(0.02, impulseWidth(p) * szMul)
   const travel = Math.max(0.001, umax + w)
   const bounce = !!p.bounce
   const ease = bounce ? 0 : (p.mode || 0)
@@ -92,7 +114,7 @@ export function impulseColorAt (positions, p, d, umax = 1) {
   }
   if (bestg > 1) return [0, 0, 0]
   const { A, D, S, R } = adsrParts(p)
-  const bri = envelopeUnit(bestg, A, D, S, R)
+  const bri = envelopeUnit(bestg, A, D, S, R) * briMul
   if (bri <= 0) return [0, 0, 0]
   const col = gradN(bestg, fadeCols(p), fadeCw(p))
   return bri >= 1 ? col : scale3(col, bri)
@@ -165,21 +187,22 @@ function fillEnv (p, elapsed, tHit, tFill) {
   return envelopeAt(elapsed - tHit, A, D, S, 0)
 }
 export function fillColorAt (p, d, elapsed, umax) {
-  const soft = fillSoft(p)
+  const { briMul, spdMul, szMul, lvlMul } = previewAudioMods(p)
+  const soft = Math.max(0.02, fillSoft(p) * szMul)
   const u = Math.max(0.001, umax)
   const mode = p.mode || 0
 
   // mode 2 Tide — oscillating waterline; duty = amplitude
   if (mode === 2) {
-    const hz = 0.05 + ((p.speed ?? 42) / 100) * 0.45
+    const hz = 0.05 + (((p.speed ?? 42) * spdMul) / 100) * 0.45
     const amp = Math.max(0.05, Math.min(1, (p.duty ?? 55) / 100))
-    const h = u * (0.5 + 0.5 * amp * Math.sin(2 * Math.PI * hz * elapsed))
+    const h = u * (0.5 + 0.5 * amp * Math.sin(2 * Math.PI * hz * elapsed)) * lvlMul
     if (d > h + soft) return [0, 0, 0]
     const { A, S } = adsrParts(p)
     let env = S
     if (A > 0 && elapsed < A) env = S * (elapsed / A)
     if (env <= 0) return [0, 0, 0]
-    let k = env
+    let k = env * briMul
     if (d > h - soft) k *= Math.max(0, (h + soft - d) / (2 * soft))
     const col = gradN(Math.max(0, Math.min(1, d / u)), fadeCols(p), fadeCw(p))
     return k >= 1 ? col : scale3(col, k)
@@ -187,30 +210,30 @@ export function fillColorAt (p, d, elapsed, umax) {
 
   // mode 1 Wasserstand — pour to full then hold (no global release)
   if (mode === 1) {
-    const v = impulseSpeed(p)
+    const v = impulseSpeed(p) * spdMul
     if (v <= 0) return [0, 0, 0]
-    const front = Math.min(u, v * elapsed)
+    const front = Math.min(u, v * elapsed) * lvlMul
     if (d >= front + soft) return [0, 0, 0]
     const { A, D, S } = adsrParts(p)
     const tLocal = front > 1e-4 ? Math.max(0, elapsed - d / v) : elapsed
     let env = envelopeAt(tLocal, A, D, S, 0)
     if (env <= 0) return [0, 0, 0]
-    let k = env
+    let k = env * briMul
     if (d > front - soft) k *= Math.max(0, (front + soft - d) / (2 * soft || 1e-4))
     const col = gradN(Math.max(0, Math.min(1, d / u)), fadeCols(p), fadeCw(p))
     return k >= 1 ? col : scale3(col, k)
   }
 
   // mode 0 Reveal — classic wavefront + ADSR (+ global release)
-  const v = impulseSpeed(p)
+  const v = impulseSpeed(p) * spdMul
   if (v <= 0) return [0, 0, 0]
-  const front = v * elapsed
+  const front = v * elapsed * lvlMul
   if (d >= front) return [0, 0, 0]
   const tFill = (u + soft) / v
   const env = fillEnv(p, elapsed, d / v, tFill)
   if (env <= 0) return [0, 0, 0]
   const col = gradN(Math.max(0, Math.min(1, d / u)), fadeCols(p), fadeCw(p))
-  let k = env
+  let k = env * briMul
   if (d > front - soft) k *= (front - d) / soft
   return k >= 1 ? col : scale3(col, k)
 }

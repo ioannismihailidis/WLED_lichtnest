@@ -178,6 +178,7 @@ const statusText = computed(() => {
 .brandname { font-size: 19px; font-weight: 800; color: var(--text); letter-spacing: -.01em; }
 .navlist {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  overscroll-behavior: contain;
   display: flex; flex-direction: column; gap: 2px;
   scrollbar-width: none;
 }
@@ -229,7 +230,7 @@ const statusText = computed(() => {
   padding: 14px 22px 6px; font-size: 12px; color: var(--muted2);
 }
 .statusbar .status { margin: 0; }
-.content { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.content { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 
 .tabbar {
   flex: none; display: flex; justify-content: space-around;
