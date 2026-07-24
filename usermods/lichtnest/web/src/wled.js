@@ -5,14 +5,18 @@
 //   POST /json/state    -> apply a partial state, returns new state
 //   WS   /ws            -> live { state, info } pushes
 //
-// When served from the device the base is same-origin. For local dev
-// (`npm run dev`) point it at the device with ?host=http://4.3.2.1 (remembered
-// in localStorage, same idea as WLED's file mode).
+// When served from the device the base is same-origin. For local dev:
+//   npm run dev                         → offline "Lokales Projekt" (no device)
+//   ZV_HOST=http://ip npm run dev       → Vite proxies API/WS (same-origin)
+//   npm run dev + ?host=http://ip       → browser talks to device directly (CORS)
 import { reactive } from 'vue'
 import { phaseRate, strobeDuration, solidDuration, strobePhaseAt, solidPhaseAt } from './fxsim.js'
 import { impulseUmax, impulseDuration, fillDuration } from './impulse.js'
 import { buildMarblePath, marbleDuration } from './gravity.js'
 import { defaultParams, effectById, expandParamKeys, COMBINED_FX, recipePresetSeeds } from './effects.js'
+
+/* global __LN_PROXY__ */
+const useDevProxy = typeof __LN_PROXY__ !== 'undefined' && !!__LN_PROXY__
 
 function normHost (h) {
   if (!h) return ''
@@ -21,19 +25,23 @@ function normHost (h) {
   return v.replace(/\/$/, '')
 }
 function resolveBase () {
+  // Vite proxy → stay same-origin so /json and /ws hit the proxy target.
+  if (useDevProxy) return ''
   const q = new URLSearchParams(location.search).get('host')
   if (q) localStorage.setItem('zv_host', normHost(q))
   const stored = localStorage.getItem('zv_host')
   return normHost(stored) // '' = same origin (production: served from device)
 }
 // `base` is the device origin. '' means same-origin (served from the device).
-// In file:// or dev (localhost) mode it is a full http://<ip> set via ?host=,
+// In file:// or plain localhost mode it is a full http://<ip> set via ?host=,
 // localStorage, or the file-mode prompt below.
 let base = resolveBase()
 
 // Opened locally (double-clicked file, or `npm run dev` on localhost) rather
-// than served from the device — then we need an explicit device host.
+// than served from the device — then we need an explicit device host (unless
+// Vite is already proxying via ZV_HOST).
 export function isFileMode () {
+  if (useDevProxy) return false
   return location.protocol === 'file:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
 }
 export function getHost () { return base }

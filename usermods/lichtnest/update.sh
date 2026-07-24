@@ -256,7 +256,10 @@ flash_ota() {
 flash_serial() {
   local port="$1"
   need_cmd pio
-  [[ -e "$port" ]] || die "serial port not found: $port"
+  # Unix device nodes (/dev/tty*) or Windows COMx (Git Bash / MSYS — not a real file)
+  if [[ ! -e "$port" && ! "$port" =~ ^COM[0-9]+$ && ! "$port" =~ ^com[0-9]+$ ]]; then
+    die "serial port not found: $port"
+  fi
   info "Serial firmware upload → ${port}"
   (cd "$REPO_ROOT" && pio run -e "$PIO_ENV" -t upload --upload-port "$port")
 }

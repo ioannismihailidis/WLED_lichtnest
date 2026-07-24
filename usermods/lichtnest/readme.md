@@ -24,6 +24,29 @@ makes it the UI at `/`. Deleting it reverts to stock.
 The `/classic` route (added in `initServer()`) always serves the embedded
 original UI, regardless of what is on the filesystem.
 
+## Local development (no device required)
+
+```bash
+cd usermods/lichtnest/web
+npm install
+npm run dev          # → http://localhost:5173  (offline "Lokales Projekt")
+```
+
+Without a controller the UI starts in offline mode: edit tubes, effects, and
+playlists with the client-side preview, then export playlists for later import.
+
+Against a live device (pick one):
+
+```bash
+# Vite proxies API + WebSocket (same-origin, recommended)
+ZV_HOST=http://192.168.1.42 npm run dev
+
+# Or open the app and pass the device in the URL (remembered in localStorage)
+# http://localhost:5173/?host=http://192.168.1.42
+```
+
+On Windows PowerShell: `$env:ZV_HOST='http://192.168.1.42'; npm run dev`
+
 ## Build & deploy
 
 **One-shot update script** (recommended for agents / repeatable flash):

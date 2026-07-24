@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { viteSingleFile } from 'vite-plugin-singlefile'
 import { readFileSync } from 'node:fs'
@@ -8,18 +8,52 @@ import { dirname, join } from 'node:path'
 const root = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 
-// Build the whole app into a single self-contained index.html (all JS + CSS
-// inlined), so deploying the UI to the device is a single gzipped file upload.
-export default defineConfig({
-  plugins: [vue(), viteSingleFile()],
-  define: {
-    __LN_VERSION__: JSON.stringify(pkg.version),
-  },
-  build: {
-    target: 'es2019',
-    cssCodeSplit: false,
-    assetsInlineLimit: 100000000,
-    chunkSizeWarningLimit: 100000,
-    reportCompressedSize: false,
-  },
+function deviceProxy (target) {
+  const opts = { target, changeOrigin: true }
+  return {
+    '/json': opts,
+    '/ws': { ...opts, ws: true },
+    '/upload': opts,
+    '/edit': opts,
+    '/settings': opts,
+    '/update': opts,
+    '/classic': opts,
+    '/cfg.json': opts,
+    '/presets.json': opts,
+    '/plan.jpg': opts,
+    '/lichtnest_plan.json': opts,
+    '/lichtnest_playlists.json': opts,
+  }
+}
+
+// Build → single self-contained index.html (JS+CSS inlined) for device upload.
+// Dev → normal Vite HMR; optional ZV_HOST proxies API/WS to a live controller.
+export default defineConfig(({ command, mode }) => {
+  const env = loadEnv(mode, root, '')
+  const device = (env.ZV_HOST || process.env.ZV_HOST || '').replace(/\/$/, '')
+  const proxying = command === 'serve' && !!device
+
+  return {
+    plugins: [
+      vue(),
+      ...(command === 'build' ? [viteSingleFile()] : []),
+    ],
+    define: {
+      __LN_VERSION__: JSON.stringify(pkg.version),
+      __LN_PROXY__: JSON.stringify(proxying),
+    },
+    server: {
+      host: true,
+      port: 5173,
+      open: true,
+      ...(proxying ? { proxy: deviceProxy(device) } : {}),
+    },
+    build: {
+      target: 'es2019',
+      cssCodeSplit: false,
+      assetsInlineLimit: 100000000,
+      chunkSizeWarningLimit: 100000,
+      reportCompressedSize: false,
+    },
+  }
 })
