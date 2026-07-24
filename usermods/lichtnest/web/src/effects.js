@@ -129,7 +129,7 @@ export const EFFECTS = [
       SPATIAL_ORIGIN('Ursprung', { show: (p) => (p.pmode || 0) !== 2 }),
       MOTION_DIR('Laufrichtung', { show: (p) => (p.pmode || 0) === 2 }),
       MOTION_BOUNCE(0),
-      { key: 'mode', type: 'select', name: 'Easing', group: 'bewegung', options: EASE_OPTS, show: (p) => !(p.bounce) },
+      { key: 'mode', type: 'select', name: 'Easing', group: 'bewegung', def: 0, options: EASE_OPTS, show: (p) => !(p.bounce) },
       { key: 'count', type: 'range', name: 'Anzahl', min: 1, max: 20, def: 3, group: 'bewegung' },
       { key: 'interval', type: 'range', name: 'Abstand', min: 1, max: 50, mul: 0.1, unit: 's', def: 8, group: 'bewegung' },
       { key: 'rwidth', type: 'range', name: 'Breite', min: 2, max: 90, unit: '%', def: 30, group: 'raum' },

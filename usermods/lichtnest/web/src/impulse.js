@@ -101,9 +101,10 @@ export function impulseColorAt (positions, p, d, umax = 1) {
   for (const raw of positions) {
     let pos = raw
     if (bounce) pos = travelPos(raw, travel, true)
-    else if (ease) {
-      const t = raw / travel
-      pos = ease01(t > 1 ? 1 : t, ease) * travel
+    else {
+      // Match firmware: finished bands leave the field (ease must not clamp forever at travel).
+      if (raw > travel) continue
+      if (ease) pos = ease01(raw / travel, ease) * travel
     }
     const g = (pos - d) / w
     if (g >= 0 && g <= 1 && g < bestg) bestg = g
