@@ -1,6 +1,10 @@
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
-import { wled, tubes, toggleTest, portMaxLeds, loadPlan, previewEditLeds, cancelEditPreview, syncBusesFromTubes, persistTubes } from '../wled.js'
+import {
+  wled, tubes, toggleTest, portMaxLeds, portMappingCeiling, loadPlan,
+  previewTipLeds, previewAddTip, cancelEditPreview, ensureBusLen,
+  syncBusesFromTubes, endEditIdentify, lockPortsToMapped, persistTubes, DEFAULT_PORT_MAX,
+} from '../wled.js'
 import { confirmDialog, noticeDialog } from '../confirm.js'
 import { uiNav } from '../nav.js'
 import Plan from './Plan.vue'
@@ -18,18 +22,21 @@ const needsFirmware = computed(() => !(wled.info.ports && wled.info.ports.length
 
 function tubesOf (port) {
   const end = port.start + port.len
-  return wled.segments.filter((s) => s.start >= port.start && s.start < end).sort((a, b) => a.start - b.start)
+  return wled.segments
+    .filter((s) => (s.stop - s.start) > 0 && s.n !== '__ln_tip__' && s.start >= port.start && s.start < end)
+    .sort((a, b) => a.start - b.start)
 }
 function usedOf (port) { return tubesOf(port).reduce((m, s) => Math.max(m, s.stop - port.start), 0) }
 function maxOf (port) { return portMaxLeds(port.i) }
-function freeOf (port) { return Math.max(0, maxOf(port) - usedOf(port)) }
+function softMaxOf (port) { return portMappingCeiling(port.i) }
+function softFreeOf (port) { return Math.max(0, softMaxOf(port) - usedOf(port)) }
 const fmtLeds = (s) => s.len ?? (s.stop - s.start)
 // dot colour = port colour (matches the 2D-plan handles), not the arbitrary segment colour
 const PORT_COLORS = ['#f0a23c', '#27c5ff', '#7b3cff', '#4dd87a', '#ff5a3c', '#ffd23c']
 const portColor = (i) => PORT_COLORS[i % PORT_COLORS.length]
 
 function lengthLabel (s) {
-  const m = (s.len ?? (s.stop - s.start)) / 98
+  const m = (s.len ?? (s.stop - s.start)) / 96
   return (Math.round(m * 10) / 10).toString().replace('.', ',') + ' m'
 }
 function tubeTitle (s) {
@@ -43,20 +50,22 @@ function tubeSub (s) {
   return null
 }
 // edit LED count + optional alias via modal, re-flowing the port chain
-// While open: tube is in test mode (full white) and LED changes apply live on the strip.
+// While open: bus sized once to soft ceiling; +/- is state-only tip preview.
 const editTube = ref(null)
-const editLeds = ref(98)
+const editLeds = ref(96)
 const editName = ref('')
-const editOrigLeds = ref(98)
-const editLedsM = computed(() => (Math.round(editLeds.value / 98 * 10) / 10).toString().replace('.', ',') + ' m')
+const editOrigLeds = ref(96)
+const editLedsM = computed(() => (Math.round(editLeds.value / 96 * 10) / 10).toString().replace('.', ',') + ' m')
 let editPreviewTimer = null
 let skipEditWatch = false
+let addPreviewTimer = null
+let skipAddWatch = false
 
 function editMaxFor (s) {
   const port = ports.value.find((p) => s.start >= p.start && s.start < p.start + p.len)
-  if (!port) return 1000
+  if (!port) return DEFAULT_PORT_MAX
   const cur = s.len ?? (s.stop - s.start)
-  return maxOf(port) - usedOf(port) + cur
+  return softMaxOf(port) - usedOf(port) + cur
 }
 function scheduleEditPreview () {
   const s = editTube.value
@@ -67,7 +76,7 @@ function scheduleEditPreview () {
   editPreviewTimer = setTimeout(async () => {
     editPreviewTimer = null
     if (!editTube.value || editTube.value.id !== id) return
-    await previewEditLeds(id, n)
+    await previewTipLeds(id, n)
   }, 120)
 }
 async function openEdit (s) {
@@ -80,12 +89,14 @@ async function openEdit (s) {
   const n = (s.n || '').trim()
   editName.value = (n && n !== 'Tube') ? n : ''
   skipEditWatch = false
-  await previewEditLeds(s.id, editLeds.value)
+  const port = ports.value.find((p) => s.start >= p.start && s.start < p.start + p.len)
+  if (port) await ensureBusLen(port.i, softMaxOf(port))
+  await previewTipLeds(s.id, editLeds.value)
 }
 watch(editLeds, () => { if (!skipEditWatch && editTube.value) scheduleEditPreview() }, { flush: 'sync' })
 function stepEdit (d) {
   const s = editTube.value
-  const hi = s ? editMaxFor(s) : 1000
+  const hi = s ? editMaxFor(s) : DEFAULT_PORT_MAX
   editLeds.value = Math.max(1, Math.min(hi, editLeds.value + d))
 }
 async function cancelEdit () {
@@ -95,9 +106,10 @@ async function cancelEdit () {
   if (editPreviewTimer) { clearTimeout(editPreviewTimer); editPreviewTimer = null }
   cancelEditPreview()
   if (!s) return
-  const cur = s.len ?? (s.stop - s.start)
-  if (cur !== orig) await syncBusesFromTubes({ resize: { id: s.id, leds: orig } })
-  if (wled.testTube === s.id) await toggleTest(s.id)
+  // Pack bus back to mapped lengths (one cfg) and restore original tube size
+  await syncBusesFromTubes({ resize: { id: s.id, leds: orig } })
+  lockPortsToMapped()
+  await endEditIdentify()
 }
 async function saveEdit () {
   const s = editTube.value; const n = editLeds.value; const name = editName.value.trim() || 'Tube'
@@ -107,40 +119,76 @@ async function saveEdit () {
   editTube.value = null
   if (editPreviewTimer) { clearTimeout(editPreviewTimer); editPreviewTimer = null }
   cancelEditPreview()
+  // Packs bus + locks portMax to mapped total
   const ok = await tubes.update(s.id, { leds: n, name })
+  await endEditIdentify()
   if (!ok) {
     await noticeDialog({ title: 'Nicht gespeichert', body: 'Tube überschreitet das Port-Limit oder der Bus konnte nicht angepasst werden.' })
-    if (wled.testTube === s.id) await toggleTest(s.id)
     return
   }
-  // Keep white identify on the saved length; re-schedule persist (preview cancels the timer)
-  await previewEditLeds(s.id, n)
+  // Persist after identify ends so preset 250 gets clean segment bounds (survives reboot)
   persistTubes()
 }
+
 async function del (s) { if (!(await confirmDialog({ title: tubeTitle(s) + ' löschen?', body: 'Die Tube wird aus diesem Port entfernt.', confirmLabel: 'Löschen' }))) return; await tubes.remove(s.id) }
 
 // ---- add tube (length presets) ----
-const LEN_PRESETS = [{ m: '1 m', leds: 98 }, { m: '1,5 m', leds: 147 }, { m: '2 m', leds: 196 }]
+const LEN_PRESETS = [{ m: '1 m', leds: 96 }, { m: '1,5 m', leds: 143 }, { m: '2 m', leds: 191 }]
 const addPort = ref(null)
-const addLeds = ref(196)   // selected length (default 2 m, like the design)
-const addFree = computed(() => addPort.value ? freeOf(addPort.value) : 0)
+const addLeds = ref(191)   // selected length (default 2 m, like the design)
+const addFree = computed(() => addPort.value ? softFreeOf(addPort.value) : 0)
+
+function scheduleAddPreview () {
+  const port = addPort.value
+  if (!port) return
+  const pi = port.i
+  const n = addLeds.value
+  if (addPreviewTimer) clearTimeout(addPreviewTimer)
+  addPreviewTimer = setTimeout(async () => {
+    addPreviewTimer = null
+    if (!addPort.value || addPort.value.i !== pi) return
+    await previewAddTip(pi, Math.min(n, softFreeOf(addPort.value)))
+  }, 120)
+}
 async function openAdd (port) {
   await loadPlan()
-  const free = freeOf(port)
+  const free = softFreeOf(port)
   if (free <= 0) {
-    await noticeDialog({ title: 'Port voll', body: `Port ${port.i + 1} hat keinen freien Platz mehr (Limit ${maxOf(port)} LEDs).` })
+    await noticeDialog({ title: 'Port voll', body: `Port ${port.i + 1} hat keinen freien Platz mehr (Limit ${softMaxOf(port)} LEDs).` })
     return
   }
+  skipAddWatch = true
   addPort.value = port
-  addLeds.value = [196, 147, 98].find((l) => l <= free) || free  // largest preset that fits
+  addLeds.value = [191, 143, 96].find((l) => l <= free) || free  // largest preset that fits
+  skipAddWatch = false
+  await ensureBusLen(port.i, softMaxOf(port))
+  await previewAddTip(port.i, Math.min(addLeds.value, free))
 }
+watch(addLeds, () => { if (!skipAddWatch && addPort.value) scheduleAddPreview() }, { flush: 'sync' })
 function stepAdd (d) { addLeds.value = Math.max(1, Math.min(addFree.value, addLeds.value + d)) }
 function openAddByIndex (i) { const p = ports.value.find((x) => x.i === i) || ports.value[i]; if (p) openAdd(p) }
+async function cancelAdd () {
+  addPort.value = null
+  if (addPreviewTimer) { clearTimeout(addPreviewTimer); addPreviewTimer = null }
+  cancelEditPreview()
+  // Drop headroom + tip preview segment
+  await syncBusesFromTubes({})
+  lockPortsToMapped()
+  await endEditIdentify()
+}
 async function confirmAdd () {
   const n = Math.min(addLeds.value, addFree.value); if (n < 1) return
   const port = addPort.value; addPort.value = null
+  if (addPreviewTimer) { clearTimeout(addPreviewTimer); addPreviewTimer = null }
+  cancelEditPreview()
   const ok = await tubes.add(port.i, n)
-  if (!ok) await noticeDialog({ title: 'Nicht hinzugefügt', body: 'Port-Limit erreicht oder Bus konnte nicht angepasst werden.' })
+  await endEditIdentify()
+  if (!ok) {
+    await noticeDialog({ title: 'Nicht hinzugefügt', body: 'Port-Limit erreicht oder Bus konnte nicht angepasst werden.' })
+    return
+  }
+  // Persist after identify ends so preset 250 gets clean segment bounds (survives reboot)
+  persistTubes()
 }
 
 // ---- drag-to-reorder (transform-based, commits on drop) ----
@@ -206,7 +254,7 @@ const isDragging = (s) => drag.id === s.id
           <span class="mono pl">PORT {{ port.i + 1 }}<span v-if="port.gpio != null" class="gpio"> · GPIO {{ port.gpio }}</span></span>
           <span class="mono cap">{{ usedOf(port) }}/{{ maxOf(port) }} LEDs</span>
         </div>
-        <div class="track"><div class="fill" :style="{ width: Math.min(100, usedOf(port) / maxOf(port) * 100) + '%' }" /></div>
+        <div class="track"><div class="fill" :style="{ width: Math.min(100, usedOf(port) / Math.max(1, maxOf(port)) * 100) + '%' }" /></div>
 
         <div v-for="(s, si) in tubesOf(port)" :key="s.id" class="tube" :class="{ dragging: isDragging(s), settling }" :style="rowStyle(port, s, si)">
           <div class="grip" @pointerdown="startDrag(port, s, tubesOf(port), si, $event)" title="Ziehen zum Sortieren">
@@ -239,12 +287,13 @@ const isDragging = (s) => drag.id === s.id
     <Plan v-else @add="openAddByIndex" />
 
     <!-- ADD-TUBE MODAL (select length → confirm, like the design) -->
-    <div v-if="addPort" class="modal" @click="addPort = null">
+    <div v-if="addPort" class="modal" @click="cancelAdd">
       <div class="card" @click.stop>
         <div class="mhead">
           <span class="mtitle">Neue Tube · Port {{ addPort.i + 1 }}</span>
-          <span class="mono mhint">{{ addFree }} frei · 98 LEDs/m</span>
+          <span class="mono mhint">{{ addFree }} frei · 96 LEDs/m</span>
         </div>
+        <p class="note" style="margin:0 0 14px">Live: neuer Bereich leuchtet · Spitze pulsiert bei Längenänderung.</p>
         <div class="seclbl2 mono">LÄNGE</div>
         <div class="presets">
           <button v-for="p in LEN_PRESETS" :key="p.m" class="preset" :class="{ on: addLeds === p.leds }" :disabled="p.leds > addFree" @click="addLeds = p.leds">
@@ -260,7 +309,7 @@ const isDragging = (s) => drag.id === s.id
           <button class="fbtn wide" @click="stepAdd(10)">+10</button>
         </div>
         <div class="mrow">
-          <button class="cancel2" @click="addPort = null">Abbrechen</button>
+          <button class="cancel2" @click="cancelAdd">Abbrechen</button>
           <button class="addbtn" :disabled="Math.min(addLeds, addFree) < 1" @click="confirmAdd">Hinzufügen · {{ Math.min(addLeds, addFree) }} LEDs</button>
         </div>
       </div>
@@ -269,8 +318,8 @@ const isDragging = (s) => drag.id === s.id
     <!-- EDIT TUBE (name + LEDs) — live white test on the strip while adjusting length -->
     <div v-if="editTube" class="modal" @click="cancelEdit">
       <div class="card" @click.stop>
-        <div class="mhead"><span class="mtitle">Tube bearbeiten</span><span class="mono mhint">max {{ editMaxFor(editTube) }} · 98 LEDs/m</span></div>
-        <p class="note" style="margin:0 0 14px">Live-Test: Tube leuchtet weiß · Länge sofort auf dem Strip.</p>
+        <div class="mhead"><span class="mtitle">Tube bearbeiten</span><span class="mono mhint">max {{ editMaxFor(editTube) }} · 96 LEDs/m</span></div>
+        <p class="note" style="margin:0 0 14px">Live-Test: Tube weiß · Spitze hell bei +/- · Speichern setzt Port-Limit auf die gemappte Anzahl.</p>
         <div class="seclbl2 mono">NAME (OPTIONAL)</div>
         <input v-model="editName" class="cinput" placeholder="z. B. Mast links" style="text-align:left;margin-bottom:14px" @keyup.enter="saveEdit" />
         <div class="seclbl2 mono">STANDARD-LÄNGEN</div>

@@ -171,14 +171,26 @@ function syncSnapP () {
   draft.tl = normalizeTl(draft.tl.map((s, k) => (k === i ? { ...s, p: JSON.parse(JSON.stringify(draft.p)) } : s)))
 }
 
+// Debounce full timeline pushes — each snap embeds a full param set and used to
+// ride every slider tick (plus an `fx` reset), which hung/rebooted the ESP.
+let liveTlTimer = null
+function pushLiveTl () {
+  if (liveTlTimer) clearTimeout(liveTlTimer)
+  liveTlTimer = setTimeout(() => {
+    liveTlTimer = null
+    if (isLive.value) fxActions.setTl(draft.tl)
+  }, 280)
+}
+
 function onParamsUpdate (patch) {
   draft.p = { ...draft.p, ...patch }
   syncSnapP()
   persistDraft()
-  if (isLive.value) {
-    fxActions.setParams(patch)
-    if (draft.tl?.length) fxActions.setTl(draft.tl)
-  }
+  if (!isLive.value) return
+  // With a timeline, device render resolves from snaps — push tl (debounced).
+  // Without one, a small `p` patch is enough (never send `fx` on tweaks).
+  if (draft.tl?.length) pushLiveTl()
+  else fxActions.setParams(patch)
 }
 function onLayersUpdate (arr) {
   draft.layers = arr
@@ -188,7 +200,7 @@ function onLayersUpdate (arr) {
 function onTlUpdate (tl) {
   draft.tl = normalizeTl(tl)
   persistDraft()
-  if (isLive.value) fxActions.setTl(draft.tl)
+  if (isLive.value) pushLiveTl()
 }
 function onLoadSnap (p) {
   draft.p = JSON.parse(JSON.stringify(p || {}))

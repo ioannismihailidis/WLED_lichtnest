@@ -239,6 +239,14 @@ class Lichtnest : public Usermod {
     float    _mTotal = 0;
     uint8_t  _mGeoN = 0, _mDir = 255, _mHz = 255;
 
+    uint32_t _overlaySkipUntil = 0;   // millis deadline to drop frames after a slow overlay
+    bool     _overlayMuted = false;   // tube identify / solid test — never paint over stock FX
+    uint32_t _overlayFrameId = 0;     // bumps once per overlay draw — pulseUmax memo key
+    // pulseUmax is geometry-only for a given (pmode, origin, angle); memoize per frame
+    uint32_t _umaxFrame = 0;
+    uint8_t  _umaxPmode = 255, _umaxOrigin = 255;
+    uint16_t _umaxAngle = 0xFFFF;
+    float    _umaxVal = 1.0f;
     // audioreactive snapshot (refreshed once per overlay frame)
     // Dual-stage envelopes + slew limits — AR volumeSmth still jumps hard with AGC.
     bool     _arOk = false;
@@ -829,8 +837,14 @@ class Lichtnest : public Usermod {
       return x * ax + y * ay - u0;
     }
     float pulseUmax(const FxParams& P) {
+      // Per-pixel calls used to recompute this for every LED (~geo×2 trig/sqrt each) and
+      // were enough to starve the net stack on 400+ LED boards once many impulses stacked.
+      if (_umaxFrame == _overlayFrameId && _umaxPmode == P.pmode && _umaxOrigin == P.origin && _umaxAngle == P.angle)
+        return _umaxVal;
       float m = 0.5f;
       for (uint8_t g = 0; g < geoCount; g++) { float d1 = pulseDist(P, gx1[g], gy1[g]); if (d1 > m) m = d1; float d2 = pulseDist(P, gx2[g], gy2[g]); if (d2 > m) m = d2; }
+      _umaxFrame = _overlayFrameId; _umaxPmode = P.pmode; _umaxOrigin = P.origin; _umaxAngle = P.angle;
+      _umaxVal = m;
       return m;
     }
 
@@ -1635,10 +1649,14 @@ class Lichtnest : public Usermod {
 
     // render our effect over all placed tubes, overriding the stock FX
     void handleOverlayDraw() override {
-      if (!enabled || geoCount == 0) return;
+      if (!enabled || _overlayMuted || geoCount == 0) return;
+      // Skip a whole frame if the previous overlay ran long — avoids TWDT resets on
+      // non-PSRAM boards. Never paint a partial frame (that looked like tube flicker).
+      uint32_t frameStart = millis();
+      if (_overlaySkipUntil && (int32_t)(frameStart - _overlaySkipUntil) < 0) return;
       refreshAudio();
       uint16_t chainTotal = strip.getLengthTotal();
-      uint32_t nowMs = millis();
+      uint32_t nowMs = frameStart;
 
       bool tr = _trActive; float trProg = 1.0f;
       if (tr) {
@@ -1705,6 +1723,10 @@ class Lichtnest : public Usermod {
           strip.setPixelColor(i, c);
         }
       }
+      uint32_t elapsed = millis() - frameStart;
+      // Drop following frames if this one was expensive — always leave a complete frame on the strip.
+      if (elapsed > 12) _overlaySkipUntil = millis() + (elapsed > 20 ? 12 : 6);
+      else _overlaySkipUntil = 0;
     }
 
     void addToJsonInfo(JsonObject& root) override {
@@ -1732,10 +1754,14 @@ class Lichtnest : public Usermod {
       o["fx"] = AL.count > 0 ? 4 : A.fx;   // "Kombiniert" reports fx 4 regardless of the stale A.fx below
       uint32_t elMs = (_plActive && _stepCount > 0) ? (millis() - _plStepStart) : (millis() - _manualStart);
       o["ph"] = elMs / 1000.0f;            // seconds into the current step (effects render from elapsed)
+      // Slim state: echo flat `p` only. Never dump `tl` / `layers` here — each snap
+      // embeds a full FxParams and blows the 32 KB JSON buffer on non-PSRAM boards
+      // (esp32_eth / Gledopto), which shows up as hangs + soft reboots while the UI
+      // polls /json/state. The UI keeps tl/layers locally after POST.
       JsonObject p = o.createNestedObject("p");
       writeParams(p, A);
-      if (_tlN > 0) writeTlArr(o.createNestedArray("tl"), _tl, _tlN);
-      if (AL.count > 0) writeLayers(o.createNestedArray("layers"), AL, _tlL, _tlLN);
+      o["hasTl"] = _tlN > 0;
+      o["hasLayers"] = AL.count > 0;
       // device wall clock (NTP / browser JSON time) for schedule UI
       JsonObject clk = o.createNestedObject("clock");
       clk["h"] = (uint8_t)hour(localTime);
@@ -1787,17 +1813,20 @@ class Lichtnest : public Usermod {
         const char* id = o["play"] | (const char*)nullptr;
         int from = o["from"] | 0;
         int32_t atMs = o.containsKey("atMs") ? (int32_t)(o["atMs"] | 0) : (int32_t)-1;
+        _overlayMuted = false;   // playlist always paints
         startPlaylist(id, from, atMs);
       }
       if (o.containsKey("stop")  && (o["stop"] | false)) { _plActive = false; _trActive = false; }
       if (o.containsKey("next")  && (o["next"] | false)) { if (_plActive) advancePlaylist(); }
       if (o.containsKey("prev")  && (o["prev"] | false)) { if (_plActive) { int p = prevEffectIdx((int)_plIdx - 1); if (p >= 0) enterEffect(p); } }
+      // Tube identify / solid test: keep stock segment FX visible (no effect paint-over).
+      if (o.containsKey("mute")) _overlayMuted = o["mute"] | false;
 
       // --- effect control ---
       // fx present      -> manual effect selection: leave playlist, set manual params/layers
       // p or layers only -> live tweak of the active set (current step while playing)
       if (o.containsKey("fx")) {
-        _plActive = false; _trActive = false;
+        _plActive = false; _trActive = false; _overlayMuted = false;
         _manual.fx = o["fx"] | _manual.fx;
         parseParams(o["p"], _manual);
         _tlN = 0; _manualTlEnd = 0;
@@ -1838,6 +1867,10 @@ class Lichtnest : public Usermod {
           geoCount++;
         }
         computeCenter();
+        // Empty geo auto-mutes (identify). Non-empty geo must NEVER unmute by itself —
+        // savePlan/persist races were re-enabling overlay paint mid tube-test (looked like
+        // flicker on the one active tube). Unmute only via mute:false / fx / play.
+        if (!o.containsKey("mute") && geoCount == 0) _overlayMuted = true;
       }
 
       // --- named plan markers ---
@@ -2038,7 +2071,9 @@ class Lichtnest : public Usermod {
       File f = WLED_FS.open("/lichtnest_playlists.json", "r");
       if (!f) return;
       size_t sz = f.size();
-      size_t cap = sz * 4 + 3072; if (cap > 40960) cap = 40960;
+      // Cap hard: esp32_eth has no PSRAM; a 40 KB DynamicJsonDocument fragments DRAM and
+      // trips OOM / reboots when playlists advance.
+      size_t cap = sz * 3 + 2048; if (cap > 20480) cap = 20480;
       DynamicJsonDocument doc(cap);
       if (deserializeJson(doc, f) != DeserializationError::Ok) { f.close(); return; }
       f.close();
@@ -2360,7 +2395,7 @@ class Lichtnest : public Usermod {
       File f = WLED_FS.open("/lichtnest_playlists.json", "r");
       if (!f) return false;
       size_t sz = f.size();
-      size_t cap = sz * 4 + 3072; if (cap > 40960) cap = 40960;   // node-dense params need ~3-4× the byte size
+      size_t cap = sz * 3 + 2048; if (cap > 24576) cap = 24576;   // no-PSRAM boards cannot absorb 40 KB docs
       DynamicJsonDocument doc(cap);
       DeserializationError err = deserializeJson(doc, f);
       f.close();

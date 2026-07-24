@@ -63,7 +63,7 @@ const items = computed(() => wled.segments.map((s, i) => {
   const p = portOf(s)
   const leds = s.len ?? (s.stop - s.start)
   const alias = tubeAlias(s)
-  const m = Math.round(leds / 98 * 10) / 10
+  const m = Math.round(leds / 96 * 10) / 10
   const lenLbl = (m.toString().replace('.', ',')) + ' m'
   return {
     id: s.id, leds, port: p, pc: portColor(p), start: s.start,
