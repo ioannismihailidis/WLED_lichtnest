@@ -1,6 +1,11 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { wled, cfg, loadCfg, saveCfg, postState, persistTubes, tubesTotalForPort, lichtnest, audioReactive } from '../wled.js'
+import {
+  wled, cfg, loadCfg, saveCfg, saveLedBuses, postState, persistTubes,
+  lichtnest, audioReactive, portMaxLeds, setPortMax, reindexPortMaxAfterRemove,
+  applyTubeLensToIns, savePlan, cancelSavePlan, loadPlan,
+  DEFAULT_PORT_MAX,
+} from '../wled.js'
 import NumStepper from '../components/NumStepper.vue'
 import { confirmDialog } from '../confirm.js'
 
@@ -37,7 +42,7 @@ const LED_TYPES = [
   { v: 29, l: 'UCS8904 (RGBW)' },
   { v: 50, l: 'WS2801' },
 ]
-const COLOR_ORDERS = [{ v: 0, l: 'GRB' }, { v: 1, l: 'RGB' }, { v: 2, l: 'BRG' }, { v: 3, l: 'RBG' }, { v: 4, l: 'BGR' }, { v: 5, l: 'GBR' }]
+const COLOR_ORDERS = [{ v: 1, l: 'RGB' }, { v: 0, l: 'GRB' }, { v: 2, l: 'BRG' }, { v: 3, l: 'RBG' }, { v: 4, l: 'BGR' }, { v: 5, l: 'GBR' }]
 const MA_OPTS = [
   { v: 55, l: '55 mA (5V WS281x)' },
   { v: 35, l: '35 mA (eco)' },
@@ -51,13 +56,16 @@ const busy = ref(false)
 const msg = ref('')
 const wifiPass = ref('')
 const apPass = ref('')
+const showWifiPass = ref(false)
+const showApPass = ref(false)
 let lastMax = 2000
 
 onMounted(async () => {
-  await loadCfg()
+  await Promise.all([loadCfg(), loadPlan()])
   if (cfg.data?.hw?.led?.maxpwr) lastMax = cfg.data.hw.led.maxpwr
   ensureAr()
   micHwSnapshot = snapshotMicHw()
+  busStructureSnapshot = busStructureKey(cfg.data?.hw?.led?.ins)
 })
 
 const c = computed(() => cfg.data)
@@ -152,29 +160,101 @@ const ablOn = computed({
 })
 const maxpwr = computed({ get: () => c.value?.hw?.led?.maxpwr || 0, set: (v) => { c.value.hw.led.maxpwr = v; if (v > 0) lastMax = v } })
 const psuRec = computed(() => ((c.value?.hw?.led?.maxpwr || 0) / 1000).toFixed(1) + ' A')
-function busTubes (b) { return tubesTotalForPort(b.start, b.start + b.len) }
+function busTubes (b, i) {
+  const arr = ins.value
+  // Exclusive ownership: first matching bus wins (avoids double-count on overlapping starts)
+  const bounds = arr.map((x, j) => {
+    const start = x.start || 0
+    const next = j + 1 < arr.length ? (arr[j + 1].start || 0) : Infinity
+    const end = next > start ? next : start + Math.max(1, x.len || 1)
+    return { start, end }
+  })
+  return wled.segments.reduce((m, s) => {
+    if ((s.stop - s.start) <= 0) return m
+    for (let j = 0; j < bounds.length; j++) {
+      if (s.start >= bounds[j].start && s.start < bounds[j].end) {
+        return j === i ? m + (s.stop - s.start) : m
+      }
+    }
+    return m
+  }, 0)
+}
+function guardOf (i) { return portMaxLeds(i) }
+function setGuard (i, v) { setPortMax(i, v) }
 
 // --- add / remove a port (= WLED bus). WLED rebuilds buses from the ins array. ---
-const GPIO_CANDIDATES = [16, 2, 13, 4, 5, 33, 12, 0, 1, 3, 14]
+// Gledopto/ETH-safe data pins only — never UART/boot (0, 1, 3).
+const GPIO_CANDIDATES = [16, 2, 13, 4, 5, 33, 12, 14]
+const SAFE_DATA_GPIOS = new Set(GPIO_CANDIDATES)
+let busStructureSnapshot = ''
+function busStructureKey (list) {
+  return JSON.stringify((list || []).map((b) => [b?.pin?.[0] ?? null]))
+}
+function invalidBusPin (list) {
+  for (let i = 0; i < (list || []).length; i++) {
+    const p = list[i]?.pin?.[0]
+    if (p == null || !SAFE_DATA_GPIOS.has(p | 0)) return { i, pin: p }
+  }
+  return null
+}
 function freeGpio () {
   const used = new Set(ins.value.flatMap((b) => b.pin || []))
   ;(ar.value?.digitalmic?.pin || []).forEach((g) => { if (g >= 0) used.add(g) })
-  return GPIO_CANDIDATES.find((g) => !used.has(g)) ?? 16
+  return GPIO_CANDIDATES.find((g) => !used.has(g))
 }
 function addPort () {
   const arr = c.value.hw.led.ins
   if (arr.length >= 6) return
+  const gpio = freeGpio()
+  if (gpio == null) { msg.value = 'Kein freier sicherer GPIO mehr'; return }
   const start = arr.reduce((a, b) => a + (b.len || 0), 0)
-  arr.push({ start, len: 98, pin: [freeGpio()], order: 0, type: 22, skip: 0, ledma: 55, rev: false, ref: false })
+  const i = arr.length
+  // empty bus keeps len 1; capacity guard lives in plan.portMax
+  arr.push({ start, len: 1, pin: [gpio], order: 1, type: 22, skip: 0, ledma: 55, rev: false, ref: false })
+  setPortMax(i, DEFAULT_PORT_MAX)
 }
 async function removePort (i) {
   const arr = c.value.hw.led.ins
   if (arr.length <= 1) { msg.value = 'Mindestens ein Port muss bleiben'; return }
-  const n = busTubes(arr[i])
-  const body = n > 0 ? `Achtung: ${n} LEDs an Tubes hängen an diesem Port und verlieren ihre Zuordnung.` : 'Der LED-Ausgang wird entfernt.'
-  if (!(await confirmDialog({ title: `Port ${i + 1} entfernen?`, body, confirmLabel: 'Entfernen', danger: true }))) return
+  const n = busTubes(arr[i], i)
+  const body = (n > 0
+    ? `Achtung: ${n} LEDs an Tubes hängen an diesem Port und verlieren ihre Zuordnung. `
+    : '') + 'Der Controller speichert die Bus-Config und startet danach neu.'
+  if (!(await confirmDialog({ title: `Port ${i + 1} entfernen?`, body, confirmLabel: 'Entfernen & Neustart', danger: true }))) return
+  busy.value = true
+  msg.value = 'Port wird entfernt …'
+  // Avoid FS uploads during bus re-init — concurrent LittleFS writes hang the ESP.
+  cancelSavePlan()
   arr.splice(i, 1)
-  await save()
+  reindexPortMaxAfterRemove(i)
+  const lens = applyTubeLensToIns(arr)
+  if (!lens.ok) {
+    busy.value = false
+    msg.value = `Port ${lens.port + 1}: ${lens.used} LEDs belegt, Limit ${lens.max}`
+    await loadCfg()
+    return
+  }
+  const bad = invalidBusPin(arr)
+  if (bad) {
+    busy.value = false
+    msg.value = `Port ${bad.i + 1}: GPIO ${bad.pin} ist unsicher (UART/Boot). Bitte einen Pin aus ${GPIO_CANDIDATES.join(', ')} wählen.`
+    await loadCfg()
+    return
+  }
+  msg.value = 'Neustart … warte auf Controller'
+  const res = await saveLedBuses(arr, { reboot: true })
+  busStructureSnapshot = busStructureKey(arr)
+  if (lens.segPatch?.length) {
+    try { await postState({ seg: lens.segPatch }); persistTubes() } catch (e) { /* ignore */ }
+  }
+  savePlan()
+  busy.value = false
+  if (res.ok) {
+    msg.value = 'Port entfernt & gespeichert ✓'
+    setTimeout(() => { msg.value = '' }, 2500)
+  } else {
+    msg.value = `Nicht dauerhaft gespeichert (noch ${res.count} Ports). Bitte erneut versuchen.`
+  }
 }
 
 const wifiDhcp = computed({
@@ -188,18 +268,34 @@ async function save () {
   if (!c.value) return
   busy.value = true; msg.value = ''
   ensureAr()
-  // recompute contiguous bus starts from the (possibly edited) lengths and shift
-  // the segments of any bus that moved, so tubes keep driving their LEDs
+  // Bus length is derived from tubes; portMax is only a guard (stored in plan).
   const arr = c.value.hw.led.ins
-  const oldStarts = arr.map((b) => b.start)
-  const oldBoundary = (i) => (i + 1 < arr.length ? oldStarts[i + 1] : Infinity)
-  let cursor = 0; const segPatch = []
-  arr.forEach((b, i) => {
-    const ns = cursor; cursor += b.len
-    const delta = ns - oldStarts[i]
-    if (delta !== 0) wled.segments.forEach((s) => { if (s.start >= oldStarts[i] && s.start < oldBoundary(i)) segPatch.push({ id: s.id, start: s.start + delta, stop: s.stop + delta }) })
-    b.start = ns
-  })
+  const lens = applyTubeLensToIns(arr)
+  if (!lens.ok) {
+    busy.value = false
+    msg.value = `Port ${lens.port + 1}: ${lens.used} LEDs belegt, Limit ${lens.max}`
+    return
+  }
+  const bad = invalidBusPin(arr)
+  if (bad) {
+    busy.value = false
+    msg.value = `Port ${bad.i + 1}: GPIO ${bad.pin} ist unsicher (UART/Boot). Bitte einen Pin aus ${GPIO_CANDIDATES.join(', ')} wählen.`
+    return
+  }
+  const structural = busStructureKey(arr) !== busStructureSnapshot
+  if (structural) {
+    cancelSavePlan()
+    msg.value = 'Bus-Config speichern …'
+    const busRes = await saveLedBuses(arr, { reboot: true })
+    if (!busRes.ok) {
+      busy.value = false
+      msg.value = `Bus-Config nicht dauerhaft gespeichert (noch ${busRes.count} Ports).`
+      return
+    }
+    busStructureSnapshot = busStructureKey(arr)
+    msg.value = ''
+  }
+  savePlan()
   const arCfg = c.value.um.AudioReactive
   const pins = Array.isArray(arCfg.digitalmic?.pin) ? [...arCfg.digitalmic.pin] : [...DEFAULT_MIC.pin]
   while (pins.length < 4) pins.push(-1)
@@ -208,7 +304,8 @@ async function save () {
   const hwAfter = JSON.stringify({ t: micTypeVal, p: pins, on: !!arCfg.enabled })
   const partial = {
     id: { name: c.value.id.name, mdns: c.value.id.mdns },
-    hw: { led: { maxpwr: c.value.hw.led.maxpwr, ins: arr } },
+    // After structural bus save, omit ins to avoid a second doInitBusses.
+    hw: { led: structural ? { maxpwr: c.value.hw.led.maxpwr } : { maxpwr: c.value.hw.led.maxpwr, ins: arr } },
     nw: { ins: [{ ssid: c.value.nw.ins[0].ssid, ip: c.value.nw.ins[0].ip, gw: c.value.nw.ins[0].gw, sn: c.value.nw.ins[0].sn }] },
     ap: { ssid: c.value.ap.ssid, chan: c.value.ap.chan, hide: c.value.ap.hide },
     if: { sync: { send: { en: c.value.if?.sync?.send?.en } } },
@@ -236,7 +333,7 @@ async function save () {
   if (wifiPass.value) partial.nw.ins[0].psk = wifiPass.value
   if (apPass.value) partial.ap.psk = apPass.value
   const ok = await saveCfg(partial)
-  if (ok && segPatch.length) { await postState({ seg: segPatch }); persistTubes() }
+  if (ok && lens.segPatch?.length) { await postState({ seg: lens.segPatch }); persistTubes() }
   // runtime toggle (no reboot) + mirror for UI
   if (ok) {
     await postState({ AudioReactive: { enabled: !!arCfg.enabled } })
@@ -335,9 +432,9 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
           </button>
         </div>
         <div class="panel pad">
-          <div class="row"><span class="lbl">LEDs pro Port (Kapazität)<small>= WLED-Bus-Länge · Balken-Limit</small></span>
-            <NumStepper v-model="b.len" :min="1" :step="10" unit="LEDs" /></div>
-          <div class="row brd"><span class="lbl">Belegt durch Tubes</span><span class="mono muted">{{ busTubes(b) }} LEDs</span></div>
+          <div class="row"><span class="lbl">LED-Limit (Guard)<small>max. LEDs an diesem Port · kein Bus</small></span>
+            <NumStepper :modelValue="guardOf(i)" @update:modelValue="(v) => setGuard(i, v)" :min="1" :step="10" unit="LEDs" /></div>
+          <div class="row brd"><span class="lbl">Aktiv durch Tubes<small>= WLED-Bus-Länge</small></span><span class="mono muted">{{ busTubes(b, i) }} LEDs</span></div>
           <label class="flbl">LED-Typ</label>
           <select class="sel" v-model.number="b.type"><option v-for="t in LED_TYPES" :key="t.v" :value="t.v">{{ t.l }}</option></select>
           <div class="two">
@@ -363,7 +460,13 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
         <label class="flbl">Netzwerk (SSID)</label>
         <input class="in mono" v-model="c.nw.ins[0].ssid" placeholder="WLAN-Name">
         <label class="flbl">Passwort</label>
-        <input class="in mono" type="password" v-model="wifiPass" :placeholder="c.nw.ins[0].pskl ? '•••••••• (gesetzt)' : 'leer lassen = unverändert'">
+        <div class="pwwrap">
+          <input class="in mono" :type="showWifiPass ? 'text' : 'password'" v-model="wifiPass" :placeholder="c.nw.ins[0].pskl ? '•••••••• (gesetzt)' : 'leer lassen = unverändert'" autocomplete="new-password">
+          <button type="button" class="pwvis" :aria-pressed="showWifiPass" :aria-label="showWifiPass ? 'Passwort verbergen' : 'Passwort anzeigen'" @click="showWifiPass = !showWifiPass">
+            <svg v-if="!showWifiPass" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-7 0-11-7-11-7a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
         <div class="row brd"><span class="lbl">DHCP (automatisch)</span><button class="sw" :class="{ on: wifiDhcp }" @click="wifiDhcp = !wifiDhcp"><span /></button></div>
         <template v-if="!wifiDhcp">
           <div class="two">
@@ -379,7 +482,16 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
       <div class="panel pad">
         <label class="flbl">AP-Name</label><input class="in mono" v-model="c.ap.ssid">
         <div class="two">
-          <span style="flex:2"><label class="flbl">AP-Passwort</label><input class="in mono" type="password" v-model="apPass" :placeholder="c.ap.pskl ? '•••••••• (gesetzt)' : 'min. 8 Zeichen'"></span>
+          <span style="flex:2">
+            <label class="flbl">AP-Passwort</label>
+            <div class="pwwrap">
+              <input class="in mono" :type="showApPass ? 'text' : 'password'" v-model="apPass" :placeholder="c.ap.pskl ? '•••••••• (gesetzt)' : 'min. 8 Zeichen'" autocomplete="new-password">
+              <button type="button" class="pwvis" :aria-pressed="showApPass" :aria-label="showApPass ? 'Passwort verbergen' : 'Passwort anzeigen'" @click="showApPass = !showApPass">
+                <svg v-if="!showApPass" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-7 0-11-7-11-7a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </button>
+            </div>
+          </span>
           <span style="flex:1"><label class="flbl">Kanal</label><NumStepper full v-model="c.ap.chan" :min="1" :max="13" /></span>
         </div>
         <div class="row"><span class="lbl">AP verstecken</span><button class="sw" :class="{ on: c.ap.hide }" @click="c.ap.hide = c.ap.hide ? 0 : 1"><span /></button></div>
@@ -440,6 +552,15 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
 
 .flbl { display: block; font-size: 12px; color: var(--muted2); margin: 12px 0 6px 2px; }
 .in { width: 100%; height: 42px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line2); color: var(--text); font-size: 14px; padding: 0 12px; outline: none; }
+.pwwrap { position: relative; }
+.pwwrap .in { padding-right: 44px; }
+.pwvis {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 36px; height: 34px; border: none; background: transparent;
+  color: var(--muted2); border-radius: 8px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.pwvis:hover, .pwvis[aria-pressed="true"] { color: var(--accent); }
 .sel { width: 100%; height: 40px; border-radius: 10px; background: var(--inset); border: 1px solid var(--line2); color: var(--text); font-size: 13px; padding: 0 10px; cursor: pointer; }
 .two { display: flex; gap: 10px; }
 .two > span { flex: 1; }
