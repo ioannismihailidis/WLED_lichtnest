@@ -664,11 +664,12 @@ class Lichtnest : public Usermod {
     }
 
     // load tube geometry + named markers from the UI's plan file so effects work after reboot
+    // (DynamicJsonDocument on heap — StaticJsonDocument blew the setup()/loopTask stack)
     void loadGeometryFile() {
       if (!WLED_FS.exists("/lichtnest_plan.json")) return;
       File f = WLED_FS.open("/lichtnest_plan.json", "r");
       if (!f) return;
-      StaticJsonDocument<6144> doc;
+      DynamicJsonDocument doc(6144);
       if (deserializeJson(doc, f) == DeserializationError::Ok) {
         JsonObject tubes = doc["tubes"];
         if (!tubes.isNull()) {
