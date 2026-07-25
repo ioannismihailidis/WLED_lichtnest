@@ -52,6 +52,15 @@ const ablOn = computed({
 })
 const maxpwr = computed({ get: () => c.value?.hw?.led?.maxpwr || 0, set: (v) => { c.value.hw.led.maxpwr = v; if (v > 0) lastMax = v } })
 const psuRec = computed(() => ((c.value?.hw?.led?.maxpwr || 0) / 1000).toFixed(1) + ' A')
+// relay switching the strip's power supply (Gledopto: GPIO 18, inverted)
+const relayPin = computed({
+  get: () => c.value?.hw?.relay?.pin ?? -1,
+  set: (v) => { if (!c.value.hw.relay) c.value.hw.relay = {}; c.value.hw.relay.pin = v },
+})
+const relayRev = computed({
+  get: () => !!c.value?.hw?.relay?.rev,
+  set: (v) => { if (!c.value.hw.relay) c.value.hw.relay = {}; c.value.hw.relay.rev = v },
+})
 function busTubes (b, i) {
   const arr = ins.value
   // Exclusive ownership: first matching bus wins (avoids double-count on overlapping starts)
@@ -189,7 +198,10 @@ async function save () {
   const partial = {
     id: { name: c.value.id.name, mdns: c.value.id.mdns },
     // After structural bus save, omit ins to avoid a second doInitBusses.
-    hw: { led: structural ? { maxpwr: c.value.hw.led.maxpwr } : { maxpwr: c.value.hw.led.maxpwr, ins: arr } },
+    hw: {
+      led: structural ? { maxpwr: c.value.hw.led.maxpwr } : { maxpwr: c.value.hw.led.maxpwr, ins: arr },
+      relay: { pin: c.value.hw.relay?.pin ?? -1, rev: !!c.value.hw.relay?.rev },
+    },
     nw: { ins: [{ ssid: c.value.nw.ins[0].ssid, ip: c.value.nw.ins[0].ip, gw: c.value.nw.ins[0].gw, sn: c.value.nw.ins[0].sn }] },
     ap: { ssid: c.value.ap.ssid, chan: c.value.ap.chan, hide: c.value.ap.hide },
     if: { sync: { send: { en: c.value.if?.sync?.send?.en } } },
@@ -224,6 +236,16 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
           <NumStepper v-model="maxpwr" :min="250" :max="65000" :step="250" unit="mA" />
         </div>
         <div class="hint mono">Empf. Netzteil: <b>{{ psuRec }}</b></div>
+      </div>
+
+      <!-- RELAIS (schaltet die Strip-Versorgung bei An/Aus) -->
+      <div class="seclbl mono">RELAIS</div>
+      <div class="panel pad">
+        <div class="row"><span class="lbl">GPIO<small>−1 = kein Relais · Gledopto: 18</small></span>
+          <NumStepper v-model="relayPin" :min="-1" :max="39" :step="1" unit="" /></div>
+        <div class="row brd"><span class="lbl">Invertiert<small>Gledopto: an</small></span>
+          <button class="sw" :class="{ on: relayRev }" @click="relayRev = !relayRev"><span /></button></div>
+        <div class="hint mono">Schaltet die LED-Versorgung, wenn WLED an/aus geht. Falsche Polarität = Strip bleibt dunkel. Wirkt nach „Speichern"; Pin-Wechsel ggf. erst nach Neustart.</div>
       </div>
 
       <!-- PRO PORT -->
