@@ -702,7 +702,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.8.9";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.0";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);

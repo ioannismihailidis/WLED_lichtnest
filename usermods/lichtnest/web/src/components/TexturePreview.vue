@@ -3,7 +3,7 @@
 // the tubes), rendered into a small buffer and smoothly upscaled. Reads the same
 // device-phase clock as the tube preview so it stays in lock-step.
 import { ref, watch, onMounted, onUnmounted } from 'vue'
-import { wled, lichtnest, plan, liveFxP, effectOrigin } from '../wled.js'
+import { wled, lichtnest, plan, liveFxP, effectOrigin, isMappingTube } from '../wled.js'
 import { fxColor, phaseRate, strobePhaseAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt } from '../fxsim.js'
 import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulseUmax } from '../impulse.js'
 
@@ -18,7 +18,7 @@ const CORNERS = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }]
 // radial origin: a named marker if `p.origin` picks one, else the placed tubes' centroid
 function origin (p) {
   const list = []
-  for (const s of (wled.segments || [])) { const c = plan.tubes[s.id]; if (c) list.push(c) }
+  for (const s of (wled.segments || [])) { if (!isMappingTube(s)) continue; const c = plan.tubes[s.id]; if (c) list.push(c) }
   return effectOrigin(p, list)
 }
 let lph = 0, lts = 0, lelapsed = 0
@@ -62,7 +62,7 @@ function draw () {
   if (buf.width !== bw || buf.height !== bh) { buf.width = bw; buf.height = bh }
 
   const total = wled.info.leds?.count || 300
-  const N = Math.max(1, wled.segments.length)                  // real tube count (strobe is per-tube)
+  const N = Math.max(1, wled.segments.filter(isMappingTube).length)   // real tube count (strobe is per-tube)
   const on = wled.on
   const fx = efx(), pp = ep()
   const [cx, cy] = origin(pp)

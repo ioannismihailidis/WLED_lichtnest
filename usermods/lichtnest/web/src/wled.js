@@ -97,6 +97,13 @@ export function devicePhase () {
   const N = wled.info.leds?.count || 1
   return devPhase.ph + (performance.now() - devPhase.syncAt) / 1000 * phaseRate(lichtnest.fx, lichtnest.p, N)
 }
+// raw seconds into the device's current step/effect (the keyframe effects render from
+// elapsed, not from an accumulated phase) — playlist-synced while one is running
+export function deviceElapsed () {
+  if (wled.pl.active && wled.pl.durMs > 0) return Math.min(wled.pl.durMs, wled.pl.elapsedMs + (Date.now() - wled.pl.syncAt)) / 1000
+  if (wled.offline) return devicePhase()                       // offline manual: local free-run clock
+  return devPhase.valid ? devPhase.ph + (performance.now() - devPhase.syncAt) / 1000 : 0
+}
 
 function applyState (s) {
   if (!s) return
@@ -279,73 +286,458 @@ export async function postState (body) {
 const TUBES_PRESET = 250
 let tubesPersistTimer = null
 let bootPresetSet = false
+function cancelPersistTubes () {
+  if (tubesPersistTimer) { clearTimeout(tubesPersistTimer); tubesPersistTimer = null }
+}
 export function persistTubes () {
   if (wled.offline) { saveProject(); return }
-  if (tubesPersistTimer) clearTimeout(tubesPersistTimer)
+  cancelPersistTubes()
   tubesPersistTimer = setTimeout(async () => {
     tubesPersistTimer = null
-    await postState({ lichtnest: { geo: tubeGeometry() } })   // structural change -> refresh live effect geometry
+    // Tube identify clears geo so stock Solid can paint white. Never re-push geo
+    // while a test is active — that immediately re-enables the overlay and cancels the test.
+    if (wled.testTube == null && tipSegId == null) {
+      await postState({ lichtnest: { geo: tubeGeometry() } })   // structural change -> refresh live effect geometry
+    }
     await postState({ psave: TUBES_PRESET, n: 'Lichtnest Tubes', ib: true, sb: true })
     if (!bootPresetSet) { bootPresetSet = true; await saveCfg({ def: { ps: TUBES_PRESET } }) }
   }, 800)
 }
 
 // Tubes = WLED segments, grouped under Ports = physical LED buses.
+// Bus length (ins[].len) is derived from tube totals; plan.portMax is a capacity guard
+// that is locked to the mapped total after each add/save (see lockPortsToMapped).
 export const tubes = {
   nextId () { const ids = wled.segments.map((s) => s.id); let i = 0; while (ids.includes(i)) i++; return i },
-  async add (portStart, portEnd, leds) {
-    const inPort = wled.segments.filter((s) => s.start >= portStart && s.start < portEnd)
-    const cursor = inPort.reduce((m, s) => Math.max(m, s.stop), portStart)
-    const start = Math.min(cursor, portEnd)
-    const stop = Math.min(start + Math.max(1, leds), portEnd)
-    if (stop <= start) return false
-    const ok = await postState({ seg: [{ id: this.nextId(), start, stop, n: 'Tube', col: [[240, 162, 60]] }] }); persistTubes(); return ok
+  async add (portIndex, leds) {
+    await clearTipSegment()
+    const ok = await syncBusesFromTubes({ add: { portIndex, leds, id: this.nextId(), name: 'Tube' } })
+    if (ok) { lockPortsToMapped(); persistTubes() }
+    return ok
   },
   async setLeds (id, leds) {
-    const s = wled.segments.find((x) => x.id === id); if (!s) return false
-    const ok = await postState({ seg: [{ id, stop: s.start + Math.max(1, leds | 0) }] }); persistTubes(); return ok
+    await clearTipSegment()
+    const ok = await syncBusesFromTubes({ resize: { id, leds } })
+    if (ok) { lockPortsToMapped(); persistTubes() }
+    return ok
   },
-  async rename (id, name) { const ok = await postState({ seg: [{ id, n: name }] }); persistTubes(); return ok },
-  async remove (id) { const ok = await postState({ seg: [{ id, start: 0, stop: 0 }] }); persistTubes(); return ok },
+  async rename (id, name) {
+    const ok = await postState({ seg: [{ id, n: name }] })
+    const s = wled.segments.find((x) => x.id === id)
+    if (ok && s) s.n = name
+    if (ok) persistTubes()
+    return ok
+  },
+  async update (id, { leds, name } = {}) {
+    await clearTipSegment()
+    const opts = {}
+    if (leds != null) opts.resize = { id, leds }
+    if (name != null) opts.rename = { id, name }
+    if (!opts.resize && !opts.rename) return false
+    const ok = await syncBusesFromTubes(opts)
+    if (ok) { lockPortsToMapped(); persistTubes() }
+    return ok
+  },
+  async remove (id) {
+    await clearTipSegment()
+    const ok = await syncBusesFromTubes({ removeId: id })
+    if (ok) { lockPortsToMapped(); persistTubes() }
+    return ok
+  },
   async setSelected (id, sel) { return postState({ seg: [{ id, sel: !!sel }] }) },
   // make this tube the active (main) one, so Start/Effekte target it
   async select (id) { return postState({ mainseg: id, seg: [{ id, sel: true }] }) },
   // reassign LED ranges to match a new order within a port (keeps each tube's length)
-  async reorder (portStart, portEnd, orderedIds) {
-    let cursor = portStart
-    const patch = orderedIds.map((id) => {
-      const s = wled.segments.find((x) => x.id === id); if (!s) return null
-      const len = Math.max(1, s.stop - s.start)
-      const start = cursor; const stop = Math.min(cursor + len, portEnd); cursor = stop
-      return { id, start, stop }
-    }).filter(Boolean)
-    if (!patch.length) return false
-    const ok = await postState({ seg: patch }); persistTubes(); return ok
+  async reorder (portIndex, orderedIds) {
+    await clearTipSegment()
+    const ok = await syncBusesFromTubes({ reorder: { portIndex, orderedIds } })
+    if (ok) { lockPortsToMapped(); persistTubes() }
+    return ok
   },
 }
 
 // Test mode is a TOGGLE: light only the selected tube (white), blank the rest;
 // toggling off restores the snapshot taken when entering test mode.
 let testSnapshot = null
+let editPreviewSeq = 0
+let tipSegId = null
+const TIP_SEG_NAME = '__ln_tip__'
+
+export function isMappingTube (s) {
+  if (!s) return false
+  if (tipSegId != null && s.id === tipSegId) return false
+  if (s.n === TIP_SEG_NAME) return false
+  return (s.stop - s.start) > 0
+}
+
+/** Soft ceiling for add/edit while portMax may be locked tight after a prior save.
+ *  One 2 m tube of headroom — never force the old 980-LED planning cap onto the bus. */
+export function portMappingCeiling (i) {
+  return portMaxLeds(i) + 191
+}
+
+function portRef (portIndex) {
+  const ports = wled.info.ports || []
+  return ports.find((p) => p.i === portIndex) || ports[portIndex] || null
+}
+
+function mappingTubesOnPort (port) {
+  if (!port) return []
+  const end = port.start + port.len
+  return wled.segments
+    .filter((s) => isMappingTube(s) && s.start >= port.start && s.start < end)
+    .sort((a, b) => a.start - b.start)
+}
+
+function mappedUsedOnPort (port) {
+  return mappingTubesOnPort(port).reduce((a, s) => a + (s.stop - s.start), 0)
+}
+
+/** After pack: set each port's LED-Limit guard to the real mapped tube total. */
+export function lockPortsToMapped () {
+  const ports = wled.info.ports || []
+  for (const p of ports) {
+    const mapped = mappingTubesOnPort(p).length ? mappedUsedOnPort(p) : 1
+    setPortMax(p.i, Math.max(1, mapped), { persist: false })
+  }
+  if (ports.length) savePlan()
+}
+
+async function clearTipSegment () {
+  if (tipSegId == null && !wled.segments.some((s) => s.n === TIP_SEG_NAME)) return
+  const id = tipSegId ?? wled.segments.find((s) => s.n === TIP_SEG_NAME)?.id
+  tipSegId = null
+  if (id == null) return
+  if (wled.offline) {
+    wled.segments = wled.segments.filter((s) => s.id !== id)
+    return
+  }
+  await postState({ seg: [{ id, start: 0, stop: 0 }] })
+  wled.segments = wled.segments.filter((s) => s.id !== id)
+}
+
+function nextTipSegId () {
+  const ids = wled.segments.map((s) => s.id)
+  if (tipSegId != null) ids.push(tipSegId)
+  let i = 0
+  while (ids.includes(i)) i++
+  return i
+}
+
+/**
+ * Grow a port's bus to at least `needed` LEDs (one cfg write). Other ports stay packed
+ * to their mapped tube totals. Shifts later ports' segments when starts move.
+ */
+export async function ensureBusLen (portIndex, needed) {
+  const want = Math.max(1, needed | 0)
+  await clearTipSegment()
+  const offline = wled.offline
+  let ins = null
+  if (offline) {
+    ins = (wled.info.ports || []).map((p, i) => ({
+      start: p.start || 0,
+      len: Math.max(1, p.len || 1),
+      pin: p.gpio != null ? [p.gpio] : [16],
+      i: p.i ?? i,
+    }))
+  } else {
+    ins = await ensureCfg()
+  }
+  if (!ins?.length || portIndex < 0 || portIndex >= ins.length) return false
+
+  const bounds = busBounds(ins)
+  const lists = ins.map((_, i) => {
+    const { start, end } = bounds[i]
+    return wled.segments
+      .filter((s) => isMappingTube(s) && s.start >= start && s.start < end)
+      .sort((a, c) => a.start - c.start)
+      .map((s) => ({ id: s.id, len: s.stop - s.start, n: s.n }))
+  })
+
+  let cursor = 0
+  let changed = false
+  const segPatch = []
+  for (let i = 0; i < ins.length; i++) {
+    const used = lists[i].reduce((a, t) => a + t.len, 0)
+    const newLen = i === portIndex ? Math.max(want, used, 1) : Math.max(used, 1)
+    if ((ins[i].start || 0) !== cursor || (ins[i].len || 0) !== newLen) changed = true
+    ins[i].start = cursor
+    ins[i].len = newLen
+    let c = cursor
+    for (const t of lists[i]) {
+      segPatch.push({ id: t.id, start: c, stop: c + t.len })
+      c += t.len
+    }
+    cursor += newLen
+  }
+
+  if (offline) {
+    wled.info.ports = ins.map((b, i) => ({
+      i: b.i ?? i, start: b.start, len: b.len,
+      gpio: Array.isArray(b.pin) ? b.pin[0] : b.pin,
+    }))
+    applySegPatchLocal(segPatch)
+    recomputeLeds()
+    saveProject()
+    return true
+  }
+
+  if (!changed) {
+    wled.info.ports = ins.map((b, i) => ({
+      i, start: b.start, len: b.len, type: b.type,
+      gpio: Array.isArray(b.pin) ? b.pin[0] : undefined,
+    }))
+    recomputeLeds()
+    return true
+  }
+
+  const okCfg = await saveCfg({ hw: { led: { ins } } }, { timeoutMs: 12000, timeoutOk: true })
+  if (!okCfg) return false
+  if (cfg.data?.hw?.led) cfg.data.hw.led.ins = ins
+  if (segPatch.length) await postState({ seg: segPatch })
+  applySegPatchLocal(segPatch)
+  wled.info.ports = ins.map((b, i) => ({
+    i, start: b.start, len: b.len, type: b.type,
+    gpio: Array.isArray(b.pin) ? b.pin[0] : undefined,
+  }))
+  recomputeLeds()
+  refreshPortsFromInfo()
+  return true
+}
+
+/** Pack segment ranges on one port from port.start (state only — bus must already be long enough). */
+function packPortSegPatch (port, lensById) {
+  const list = mappingTubesOnPort(port)
+  const patch = []
+  let c = port.start
+  for (const s of list) {
+    const len = Math.max(1, (lensById && lensById.has(s.id) ? lensById.get(s.id) : (s.stop - s.start)) | 0)
+    patch.push({ id: s.id, start: c, stop: c + len })
+    c += len
+  }
+  return { patch, used: c - port.start }
+}
+
+function snapshotTestFx () {
+  return wled.segments.filter(isMappingTube).map((s) => ({
+    id: s.id, on: s.on !== false, bri: s.bri ?? 255, fx: s.fx ?? 0, col: (s.col || [[255, 255, 255]]).slice(),
+  }))
+}
+
+async function applyTipIdentify (tubeId, tipPix, segGeometryPatch) {
+  if (wled.testTube === null) testSnapshot = snapshotTestFx()
+  wled.testTube = tubeId
+  const tipId = tipSegId ?? nextTipSegId()
+  tipSegId = tipId
+  const patch = []
+  const seen = new Set()
+  for (const geo of segGeometryPatch) {
+    seen.add(geo.id)
+    if (geo.id === tubeId) {
+      patch.push({
+        id: geo.id, start: geo.start, stop: geo.stop,
+        on: true, bri: 90, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]],
+      })
+    } else {
+      patch.push({ id: geo.id, start: geo.start, stop: geo.stop, on: false })
+    }
+  }
+  for (const s of wled.segments) {
+    if (!isMappingTube(s) || seen.has(s.id)) continue
+    patch.push({ id: s.id, on: false })
+  }
+  // tip accent: full-bri 1-LED segment on the end pixel (overlaps tube tip)
+  patch.push({
+    id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME,
+    on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]],
+  })
+  await postState({ on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
+  applySegPatchLocal(patch)
+}
+
+/**
+ * Live length preview while edit modal is open: state-only segment resize + whole-tube
+ * white with tip accent. Does not write cfg / pack bus.
+ */
+export async function previewTipLeds (id, leds) {
+  const seq = ++editPreviewSeq
+  const n = Math.max(1, leds | 0)
+  cancelPersistTubes()
+  const s = wled.segments.find((x) => x.id === id)
+  if (!s) return false
+  const port = (wled.info.ports || []).find((p) => s.start >= p.start && s.start < p.start + p.len)
+  if (!port) return false
+
+  const cur = s.len ?? (s.stop - s.start)
+  const others = mappingTubesOnPort(port).filter((t) => t.id !== id)
+  const othersLen = others.reduce((a, t) => a + (t.stop - t.start), 0)
+  const need = othersLen + n
+  if (need > port.len) {
+    // Should be rare if ensureBusLen ran on open; grow once rather than fail silently.
+    const ok = await ensureBusLen(port.i, Math.min(portMappingCeiling(port.i), need))
+    if (!ok || seq !== editPreviewSeq) return false
+  }
+  if (seq !== editPreviewSeq) return false
+
+  const portNow = portRef(port.i) || port
+  const lens = new Map([[id, n]])
+  const { patch, used } = packPortSegPatch(portNow, lens)
+  const tubeGeo = patch.find((p) => p.id === id)
+  if (!tubeGeo) return false
+  // Prefer the first LED *after* the tube when the bus has headroom — overlapping the
+  // tip pixel with the tube segment made the end flicker during length preview.
+  const tipPix = (used < portNow.len) ? tubeGeo.stop : (tubeGeo.stop - 1)
+  await applyTipIdentify(id, tipPix, patch)
+  // Brief tip-only pulse so the new/removed end is obvious, then settle to tube+tip accent
+  if (seq === editPreviewSeq && cur !== n) {
+    await postState({
+      tt: 0,
+      seg: [
+        { id, on: true, bri: 40, fx: 0, col: [[255, 255, 255]] },
+        { id: tipSegId, start: tipPix, stop: tipPix + 1, on: true, bri: 255, fx: 0, col: [[255, 255, 255]] },
+      ],
+    })
+    if (seq !== editPreviewSeq) return false
+    await new Promise((r) => setTimeout(r, 70))
+    if (seq !== editPreviewSeq) return false
+    await applyTipIdentify(id, tipPix, patch)
+  }
+  return seq === editPreviewSeq
+}
+
+/**
+ * Add-modal preview: temporary tube span after existing tubes, tip accent at the end.
+ * Uses a disposable segment id (tipSegId) for the whole new span + tip overlap.
+ */
+export async function previewAddTip (portIndex, leds) {
+  const seq = ++editPreviewSeq
+  const n = Math.max(1, leds | 0)
+  cancelPersistTubes()
+  let port = portRef(portIndex)
+  if (!port) return false
+  const used = mappedUsedOnPort(port)
+  const need = used + n
+  if (need > port.len) {
+    const ok = await ensureBusLen(portIndex, Math.min(portMappingCeiling(portIndex), need))
+    if (!ok || seq !== editPreviewSeq) return false
+    port = portRef(portIndex) || port
+  }
+  if (seq !== editPreviewSeq) return false
+
+  const start = port.start + used
+  const stop = start + n
+  const tipPix = stop - 1
+  const previewId = tipSegId ?? nextTipSegId()
+  tipSegId = previewId
+
+  if (wled.testTube === null) testSnapshot = snapshotTestFx()
+  wled.testTube = previewId
+
+  const patch = mappingTubesOnPort(port).map((s) => ({ id: s.id, on: false }))
+  // Prospective tube (dim) + will pulse tip via temporary geometry
+  patch.push({
+    id: previewId, start, stop, n: TIP_SEG_NAME,
+    on: true, bri: 90, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]],
+  })
+  await postState({ on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
+  applySegPatchLocal(patch)
+  // Brief tip pulse at the new end pixel, then restore full preview span
+  if (seq === editPreviewSeq) {
+    await postState({
+      tt: 0,
+      seg: [{ id: previewId, start: tipPix, stop: tipPix + 1, on: true, bri: 255, fx: 0, col: [[255, 255, 255]] }],
+    })
+    if (seq !== editPreviewSeq) return false
+    await new Promise((r) => setTimeout(r, 70))
+    if (seq !== editPreviewSeq) return false
+    await postState({
+      tt: 0,
+      seg: [{ id: previewId, start, stop, on: true, bri: 255, fx: 0, col: [[255, 255, 255]] }],
+    })
+    applySegPatchLocal([{ id: previewId, start, stop }])
+  }
+  return seq === editPreviewSeq
+}
+
+/** Cap identify brightness so ABL/bus limits (~10 A) don't pump near full-white on long tubes. */
+function identifyBri (ledCount) {
+  const n = Math.max(1, ledCount | 0)
+  const infoMax = wled.info?.leds?.maxpwr || 12000
+  const maxpwr = Math.min(infoMax, 10000) // bus0 is typically the tight limit
+  const ledma = 55
+  const est = n * ledma
+  // Stay well under ABL so mid-chain tubes don't pump at the limit edge.
+  const budget = maxpwr * 0.65
+  if (est <= budget) return 255
+  return Math.max(40, Math.min(255, Math.round((budget * 255) / est)))
+}
+
+async function applyTestPattern (id) {
+  await clearTipSegment()
+  cancelSavePlan()
+  cancelPersistTubes()
+  if (wled.offline) { wled.testTube = id; return true }
+  if (wled.testTube === null) testSnapshot = snapshotTestFx()
+  wled.testTube = id
+  const tube = wled.segments.find((s) => s.id === id)
+  const bri = identifyBri(tube ? (tube.stop - tube.start) : 96)
+  const patch = wled.segments.filter(isMappingTube).map((s) => s.id === id
+    ? { id: s.id, on: true, bri, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]], frz: true }
+    : { id: s.id, on: false, frz: false })
+  // Stale tip / helper segments must not keep painting over the tip pixel.
+  for (const s of wled.segments) {
+    if (isMappingTube(s)) continue
+    if ((s.stop - s.start) > 0) patch.push({ id: s.id, on: false, frz: false })
+  }
+  // Stop playlist + mute overlay so Fill/etc. cannot paint over solid identify white.
+  // tt:0 bypasses the global ~0.7s transition that made test feel laggy
+  await postState({ on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
+  return true
+}
+
 export async function toggleTest (id) {
   if (wled.offline) { wled.testTube = wled.testTube === id ? null : id; return } // preview reads testTube directly
+  // A pending persistTubes() / savePlan would re-push geo and fight the solid test.
+  cancelPersistTubes()
+  cancelSavePlan()
+  await clearTipSegment()
   if (wled.testTube === id) {                 // off -> restore segments + re-enable the effect
-    await postState({ seg: testSnapshot || [], lichtnest: { geo: tubeGeometry() } })
+    // tt:0 = no crossfade; identify should feel instant
+    const thaw = (testSnapshot || []).map((s) => ({ ...s, frz: false }))
+    await postState({ tt: 0, seg: thaw, lichtnest: { mute: false, geo: tubeGeometry() } })
     testSnapshot = null; wled.testTube = null
     return
   }
-  if (wled.testTube === null) {               // entering -> snapshot the segment state
-    testSnapshot = wled.segments.map((s) => ({
-      id: s.id, on: s.on !== false, bri: s.bri ?? 255, fx: s.fx ?? 0, col: (s.col || [[255, 255, 255]]).slice(),
-    }))
-  }
-  wled.testTube = id
-  const patch = wled.segments.map((s) => s.id === id
-    ? { id: s.id, on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] }
-    : { id: s.id, on: false })
-  // clear the usermod geometry so its effect stops overriding the test
-  // (spec identify: only this tube white, the rest dark; switching tubes turns the previous off)
-  await postState({ on: true, lichtnest: { geo: [] }, seg: patch })
+  // Make sure the target tube still has a non-zero span (mapping tip can leave 0-len ghosts)
+  const tube = wled.segments.find((s) => s.id === id)
+  if (!tube || (tube.stop - tube.start) <= 0) return
+  await applyTestPattern(id)
+}
+
+/** @deprecated use previewTipLeds — kept as alias for callers. */
+export async function previewEditLeds (id, leds) {
+  return previewTipLeds(id, leds)
+}
+
+/** Cancel in-flight live edit previews (modal closed / superseded). */
+export function cancelEditPreview () { editPreviewSeq++ }
+
+/**
+ * Exit tip/test identify. Restores fx/on/bri from snapshot (not geometry).
+ * Call after segment lengths have been committed or restored separately.
+ * Does not cancel a pending persistTubes() — add/save schedules that on purpose;
+ * persistTubes itself defers while testTube is set.
+ */
+export async function endEditIdentify () {
+  cancelEditPreview()
+  await clearTipSegment()
+  if (wled.testTube == null && !testSnapshot) return
+  if (wled.offline) { wled.testTube = null; testSnapshot = null; return }
+  const fx = testSnapshot || []
+  testSnapshot = null
+  wled.testTube = null
+  const thaw = fx.map((s) => ({ ...s, frz: false }))
+  await postState({ tt: 0, seg: thaw, lichtnest: { mute: false, geo: tubeGeometry() } })
 }
 
 // --- 2D plan (photo + per-tube endpoint layout, stored on the device FS) ----
@@ -402,7 +794,24 @@ export function pointGeometry () {
 // actually-driven LEDs come from the tubes' total, not from the WLED bus length.
 export const DEFAULT_PORT_MAX = 980
 export function portMaxLeds (i) { return plan.portMax[i] || DEFAULT_PORT_MAX }
-export function setPortMax (i, v) { plan.portMax = { ...plan.portMax, [i]: Math.max(1, v | 0) }; savePlan() }
+/** Update a port LED guard. Pass `{ persist: false }` to batch changes (avoid FS writes during bus edits). */
+export function setPortMax (i, v, opts = {}) {
+  plan.portMax = { ...plan.portMax, [i]: Math.max(1, v | 0) }
+  if (opts.persist !== false) savePlan()
+}
+/** Reindex portMax after removing bus `removedIndex` (no FS write). */
+export function reindexPortMaxAfterRemove (removedIndex) {
+  const compact = {}
+  for (const [k, v] of Object.entries(plan.portMax || {})) {
+    const i = Number(k)
+    if (i === removedIndex) continue
+    compact[i < removedIndex ? i : i - 1] = v
+  }
+  plan.portMax = compact
+}
+export function cancelSavePlan () {
+  if (planTimer) { clearTimeout(planTimer); planTimer = null }
+}
 
 export async function loadPlan () {
   if (wled.offline) { plan.loaded = true; return }   // already hydrated by enterOffline()
@@ -418,6 +827,8 @@ export function savePlan () {
   if (wled.offline) { saveProject(); return }
   if (planTimer) clearTimeout(planTimer)
   planTimer = setTimeout(() => {
+    // never mid-identify: the geo push would re-enable the overlay and kill the white test
+    if (wled.testTube != null || tipSegId != null) { savePlan(); return }
     const body = JSON.stringify({ photo: plan.photo, tubes: plan.tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax })
     const fd = new FormData()
     fd.append('file', new Blob([body], { type: 'application/json' }), 'lichtnest_plan.json')
@@ -580,7 +991,7 @@ export function liveFxP () {
   return { fx: lichtnest.fx, p: lichtnest.p, delay: 0 }
 }
 export function tubeGeometry () {
-  return wled.segments.slice().sort((a, b) => a.start - b.start).map((s) => {
+  return wled.segments.filter(isMappingTube).slice().sort((a, b) => a.start - b.start).map((s) => {
     const c = plan.tubes[s.id] || { x1: 0.12, y1: 0.4, x2: 0.5, y2: 0.4 }
     return { id: s.id, x1: c.x1, y1: c.y1, x2: c.x2, y2: c.y2 }
   })
@@ -603,15 +1014,349 @@ export async function loadCfg () {
   try { const r = await fetch(httpUrl('/json/cfg')); if (r.ok) { cfg.data = await r.json(); cfg.loaded = true } } catch (e) { /* ignore */ }
   return cfg.data
 }
-export async function saveCfg (partial) {
+export async function saveCfg (partial, opts = {}) {
+  // Bus changes trigger doInitBusses + FS write; the HTTP reply often never arrives
+  // (Wi‑Fi drops / reboot). Treat a timeout as "likely applied" so the UI can recover.
+  const timeoutMs = opts.timeoutMs ?? 12000
+  const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const t = ac ? setTimeout(() => ac.abort(), timeoutMs) : null
   try {
-    const r = await fetch(httpUrl('/json/cfg'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(partial) })
+    const r = await fetch(httpUrl('/json/cfg'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(partial),
+      signal: ac?.signal,
+    })
+    if (t) clearTimeout(t)
     return r.ok
-  } catch (e) { return false }
+  } catch (e) {
+    if (t) clearTimeout(t)
+    // Fail-safe default: a dropped connection is a FAILURE unless the caller explicitly
+    // opted in (bus saves, where the device reboots mid-request and never answers).
+    return opts.timeoutOk === true
+  }
+}
+
+/** Wait until the device answers HTTP again (after bus re-init / brief Wi‑Fi blip). */
+export async function waitForDevice (secs = 20) {
+  const host = base || location.origin
+  for (let i = 0; i < secs; i++) {
+    const ac = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const t = ac ? setTimeout(() => ac.abort(), 2000) : null
+    try {
+      const r = await fetch(host + '/json/info', { cache: 'no-store', signal: ac?.signal })
+      if (t) clearTimeout(t)
+      if (r.ok) return true
+    } catch (e) {
+      if (t) clearTimeout(t)
+    }
+    await new Promise((res) => setTimeout(res, 1000))
+  }
+  return false
+}
+
+function busesMatchFs (expected, got) {
+  if (!Array.isArray(expected) || !Array.isArray(got) || expected.length !== got.length) return false
+  for (let i = 0; i < expected.length; i++) {
+    const e = expected[i] || {}, g = got[i] || {}
+    if ((e.pin?.[0] ?? null) !== (g.pin?.[0] ?? null)) return false
+    if ((e.start ?? 0) !== (g.start ?? 0)) return false          // wrong offset = wrong mapping
+    if ((e.len ?? 0) !== (g.len ?? 0)) return false              // wrong length = truncated tubes
+    if (e.type != null && g.type != null && e.type !== g.type) return false
+  }
+  return true
+}
+
+async function fetchFsCfg () {
+  try {
+    const r = await fetch(httpUrl('/cfg.json') + '?v=' + Date.now(), { cache: 'no-store' })
+    if (!r.ok) return null
+    return await r.json()
+  } catch (e) {
+    return null
+  }
+}
+
+/** Write a full cfg object to LittleFS as /cfg.json (triggers reboot on device). */
+async function uploadCfgJson (cfgObj) {
+  const body = JSON.stringify(cfgObj)
+  const fd = new FormData()
+  fd.append('data', new Blob([body], { type: 'application/json' }), 'cfg.json')
+  const r = await fetch(httpUrl('/upload'), { method: 'POST', body: fd }).catch(() => null)
+  return !!(r && r.ok)
+}
+
+async function refreshInfoPorts () {
+  try {
+    const info = await fetch(httpUrl('/json/info'), { cache: 'no-store' }).then((r) => r.json())
+    if (Array.isArray(info.ports)) wled.info.ports = info.ports
+  } catch (e) { /* ignore */ }
+}
+
+/**
+ * Persist LED bus list (`hw.led.ins`) and verify against on-flash /cfg.json.
+ * Falls back to multipart cfg.json upload when the JSON API path does not stick
+ * (e.g. bus re-init hang left the old file on FS).
+ * @returns {{ ok: boolean, method: 'api'|'upload', count: number }}
+ */
+export async function saveLedBuses (ins, { reboot = true } = {}) {
+  const list = Array.isArray(ins) ? ins : []
+  const payload = { hw: { led: { ins: list } } }
+  if (reboot) payload.rb = true
+  await saveCfg(payload, { timeoutMs: 6000, timeoutOk: true })
+  await waitForDevice(40)
+  let fs = await fetchFsCfg()
+  if (fs && busesMatchFs(list, fs.hw?.led?.ins)) {
+    await loadCfg()
+    await refreshInfoPorts()
+    return { ok: true, method: 'api', count: list.length }
+  }
+  // Fallback: patch full cfg on FS (proven path when doInitBusses never reaches serializeConfigToFS)
+  let full = fs || await fetchFsCfg()
+  if (!full) {
+    await loadCfg()
+    full = cfg.data ? JSON.parse(JSON.stringify(cfg.data)) : null
+  }
+  if (!full?.hw) {
+    await loadCfg()
+    await refreshInfoPorts()
+    return { ok: false, method: 'upload', count: cfg.data?.hw?.led?.ins?.length ?? 0 }
+  }
+  if (!full.hw.led) full.hw.led = {}
+  full.hw.led.ins = list
+  full.hw.led.total = list.reduce((a, b) => a + (b.len || 0), 0)
+  await uploadCfgJson(full)
+  await waitForDevice(40)
+  fs = await fetchFsCfg()
+  await loadCfg()
+  await refreshInfoPorts()
+  const ok = !!(fs && busesMatchFs(list, fs.hw?.led?.ins))
+  return { ok, method: 'upload', count: fs?.hw?.led?.ins?.length ?? 0 }
 }
 // sum of tube LEDs per port index (the actually-driven LED count)
 export function tubesTotalForPort (portStart, portEnd) {
   return wled.segments.filter((s) => s.start >= portStart && s.start < portEnd).reduce((m, s) => Math.max(m, s.stop - portStart), 0)
+}
+
+async function ensureCfg () {
+  if (!cfg.loaded || !cfg.data?.hw?.led?.ins) await loadCfg()
+  return cfg.data?.hw?.led?.ins
+}
+
+function applySegPatchLocal (patch) {
+  for (const p of patch) {
+    if ((p.stop || 0) <= (p.start || 0)) {
+      wled.segments = wled.segments.filter((s) => s.id !== p.id)
+      continue
+    }
+    let s = wled.segments.find((x) => x.id === p.id)
+    if (!s) {
+      s = { id: p.id, on: true, bri: 255, fx: 0, col: p.col || [[240, 162, 60]] }
+      wled.segments.push(s)
+    }
+    if (p.start != null) s.start = p.start
+    if (p.stop != null) s.stop = p.stop
+    if (p.n != null) s.n = p.n
+    if (p.col) s.col = p.col
+    s.len = s.stop - s.start
+  }
+}
+
+async function refreshPortsFromInfo () {
+  try {
+    const r = await fetch(httpUrl('/json/info'))
+    if (!r.ok) return
+    const info = await r.json()
+    if (Array.isArray(info.ports)) wled.info.ports = info.ports
+    Object.assign(wled.info, info)
+    recomputeLeds()
+  } catch (e) { /* ignore */ }
+}
+
+/**
+ * Derive WLED bus lengths from tube segments. `plan.portMax` is only a guard.
+ * opts: { add?, removeId?, resize?, rename?, reorder? }
+ * Returns false if a port would exceed its guard (no changes applied).
+ */
+export async function syncBusesFromTubes (opts = {}) {
+  const offline = wled.offline
+  let ins = null
+  if (offline) {
+    // synthesise bus list from info.ports
+    ins = (wled.info.ports || []).map((p, i) => ({
+      start: p.start || 0,
+      len: Math.max(1, p.len || 1),
+      pin: p.gpio != null ? [p.gpio] : [16],
+      i: p.i ?? i,
+    }))
+  } else {
+    ins = await ensureCfg()
+    if (!ins?.length) return false
+  }
+
+  // Group existing tubes by port span [start, nextPortStart)
+  const lists = ins.map((b, i) => {
+    const end = i + 1 < ins.length ? ins[i + 1].start : (b.start + Math.max(b.len || 0, 1))
+    return wled.segments
+      .filter((s) => (s.stop - s.start) > 0 && s.start >= b.start && s.start < end)
+      .sort((a, c) => a.start - c.start)
+      .map((s) => ({ id: s.id, len: s.stop - s.start, n: s.n, col: s.col }))
+  })
+
+  if (opts.removeId != null) {
+    for (const list of lists) {
+      const idx = list.findIndex((t) => t.id === opts.removeId)
+      if (idx >= 0) list.splice(idx, 1)
+    }
+  }
+  if (opts.resize) {
+    const { id, leds } = opts.resize
+    const n = Math.max(1, leds | 0)
+    for (const list of lists) {
+      const t = list.find((x) => x.id === id)
+      if (t) t.len = n
+    }
+  }
+  if (opts.rename) {
+    const { id, name } = opts.rename
+    for (const list of lists) {
+      const t = list.find((x) => x.id === id)
+      if (t) t.n = name
+    }
+  }
+  if (opts.reorder) {
+    const { portIndex, orderedIds } = opts.reorder
+    const list = lists[portIndex]
+    if (list) {
+      const byId = new Map(list.map((t) => [t.id, t]))
+      const next = orderedIds.map((id) => byId.get(id)).filter(Boolean)
+      // keep any tubes missing from orderedIds at the end
+      list.forEach((t) => { if (!orderedIds.includes(t.id)) next.push(t) })
+      lists[portIndex] = next
+    }
+  }
+  if (opts.add) {
+    const { portIndex, leds, id, name } = opts.add
+    const list = lists[portIndex]
+    if (!list) return false
+    list.push({ id, len: Math.max(1, leds | 0), n: name || 'Tube', col: [[240, 162, 60]], isNew: true })
+  }
+
+  // Guard check
+  for (let i = 0; i < lists.length; i++) {
+    const used = lists[i].reduce((a, t) => a + t.len, 0)
+    if (used > portMappingCeiling(i)) return false
+  }
+
+  // Pack buses + segments
+  let cursor = 0
+  const segPatch = []
+  const keepIds = new Set()
+  for (let i = 0; i < ins.length; i++) {
+    const used = lists[i].reduce((a, t) => a + t.len, 0)
+    const newLen = Math.max(1, used) // empty port keeps 1 LED so the bus stays valid
+    ins[i].start = cursor
+    ins[i].len = newLen
+    let c = cursor
+    for (const t of lists[i]) {
+      const row = { id: t.id, start: c, stop: c + t.len }
+      if (t.n != null) row.n = t.n
+      if (t.isNew) row.col = t.col || [[240, 162, 60]]
+      segPatch.push(row)
+      keepIds.add(t.id)
+      c += t.len
+    }
+    cursor += newLen
+  }
+  // Delete segments that disappeared (remove) or fell outside ports
+  for (const s of wled.segments) {
+    if ((s.stop - s.start) > 0 && !keepIds.has(s.id)) segPatch.push({ id: s.id, start: 0, stop: 0 })
+  }
+
+  if (offline) {
+    wled.info.ports = ins.map((b, i) => ({
+      i: b.i ?? i,
+      start: b.start,
+      len: b.len,
+      gpio: Array.isArray(b.pin) ? b.pin[0] : b.pin,
+    }))
+    applySegPatchLocal(segPatch)
+    recomputeLeds()
+    saveProject()
+    return true
+  }
+
+  // Preserve full bus config fields; only start/len were rewritten above
+  const okCfg = await saveCfg({ hw: { led: { ins } } })
+  if (!okCfg) return false
+  if (cfg.data?.hw?.led) cfg.data.hw.led.ins = ins
+  if (segPatch.length) {
+    const okSeg = await postState({ seg: segPatch })
+    if (!okSeg) return false
+  }
+  applySegPatchLocal(segPatch)
+  // Optimistic ports (info refresh may lag while buses re-init)
+  wled.info.ports = ins.map((b, i) => ({
+    i,
+    start: b.start,
+    len: b.len,
+    type: b.type,
+    gpio: Array.isArray(b.pin) ? b.pin[0] : undefined,
+  }))
+  recomputeLeds()
+  refreshPortsFromInfo() // background confirm
+  return true
+}
+
+/** Per-bus [start,end) from ins. Overlapping / non-monotonic starts fall back to start+len. */
+function busBounds (ins) {
+  return ins.map((b, i) => {
+    const start = b.start || 0
+    const len = Math.max(1, b.len || 1)
+    const next = i + 1 < ins.length ? (ins[i + 1].start || 0) : Infinity
+    if (next > start) return { start, end: next }
+    return { start, end: start + len }
+  })
+}
+
+/** Lowest-index bus that contains segment start (stable under overlapping ranges). */
+function ownerBusIndex (segStart, bounds) {
+  for (let i = 0; i < bounds.length; i++) {
+    if (segStart >= bounds[i].start && segStart < bounds[i].end) return i
+  }
+  return -1
+}
+
+/** Derive each bus len from current tubes (for System Speichern). Mutates `ins`. */
+export function applyTubeLensToIns (ins) {
+  if (!ins?.length) return { ok: true }
+  const bounds = busBounds(ins)
+  const byPort = ins.map(() => [])
+  for (const s of wled.segments) {
+    if ((s.stop - s.start) <= 0) continue
+    const oi = ownerBusIndex(s.start, bounds)
+    if (oi >= 0) byPort[oi].push(s)
+  }
+  for (let i = 0; i < ins.length; i++) {
+    const used = byPort[i].reduce((a, s) => a + (s.stop - s.start), 0)
+    if (used > portMaxLeds(i)) return { ok: false, port: i, used, max: portMaxLeds(i) }
+  }
+  let cursor = 0
+  const segPatch = []
+  for (let i = 0; i < ins.length; i++) {
+    const tubesIn = byPort[i].slice().sort((a, b) => a.start - b.start)
+    const used = tubesIn.reduce((a, s) => a + (s.stop - s.start), 0)
+    const newLen = Math.max(1, used)
+    const ns = cursor
+    let c = ns
+    for (const s of tubesIn) {
+      const len = s.stop - s.start
+      if (s.start !== c || s.stop !== c + len) segPatch.push({ id: s.id, start: c, stop: c + len })
+      c += len
+    }
+    ins[i].start = ns
+    ins[i].len = newLen
+    cursor += newLen
+  }
+  return { ok: true, segPatch }
 }
 
 // --- load + live connection ------------------------------------------------
@@ -627,10 +1372,23 @@ async function load () {
     wled.ready = true
     wled.online = true
     wled.error = ''
+    cleanupStaleTips()
   } catch (e) {
     wled.error = 'Keine Verbindung zum Controller'
     wled.online = false
   }
+}
+
+// Remove orphaned tip-preview segments (add/edit modal interrupted by a reload/crash —
+// the disposable __ln_tip__ helper then survives on the device as a real segment).
+let tipCleanupDone = false
+async function cleanupStaleTips () {
+  if (tipCleanupDone || wled.offline || tipSegId != null) return
+  const stale = wled.segments.filter((s) => s.n === TIP_SEG_NAME)
+  if (!stale.length) { tipCleanupDone = true; return }
+  tipCleanupDone = true
+  await postState({ seg: stale.map((s) => ({ id: s.id, start: 0, stop: 0 })) })
+  wled.segments = wled.segments.filter((s) => s.n !== TIP_SEG_NAME)
 }
 
 let ws = null

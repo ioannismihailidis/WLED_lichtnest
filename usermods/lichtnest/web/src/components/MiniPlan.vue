@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { wled, lichtnest, plan, liveFxP, effectOrigin } from '../wled.js'
+import { wled, lichtnest, plan, liveFxP, effectOrigin, isMappingTube } from '../wled.js'
 import { fxColor, rgbCss, phaseRate, strobePhaseAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt } from '../fxsim.js'
 import { impulsePositions, impulseDuration, impulseColorAt, impulseDist, impulseUmax } from '../impulse.js'
 
@@ -41,7 +41,7 @@ const canvas = ref(null)
 let raf = 0
 
 function defaultCoords (idx) { const row = 0.18 + (idx % 6) * 0.12; return { x1: 0.12, y1: row, x2: 0.52, y2: row } }
-const tubes = computed(() => wled.segments.map((s, i) => {
+const tubes = computed(() => wled.segments.filter(isMappingTube).map((s, i) => {
   const c = plan.tubes[s.id] || defaultCoords(i)
   return { leds: s.len ?? (s.stop - s.start), start: s.start, x1: c.x1, y1: c.y1, x2: c.x2, y2: c.y2 }
 }).sort((a, b) => a.start - b.start))
