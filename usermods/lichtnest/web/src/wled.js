@@ -6,11 +6,15 @@
 //   WS   /ws            -> live { state, info } pushes
 //
 // When served from the device the base is same-origin. For local dev
-// (`npm run dev`) point it at the device with ?host=http://4.3.2.1 (remembered
-// in localStorage, same idea as WLED's file mode).
+// (`npm run dev`) either start with ZV_HOST=http://4.3.2.1 (Vite proxies API +
+// WebSocket, same-origin — preferred) or point at the device with
+// ?host=http://4.3.2.1 (remembered in localStorage, same idea as WLED's file mode).
 import { reactive } from 'vue'
 import { phaseRate, strobeDuration, solidDuration } from './fxsim.js'
 import { impulseUmax, impulseDuration } from './impulse.js'
+
+/* global __LN_PROXY__ */
+const useDevProxy = typeof __LN_PROXY__ !== 'undefined' && !!__LN_PROXY__
 
 function normHost (h) {
   if (!h) return ''
@@ -19,6 +23,7 @@ function normHost (h) {
   return v.replace(/\/$/, '')
 }
 function resolveBase () {
+  if (useDevProxy) return ''   // dev proxy: same-origin, Vite forwards to ZV_HOST
   const q = new URLSearchParams(location.search).get('host')
   if (q) localStorage.setItem('zv_host', normHost(q))
   const stored = localStorage.getItem('zv_host')
@@ -31,7 +36,9 @@ let base = resolveBase()
 
 // Opened locally (double-clicked file, or `npm run dev` on localhost) rather
 // than served from the device — then we need an explicit device host.
+// With the ZV_HOST dev proxy active, localhost IS the device (same-origin).
 export function isFileMode () {
+  if (useDevProxy) return false
   return location.protocol === 'file:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
 }
 export function getHost () { return base }

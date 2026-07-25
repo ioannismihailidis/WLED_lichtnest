@@ -24,7 +24,46 @@ makes it the UI at `/`. Deleting it reverts to stock.
 The `/classic` route (added in `initServer()`) always serves the embedded
 original UI, regardless of what is on the filesystem.
 
+## Local development (no device required)
+
+```bash
+cd usermods/lichtnest/web
+npm install
+npm run dev          # → http://localhost:5173  (offline "Lokales Projekt")
+```
+
+Without a controller the UI starts in offline mode: edit tubes, effects, and
+playlists with the client-side preview, then export playlists for later import.
+
+Against a live device (pick one):
+
+```bash
+# Vite proxies API + WebSocket (same-origin, recommended)
+ZV_HOST=http://4.3.2.1 npm run dev
+
+# Or open the app and pass the device in the URL (remembered in localStorage)
+# http://localhost:5173/?host=http://4.3.2.1
+```
+
+On Windows PowerShell: `$env:ZV_HOST='http://4.3.2.1'; npm run dev`
+
 ## Build & deploy
+
+**One-shot update script** (recommended for repeatable builds/flashes):
+
+```bash
+# From repo root — never flashes unless you pass --ota or --serial
+./usermods/lichtnest/update.sh --build-only
+./usermods/lichtnest/update.sh --ota 4.3.2.1              # AP default
+./usermods/lichtnest/update.sh --serial                   # USB auto-detect (COMx works in Git Bash)
+./usermods/lichtnest/update.sh --ui-only --ota 4.3.2.1    # UI gzip only
+```
+
+What it does: builds the Lichtnest UI (`web/` → `dist/index.htm.gz`), builds
+firmware for `[env:esp32_eth]`, flashes firmware (OTA espota or serial), then
+HTTP-uploads the UI to WLED `/upload`.
+
+UI-only / manual path:
 
 ```bash
 cd usermods/lichtnest/web
