@@ -31,12 +31,12 @@ export const LOOP_OPTS = [
 
 // continuous numerics (lerp). bounce/mode/… stay discrete.
 const NUM_KEYS = [
-  'speed', 'angle', 'rwidth', 'duty', 'hz', 'count', 'interval', 'tail', 'cpar',
+  'speed', 'angle', 'rwidth', 'duty', 'hz', 'airGap', 'count', 'interval', 'tail', 'cpar',
   'rfin', 'rgap', 'tempo', 'rfout',
 ]
 const DISCRETE_KEYS = [
   'pmode', 'mode', 'dir', 'origin', 'breathe', 'asrc', 'amod', 'again',
-  'bounce', 'width', // width slot = bounce on firmware
+  'bounce', 'width', // width = legacy bounce alias
 ]
 
 function cloneP (p) {

@@ -1,7 +1,7 @@
 {
   "name": "lichtnest-ui",
   "private": true,
-  "version": "0.9.3",
+  "version": "0.9.5",
   "type": "module",
   "description": "Zugvögel Lichtnest custom WLED UI (Vue 3)",
   "scripts": {

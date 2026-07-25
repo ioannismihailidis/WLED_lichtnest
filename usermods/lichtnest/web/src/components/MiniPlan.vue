@@ -159,7 +159,7 @@ function draw () {
     for (const tb of list) pts.push({ x: tb.x1, y: tb.y1 }, { x: tb.x2, y: tb.y2 })
     umax = impulseUmax(p, pts, cx0, cy0)
   }
-  const marblePath0 = fx === 5 ? buildMarblePath(list, p.dir || 0, p.hz ?? 8) : null
+  const marblePath0 = fx === 5 ? buildMarblePath(list, p.dir || 0, (p.airGap ?? p.hz ?? 8)) : null
   const { elapsed, paramElapsed, wait } = frame(fx, p, umax, marblePath0 ? marblePath0.total : 1)
   // raw clock for playhead / resolveSnap (resolve wraps on tl duration internally)
   setPreviewElapsed(paramElapsed)

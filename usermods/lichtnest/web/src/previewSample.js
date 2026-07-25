@@ -85,7 +85,7 @@ export function sampleEffect (step, ctx) {
     const pts0 = []
     for (const tb of list) pts0.push({ x: tb.x1, y: tb.y1 }, { x: tb.x2, y: tb.y2 })
     const umax0 = (fx === 0 || fx === 6 || fx === 8) ? impulseUmax(p, pts0, cx0, cy0) : 1
-    const mp0 = fx === 5 ? buildMarblePath(list || [], p.dir || 0, p.hz ?? 8) : null
+    const mp0 = fx === 5 ? buildMarblePath(list || [], p.dir || 0, (p.airGap ?? p.hz ?? 8)) : null
     const D = stepDur(fx, p, umax0, mp0 ? mp0.total : 1)
     elapsed = D > 0.05 ? D : elapsed
   }
@@ -103,7 +103,7 @@ export function sampleEffect (step, ctx) {
   }
   const [cx, cy] = originFn(p)
   let umax = 1
-  const marblePath = fx === 5 ? buildMarblePath(list || [], p.dir || 0, p.hz ?? 8) : null
+  const marblePath = fx === 5 ? buildMarblePath(list || [], p.dir || 0, (p.airGap ?? p.hz ?? 8)) : null
   if (fx === 0 || fx === 6 || fx === 8) {
     const pts = []
     for (const tb of list) pts.push({ x: tb.x1, y: tb.y1 }, { x: tb.x2, y: tb.y2 })

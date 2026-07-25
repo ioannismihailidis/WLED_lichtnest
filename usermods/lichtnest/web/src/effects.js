@@ -96,7 +96,7 @@ export function SOFT_EDGE (name = 'Weiche Kante', def = 18, opts = {}) {
 export function MOTION_DIR (name = 'Richtung', opts = {}) {
   return { key: 'dir', type: 'select', name, group: 'bewegung', options: DIR_OPTS, ...opts }
 }
-/** Loop vs ping-pong travel — wire key `bounce` (firmware stores in unused `width`). */
+/** Loop vs ping-pong travel — wire key `bounce` (legacy alias `width`). */
 export function MOTION_BOUNCE (def = 0, opts = {}) {
   return {
     key: 'bounce', type: 'select', name: 'Lauf', group: 'bewegung', def,
@@ -213,7 +213,7 @@ export const EFFECTS = [
       { key: 'interval', type: 'range', name: 'Abstand', min: 1, max: 50, mul: 0.1, unit: 's', def: 10, group: 'bewegung' },
       { key: 'rwidth', type: 'range', name: 'Kugelgröße', min: 4, max: 60, unit: '%', def: 18, group: 'raum' },
       { key: 'tail', type: 'range', name: 'Schweif', min: 0, max: 80, unit: '%', def: 22, group: 'raum' },
-      { key: 'hz', type: 'range', name: 'Fall-Pause', min: 0, max: 40, def: 8, group: 'bewegung', hint: 'Luft zwischen Tubes' },
+      { key: 'airGap', type: 'range', name: 'Fall-Pause', min: 0, max: 40, def: 8, group: 'bewegung', hint: 'Luft zwischen Tubes' },
       MOTION_SPEED('Tempo', 48),
       ADSR_BLOCK({ rfin: 0, rgap: 0, tempo: 100, rfout: 3 }),
     ],
@@ -239,8 +239,8 @@ export const EFFECTS = [
   },
   {
     id: 8, key: 'fill', name: 'Fill / Wasserstand', category: 'flaeche',
-    desc: 'Pegel füllt die Fläche: Reveal (Wellenfront), Wasserstand (einschenken & halten) oder Gezeiten (atmend).',
-    tip: 'Oben „Art“ wählen: Wasserstand = Pegel steigt und bleibt; Gezeiten = langsam auf/ab; Reveal = klassische Front.',
+    desc: 'Pegel füllt die Fläche: Reveal, Wasserstand, Gezeiten oder Audio-Pegel (live vom Mikrofon).',
+    tip: 'Audio-Pegel = früher Bass-Pegel. Quelle + Empfindlichkeit unter Audio.',
     preview: 'linear-gradient(180deg,#0d0f13 0 40%,#27c5ff55 40%,#27c5ff 70%,#0a4a6a 100%)',
     params: [
       {
@@ -249,18 +249,31 @@ export const EFFECTS = [
           { v: 0, l: 'Reveal' },
           { v: 1, l: 'Wasserstand' },
           { v: 2, l: 'Gezeiten' },
+          { v: 3, l: 'Audio-Pegel' },
         ],
       },
       COLOR_GRAD({ seedColor: [39, 197, 255] }),
       ...SPATIAL_PLANE,
       SOFT_EDGE('Weiche Kante', 18),
-      MOTION_SPEED(),
+      MOTION_SPEED('Geschwindigkeit', 42, { show: (p) => (p.mode || 0) !== 3 }),
       {
         key: 'duty', type: 'range', name: 'Gezeiten-Amplitude', min: 5, max: 100, unit: '%', def: 55, group: 'bewegung',
         show: (p) => (p.mode || 0) === 2,
       },
       ADSR_BLOCK({ rfin: 0, rgap: 0, tempo: 100, rfout: 0 }),
-      ...AUDIO_BLOCK(),
+      {
+        key: 'asrc', type: 'select', name: 'Quelle', group: 'audio', def: 2,
+        options: ASRC_OPTS.filter((o) => o.v > 0),
+        show: (p) => (p.mode || 0) === 3,
+      },
+      {
+        key: 'again', type: 'range', name: 'Empfindlichkeit', group: 'audio', min: 0, max: 255, def: 200,
+        show: (p) => (p.mode || 0) === 3,
+      },
+      ...AUDIO_BLOCK().map((pr) => ({
+        ...pr,
+        show: (p) => (p.mode || 0) !== 3 && (!(pr.show) || pr.show(p)),
+      })),
     ],
   },
   {
@@ -295,38 +308,26 @@ export const EFFECTS = [
       ...AUDIO_BLOCK(),
     ],
   },
+  // Legacy ids 10 / 13 kept for playlist/preset load only — not in V2_GENERATOR_IDS.
   {
-    id: 10, key: 'beat', name: 'Beat-Impuls', category: 'audio',
-    desc: 'Beat- und Pegel-Impulse vom Mikrofon — Tube blitzt oder füllt sich mit der Energie.',
-    tip: 'Quelle Beat für Drums; Pegel für durchgehende Reaktion. Stärke = Empfindlichkeit.',
-    preview: 'radial-gradient(circle at 50% 50%,#fff 0 8%,#ff5a3c 18%,#0d0f13 55%)',
+    id: 10, key: 'beat', name: 'Beat-Impuls (Legacy)', category: 'audio',
+    desc: 'Legacy — nutze Rezept „Beat-Flash“ (Solid + Audio) oder Spektrum.',
     params: [
       COLOR_GRAD({ seedColor: [255, 90, 60] }),
-      {
-        key: 'asrc', type: 'select', name: 'Quelle', group: 'audio', def: 5,
-        options: ASRC_OPTS.filter((o) => o.v > 0),
-      },
-      {
-        key: 'pmode', type: 'select', name: 'Form', group: 'raum', def: 0,
-        options: [{ v: 0, l: 'Ganzer Tube' }, { v: 2, l: 'Balken' }],
-      },
+      { key: 'asrc', type: 'select', name: 'Quelle', group: 'audio', def: 5, options: ASRC_OPTS.filter((o) => o.v > 0) },
+      { key: 'pmode', type: 'select', name: 'Form', group: 'raum', def: 0, options: [{ v: 0, l: 'Ganzer Tube' }, { v: 2, l: 'Balken' }] },
       SOFT_EDGE('Weiche Kante', 14),
       { key: 'again', type: 'range', name: 'Empfindlichkeit', group: 'audio', min: 0, max: 255, def: 200 },
     ],
   },
   {
-    id: 13, key: 'bassfill', name: 'Bass-Pegel', category: 'audio',
-    desc: 'Bass-Energie steuert den Füllstand — wie Wasserstand, aber live vom Mikrofon.',
-    tip: 'Richtung über Plan-Marker / Winkel; Empfindlichkeit für laute Räume runterdrehen.',
-    preview: 'linear-gradient(180deg,#0d0f13 0 45%,#7b3cff88 45%,#7b3cff 75%,#2a1050 100%)',
+    id: 13, key: 'bassfill', name: 'Bass-Pegel (Legacy)', category: 'audio',
+    desc: 'Legacy — wird zu Fill Art „Audio-Pegel“ normalisiert.',
     params: [
       COLOR_GRAD({ seedColor: [123, 60, 255] }),
       ...SPATIAL_PLANE,
       SOFT_EDGE('Weiche Kante', 14),
-      {
-        key: 'asrc', type: 'select', name: 'Quelle', group: 'audio', def: 2,
-        options: ASRC_OPTS.filter((o) => o.v > 0),
-      },
+      { key: 'asrc', type: 'select', name: 'Quelle', group: 'audio', def: 2, options: ASRC_OPTS.filter((o) => o.v > 0) },
       { key: 'again', type: 'range', name: 'Empfindlichkeit', group: 'audio', min: 0, max: 255, def: 200 },
     ],
   },
@@ -403,8 +404,23 @@ export const V2_CATEGORIES = [
 ]
 
 /** Base generators for Effekte 2.0 (docs/generators.md) — incl. Neon + audio looks. */
-export const V2_GENERATOR_IDS = [3, 8, 9, 11, 14, 0, 5, 6, 12, 1, 2, 7, 10, 13]
+// Spektrum stays; Beat/Bass are recipes (Solid+audio / Fill Audio-Pegel)
+export const V2_GENERATOR_IDS = [3, 8, 9, 11, 14, 0, 5, 6, 12, 1, 2, 7]
 export const V2_GENERATORS = V2_GENERATOR_IDS.map((id) => effectById(id)).filter(Boolean)
+
+/** Normalize legacy fx ids / param aliases for load paths. */
+export function normalizeLookFx (fx, p = {}) {
+  const out = { ...(p || {}) }
+  if (out.bounce == null && out.width != null) out.bounce = +out.width || 0
+  let nfx = +fx || 0
+  if (nfx === 5 && out.airGap == null && out.hz != null) out.airGap = +out.hz || 0
+  if (nfx === 13) {
+    nfx = 8
+    out.mode = 3
+    if (out.asrc == null || out.asrc === 0) out.asrc = 2
+  }
+  return { fx: nfx, p: out }
+}
 
 /** Catalogue groups for Effekte 2.0 list view. */
 export function v2CatalogueGroups () {
@@ -579,14 +595,27 @@ export function recipePresetSeeds () {
     {
       id: 'recipe-beat-flash',
       name: 'Beat-Flash',
-      fx: 10,
-      p: { ...defaultParams(10), asrc: 5, pmode: 0, again: 220 },
+      fx: 3,
+      p: {
+        ...defaultParams(3),
+        breathe: false,
+        asrc: 5,
+        amod: 0,
+        again: 220,
+        keys: [
+          { t: 0, v: 0.3, c: [255, 90, 60] },
+          { t: 2, v: 0.3, c: [255, 90, 60] },
+        ],
+      },
     },
     {
       id: 'recipe-bass-level',
       name: 'Bass-Pegel',
-      fx: 13,
-      p: { ...defaultParams(13), asrc: 2, pmode: 0, angle: 90, again: 200, rwidth: 14 },
+      fx: 8,
+      p: {
+        ...defaultParams(8),
+        mode: 3, pmode: 0, angle: 90, asrc: 2, again: 200, rwidth: 14,
+      },
     },
   ]
 }

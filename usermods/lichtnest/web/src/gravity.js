@@ -18,7 +18,7 @@ export function tubesFromPts (geomPts) {
 /**
  * Marble-run path in chain/geo order. Each tube is oriented by gravity (+Y = down);
  * `dir` flips gravity. Gaps between exit→entry are virtual (no LEDs).
- * `airExtra` (from wire `hz` Fall-Pause) adds virtual gap length between tubes.
+ * `airExtra` (from wire `airGap` / legacy `hz` Fall-Pause) adds virtual gap length.
  */
 export function buildMarblePath (tubes, dir = 0, airExtra = 0) {
   const N = (tubes || []).length

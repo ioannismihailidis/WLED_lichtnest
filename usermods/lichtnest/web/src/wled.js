@@ -13,7 +13,7 @@ import { reactive } from 'vue'
 import { phaseRate, strobeDuration, solidDuration, strobePhaseAt, solidPhaseAt } from './fxsim.js'
 import { impulseUmax, impulseDuration, fillDuration } from './impulse.js'
 import { buildMarblePath, marbleDuration } from './gravity.js'
-import { defaultParams, effectById, expandParamKeys, COMBINED_FX, recipePresetSeeds } from './effects.js'
+import { defaultParams, effectById, expandParamKeys, COMBINED_FX, recipePresetSeeds, normalizeLookFx } from './effects.js'
 
 /* global __LN_PROXY__ */
 const useDevProxy = typeof __LN_PROXY__ !== 'undefined' && !!__LN_PROXY__
@@ -328,14 +328,28 @@ export const actions = {
 }
 
 // Discrete (non-throttled) state post — for tube/segment operations.
+// Hang probe: in console set localStorage.zvDbg='1' and postState({lichtnest:{dbg:true}}).
 export async function postState (body) {
   if (wled.offline) { applyLocal(body); return true }
+  const zvDbg = typeof localStorage !== 'undefined' && localStorage.zvDbg === '1'
+  const t0 = zvDbg ? performance.now() : 0
   try {
     const payload = { ...body, time: browserUnix() }
     const r = await fetch(httpUrl('/json/state'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     })
     if (r.ok) { const s = await r.json().catch(() => null); if (s) applyState(s) }
+    if (zvDbg) {
+      const ms = performance.now() - t0
+      if (ms > 150) {
+        try {
+          const t = await fetch(httpUrl('/json/ln_timing')).then((x) => x.json())
+          console.warn('[zvDbg] postState', Math.round(ms) + 'ms', body?.lichtnest ? Object.keys(body.lichtnest) : Object.keys(body || {}), t)
+        } catch (_) {
+          console.warn('[zvDbg] postState', Math.round(ms) + 'ms', '(ln_timing failed)')
+        }
+      }
+    }
     return r.ok
   } catch (e) { return false }
 }
@@ -1052,12 +1066,18 @@ function nextFxPresetId () { return 'fp' + Date.now().toString(36) + Math.floor(
 
 function normalizeFxPreset (raw) {
   if (!raw || typeof raw !== 'object') return null
-  const fx = raw.fx != null ? +raw.fx : COMBINED_FX
+  let fx = raw.fx != null ? +raw.fx : COMBINED_FX
+  let pIn = raw.p && Object.keys(raw.p).length ? raw.p : null
+  if (fx !== COMBINED_FX) {
+    const n = normalizeLookFx(fx, pIn || defaultParams(fx))
+    fx = n.fx
+    pIn = n.p
+  }
   const name = (raw.name || '').trim() || effectById(fx).name
   const entry = { id: raw.id || nextFxPresetId(), name, fx }
   if (fx === COMBINED_FX) entry.layers = cloneLayers(raw.layers)
   else {
-    entry.p = cloneParams(raw.p && Object.keys(raw.p).length ? raw.p : defaultParams(fx))
+    entry.p = cloneParams(pIn || defaultParams(fx))
     if (Array.isArray(raw.tl) && raw.tl.length) entry.tl = JSON.parse(JSON.stringify(raw.tl))
   }
   return entry
@@ -1098,11 +1118,24 @@ export function ensureRecipePresets () {
     fxPresets.list.push(entry)
     n++
   }
-  // refresh Scanner recipe if it still uses removed fx 13
-  const scan = fxPresets.list.find((x) => x.id === 'recipe-scanner')
-  if (scan && scan.fx === 13) {
-    const fresh = normalizeFxPreset(recipePresetSeeds().find((r) => r.id === 'recipe-scanner'))
-    if (fresh) { scan.fx = fresh.fx; scan.p = fresh.p; delete scan.layers; n++ }
+  // refresh recipes that still point at removed / remapped generator ids
+  for (const id of ['recipe-scanner', 'recipe-beat-flash', 'recipe-bass-level']) {
+    const cur = fxPresets.list.find((x) => x.id === id)
+    const fresh = normalizeFxPreset(recipePresetSeeds().find((r) => r.id === id))
+    if (!cur || !fresh) continue
+    const stale =
+      (id === 'recipe-scanner' && cur.fx === 13) ||
+      (id === 'recipe-beat-flash' && cur.fx === 10) ||
+      (id === 'recipe-bass-level' && (cur.fx === 13 || (cur.fx === 8 && (cur.p?.mode || 0) !== 3)))
+    if (stale) {
+      cur.fx = fresh.fx; cur.p = fresh.p; delete cur.layers; n++
+    }
+  }
+  // migrate any user presets still on legacy Bass fx 13
+  for (const cur of fxPresets.list) {
+    if (cur.fx !== 13) continue
+    const nrm = normalizeLookFx(13, cur.p || {})
+    cur.fx = nrm.fx; cur.p = nrm.p; n++
   }
   if (n) savePlaylists()
   return n
@@ -1111,12 +1144,13 @@ export function ensureRecipePresets () {
 /** Deep-copied look ready for a playlist step or live apply. */
 export function materializePreset (preset) {
   if (!preset) return { fx: 3, p: defaultParams(3), layers: [], tl: [], name: '' }
-  const fx = preset.fx != null ? +preset.fx : COMBINED_FX
+  let fx = preset.fx != null ? +preset.fx : COMBINED_FX
   if (fx === COMBINED_FX) {
     return { fx, p: {}, layers: cloneLayers(preset.layers), tl: [], name: preset.name || '' }
   }
   const tl = Array.isArray(preset.tl) ? JSON.parse(JSON.stringify(preset.tl)) : []
-  return { fx, p: cloneParams(preset.p && Object.keys(preset.p).length ? preset.p : defaultParams(fx)), layers: [], tl, name: preset.name || '' }
+  const nrm = normalizeLookFx(fx, preset.p && Object.keys(preset.p).length ? preset.p : defaultParams(fx))
+  return { fx: nrm.fx, p: cloneParams(nrm.p), layers: [], tl, name: preset.name || '' }
 }
 
 /** Push preset values into all playlist steps that reference it. */
@@ -1297,7 +1331,7 @@ export function stepDurationMs (it) {
     sec = it.fx === 8 ? fillDuration(p, umax) : impulseDuration(p, umax)
   } else if (it.fx === 5) {
     const g = tubeGeometry()
-    const path = buildMarblePath(g, p.dir || 0, p.hz ?? 8)
+    const path = buildMarblePath(g, p.dir || 0, (p.airGap ?? p.hz ?? 8))
     sec = marbleDuration(p, path.total)
   }
   // snapshot `tl` only modulates params — it does not change step / effect duration

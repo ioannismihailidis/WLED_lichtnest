@@ -172,7 +172,7 @@ function draw () {
     umax = impulseUmax(pp, pts.length ? pts : CORNERS, cx0, cy0)
   }
   const marblePath = fx === 5
-    ? buildMarblePath(geo.length ? geo : CORNERS.map((c) => ({ x1: c.x, y1: c.y, x2: c.x, y2: c.y })), pp.dir || 0, pp.hz ?? 8)
+    ? buildMarblePath(geo.length ? geo : CORNERS.map((c) => ({ x1: c.x, y1: c.y, x2: c.x, y2: c.y })), pp.dir || 0, (pp.airGap ?? pp.hz ?? 8))
     : null
   const { elapsed, paramElapsed, wait } = frame(fx, pp, umax, marblePath ? marblePath.total : 1)
   setPreviewElapsed(paramElapsed)

@@ -364,7 +364,7 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       }
       return scale(gradN(a, fadeCols(p), fadeCw(p)), bri)
     }
-    case 13: { // Bass-Pegel — simplified along-tube fill for preview
+    case 13: { // legacy Bass-Pegel — along-tube preview of Fill Audio-Pegel
       const src = p.asrc || 2
       const sens = (p.again || 255) / 255
       const level = Math.min(1, simAudioSrc(src) * (0.35 + 0.65 * sens)) * lvlMul
@@ -522,7 +522,7 @@ export function layerNaturalDuration (layer, geomPts, cx, cy) {
   else   if (layer.fx === 1) sec = strobeDuration(p)
   else if (layer.fx === 3) sec = solidDuration(p)
   else if (layer.fx === 5) {
-    const path = buildMarblePath(tubesFromPts(geomPts), p.dir || 0, p.hz ?? 8)
+    const path = buildMarblePath(tubesFromPts(geomPts), p.dir || 0, (p.airGap ?? p.hz ?? 8))
     sec = marbleDuration(p, path.total)
   } else if (layer.fx === 8) sec = fillDuration(p, impulseUmax(p, geomPts, cx, cy))
   return sec
@@ -553,7 +553,7 @@ export function layerContext (layer, elapsedRaw, geomPts, chainTotal, markerXY) 
   if (fx === 3) return { fx, p: { ...p, color: solidColorAt(p, elapsed) }, cx, cy, elapsed, layer, phase: solidPhaseAt(p, elapsed) }
   if (fx === 1) return { fx, p, cx, cy, elapsed, layer, phase: strobePhaseAt(p, elapsed) }
   if (fx === 5) {
-    const path = buildMarblePath(tubesFromPts(geomPts), p.dir || 0, p.hz ?? 8)
+    const path = buildMarblePath(tubesFromPts(geomPts), p.dir || 0, (p.airGap ?? p.hz ?? 8))
     return { fx, p, cx, cy, elapsed, layer, path, positions: marblePositions(p, elapsed, path.total) }
   }
   if (fx === 6) return { fx, p, cx, cy, elapsed, layer, umax: impulseUmax(p, geomPts, cx, cy) }

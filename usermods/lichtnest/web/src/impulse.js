@@ -188,6 +188,20 @@ export function fillColorAt (p, d, elapsed, umax) {
   const u = Math.max(0.001, umax)
   const mode = p.mode || 0
 
+  // mode 3 Audio-Pegel — live mic level as Wasserstand (ex Bass-Pegel fx13)
+  if (mode === 3) {
+    const src = p.asrc || 2
+    const sens = (p.again || 255) / 255
+    const level = Math.min(1, previewAudioSrc(src) * (0.35 + 0.65 * sens)) * lvlMul
+    const h = u * level
+    if (d > h + soft) return [0, 0, 0]
+    let k = briMul
+    if (d > h - soft) k *= Math.max(0, (h + soft - d) / (2 * soft || 1e-4))
+    if (k <= 0) return [0, 0, 0]
+    const col = gradN(Math.max(0, Math.min(1, d / u)), fadeCols(p), fadeCw(p))
+    return k >= 1 ? col : scale3(col, k)
+  }
+
   // mode 2 Tide — oscillating waterline; duty = amplitude
   if (mode === 2) {
     const hz = 0.05 + (((p.speed ?? 42) * spdMul) / 100) * 0.45
