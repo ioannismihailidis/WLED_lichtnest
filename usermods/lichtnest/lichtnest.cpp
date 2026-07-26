@@ -416,7 +416,13 @@ class Lichtnest : public Usermod {
   public:
     static const char UI_VERSION[];
 
-    void setup() override { loadGeometryFile(); initDone = true; }
+    void setup() override {
+      loadGeometryFile();
+      // If playlists exist, the default one will autostart shortly — hold the field
+      // black until then so the manual effect never flashes up first.
+      if (WLED_FS.exists("/lichtnest_playlists.json")) _blackout = true;
+      initDone = true;
+    }
     void connected() override {}
 
     static float easeF(uint8_t mode, float x) {
@@ -450,7 +456,11 @@ class Lichtnest : public Usermod {
 
     void loop() override {
       // autostart the default playlist a few seconds after boot (FS + segments ready)
-      if (!_autostartTried && millis() > 4000) { _autostartTried = true; startPlaylist(nullptr, 0); }
+      if (!_autostartTried && millis() > 4000) {
+        _autostartTried = true;
+        // no default playlist -> release the boot blackout so the manual effect shows
+        if (!startPlaylist(nullptr, 0)) _blackout = false;
+      }
       if (!_plActive || _stepCount == 0) return;
       uint32_t nowMs = millis();
       uint32_t durMs = rowDurMs(_steps[_plIdx]);
@@ -866,7 +876,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.4";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.5";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);
