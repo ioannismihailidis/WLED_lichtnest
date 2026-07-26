@@ -1,8 +1,8 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { wled, toggleTest, plan, loadPlan, savePlan, uploadPhoto, removePhoto, planPhotoUrl, devicePhase, deviceElapsed, liveFxP, markers, effectOrigin, isMappingTube } from '../wled.js'
-import { fxColor, strobePhaseAt, solidPhaseAt, solidColorAt } from '../fxsim.js'
-import { impulsePositions, impulseColorAt, impulseDist, impulseUmax } from '../impulse.js'
+import { fxColor, strobePhaseAt, strobeRateAt, solidPhaseAt, solidColorAt } from '../fxsim.js'
+import { impulsePositions, impulseColorAtField, impulseField } from '../impulse.js'
 import { confirmDialog, noticeDialog } from '../confirm.js'
 
 const emit = defineEmits(['add'])
@@ -91,8 +91,7 @@ function draw () {
   // live mirror: the playing step (full params) while a playlist runs, else the manual effect
   const live = liveFxP()
   const fx = live.fx, p = live.p
-  let elapsed = deviceElapsed() - (live.delay || 0)
-  const wait = elapsed < 0; if (wait) elapsed = 0
+  const elapsed = deviceElapsed()
   const [cx, cy] = effectOrigin(p, list)
   ctx.lineCap = 'round'
 
@@ -129,7 +128,8 @@ function draw () {
   // Keyframe effects (Impuls/Strobe/Solid) render from elapsed — same math as MiniPlan.
   const full = showLeds.value
   const pts = []; for (const tb of list) pts.push({ x: tb.x1, y: tb.y1 }, { x: tb.x2, y: tb.y2 })
-  const umax = (fx === 0) ? impulseUmax(p, pts, cx, cy) : 1
+  const [acx, acy] = effectOrigin({}, list)     // auto centre = plain centroid; markers resolve per source
+  const field = (fx === 0) ? impulseField(p, pts, acx, acy, (id) => plan.points[id] ? [plan.points[id].x, plan.points[id].y] : null) : null
   const positions = (fx === 0) ? impulsePositions(p, elapsed) : null
   const rp = fx === 3 ? { ...p, color: solidColorAt(p, elapsed) } : p
   const phase = fx === 1 ? strobePhaseAt(p, elapsed) : fx === 3 ? solidPhaseAt(p, elapsed) : t
@@ -144,8 +144,9 @@ function draw () {
       const x = tube.x1 + (tube.x2 - tube.x1) * frac, y = tube.y1 + (tube.y2 - tube.y1) * frac
       let col
       if (testing != null) col = (tube.id === testing) ? [255, 255, 255] : [3, 3, 4]
-      else if (wait) col = [3, 3, 4]
-      else if (fx === 0) col = impulseColorAt(positions, p, impulseDist(p, x, y, cx, cy))
+      else if (wled.idle && !wled.pl.active) col = [3, 3, 4]
+      else if (fx === 1 && strobeRateAt(p, elapsed) < 0.05) col = [3, 3, 4]
+      else if (fx === 0) col = impulseColorAtField(positions, p, field, x, y)
       else col = fxColor(fx, rp, x, y, tube.start + Math.round(frac * (tube.leds - 1)), total, ti, list.length, phase, cx, cy)
       const R = col[0] | 0, G = col[1] | 0, B = col[2] | 0
       ctx.shadowBlur = r * 1.5; ctx.shadowColor = `rgb(${R},${G},${B})`

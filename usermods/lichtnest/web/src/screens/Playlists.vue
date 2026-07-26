@@ -8,6 +8,8 @@ import PlaylistPlayer from '../components/PlaylistPlayer.vue'
 import GradientEditor from '../components/GradientEditor.vue'
 import KeyframeList from '../components/KeyframeList.vue'
 import ColorList from '../components/ColorList.vue'
+import SourcesEditor from '../components/SourcesEditor.vue'
+import StrobeTimeline from '../components/StrobeTimeline.vue'
 import MiniPlan from '../components/MiniPlan.vue'
 import TexturePreview from '../components/TexturePreview.vue'
 
@@ -57,19 +59,33 @@ function stepParams (fx) {
   }
   return JSON.parse(JSON.stringify(out))   // deep copy — steps must not share arrays with the editor pool
 }
-function addItem (fx) { if (!open.value) return; open.value.items.push({ uid: uid(), fx, p: stepParams(fx), name: '', note: '', delay: 0, dur: 30, trType: 'fade', trDur: 0 }); savePlaylists() }
+function addItem (fx) { if (!open.value) return; open.value.items.push({ uid: uid(), fx, p: stepParams(fx), name: '', note: '', dur: 30, repeat: 1 }); savePlaylists() }
+// transition elements between effects: pause (black hold), Schwarzblende (fade out), Fade (crossfade)
+const ELEMENTS = [
+  { kind: 'pause', name: 'Pause', desc: 'Schwarz halten', color: '#7b8494', dur: 2 },
+  { kind: 'black', name: 'Schwarzblende', desc: 'Vorigen Effekt ausblenden', color: '#a58bff', dur: 1 },
+  { kind: 'fade', name: 'Fade', desc: 'In den nächsten überblenden', color: '#27c5ff', dur: 1 },
+]
+const elementDef = (kind) => ELEMENTS.find((e) => e.kind === kind) || ELEMENTS[0]
+function addElement (kind) {
+  if (!open.value) return
+  const d = elementDef(kind)
+  open.value.items.push({ uid: uid(), kind, dur: d.dur, ease: 0 })
+  savePlaylists()
+}
+function bumpElDur (it, d) { it.dur = Math.max(0.1, +(((it.dur || 1) + d)).toFixed(1)); savePlaylists() }
+function setElEase (it, v) { it.ease = v; savePlaylists() }
+function bumpRepeat (it, d) { it.repeat = Math.max(1, Math.min(20, (it.repeat || 1) + d)); savePlaylists() }
+const EASE_OPTS = [{ v: 0, l: 'Linear' }, { v: 1, l: 'Ease-In' }, { v: 2, l: 'Ease-Out' }, { v: 3, l: 'Ease-In-Out' }]
 async function removeItem (it) {
   if (!(await confirmDialog({ title: 'Schritt entfernen?', body: `${effectById(it.fx).name} wird aus der Playlist entfernt.`, confirmLabel: 'Entfernen' }))) return
   open.value.items = open.value.items.filter((x) => x.uid !== it.uid); savePlaylists()
 }
 function bumpDur (it, d) { it.dur = Math.max(1, (it.dur || 10) + d); savePlaylists() }
 const autoDur = (it) => (stepDurationMs(it) / 1000).toFixed(1)   // impulse: auto-derived step length
-function setTr (it, type) { it.trType = type; savePlaylists() }
-function bumpTrDur (it, d) { it.trDur = Math.max(0, +(((it.trDur || 0) + d)).toFixed(1)); savePlaylists() }
-function bumpDelay (it, d) { it.delay = Math.max(0, +(((it.delay || 0) + d)).toFixed(1)); savePlaylists() }
 function setStepName (it, v) { it.name = v; savePlaylists() }
 function setStepNote (it, v) { it.note = v; savePlaylists() }
-const stepTitle = (it) => (it.name && it.name.trim()) ? it.name : effectById(it.fx).name
+const stepTitle = (it) => it.kind ? elementDef(it.kind).name : ((it.name && it.name.trim()) ? it.name : effectById(it.fx).name)
 
 // ---- live param editing of a step (applies live if it's the current playing step) ----
 function isCurrent (it) { return prog.value && open.value.items[prog.value.idx] && open.value.items[prog.value.idx].uid === it.uid }
@@ -223,8 +239,8 @@ function confirmImport () {
       <PlaylistPlayer v-if="prog" style="margin-bottom:10px" />
       <!-- overall preview of the currently playing animation (synced to the running step) -->
       <div v-if="prog" class="ovprev">
-        <MiniPlan v-if="ovPvMode === 'tubes'" :fx="curStep?.fx" :p="curStep?.p" :delay="curStep?.delay || 0" class="ovcanvas" />
-        <TexturePreview v-else :fx="curStep?.fx" :p="curStep?.p" :delay="curStep?.delay || 0" class="ovcanvas" />
+        <MiniPlan v-if="ovPvMode === 'tubes'" :fx="curStep?.fx" :p="curStep?.p" class="ovcanvas" />
+        <TexturePreview v-else :fx="curStep?.fx" :p="curStep?.p" class="ovcanvas" />
         <div class="pvtoggle2">
           <button :class="{ on: ovPvMode === 'tubes' }" @click="ovPvMode = 'tubes'">Tubes</button>
           <button :class="{ on: ovPvMode === 'texture' }" @click="ovPvMode = 'texture'">Textur</button>
@@ -237,23 +253,40 @@ function confirmImport () {
         <div class="itop">
           <div class="grip" @pointerdown="startDrag(it, i, $event)" title="Ziehen zum Sortieren"><svg width="12" height="18" viewBox="0 0 10 16"><g fill="currentColor"><circle cx="3" cy="3" r="1.3" /><circle cx="7" cy="3" r="1.3" /><circle cx="3" cy="8" r="1.3" /><circle cx="7" cy="8" r="1.3" /><circle cx="3" cy="13" r="1.3" /><circle cx="7" cy="13" r="1.3" /></g></svg></div>
           <span class="idx mono">{{ String(i + 1).padStart(2, '0') }}</span>
-          <span class="prev" :style="{ background: effectById(it.fx).preview }" />
-          <button class="iname" @click="expanded = expanded === it.uid ? null : it.uid">{{ stepTitle(it) }}<span v-if="it.name && it.name.trim()" class="ifx mono"> · {{ effectById(it.fx).name }}</span></button>
-          <span v-if="it.delay > 0" class="dur mono wait" title="Pause vor dem Effekt">⏸ {{ it.delay }}s</span>
-          <span v-if="it.fx === 0 || it.fx === 1 || it.fx === 3" class="dur mono auto" :title="it.fx === 0 ? 'Dauer läuft automatisch aus (Anzahl × Abstand + Auslaufzeit)' : 'Dauer endet beim letzten Keyframe'">~{{ autoDur(it) }}s</span>
+          <span class="prev" :style="{ background: it.kind ? elementDef(it.kind).color : effectById(it.fx).preview }" />
+          <button class="iname" @click="expanded = expanded === it.uid ? null : it.uid">{{ stepTitle(it) }}<span v-if="!it.kind && it.name && it.name.trim()" class="ifx mono"> · {{ effectById(it.fx).name }}</span><span v-if="!it.kind && (it.repeat || 1) > 1" class="ifx mono rep"> · {{ it.repeat }}×</span></button>
+          <span v-if="it.kind" class="dur mono">
+            <button @click="bumpElDur(it, -0.5)">−</button><b>{{ it.dur }}s</b><button @click="bumpElDur(it, 0.5)">+</button>
+          </span>
+          <span v-else-if="it.fx === 0 || it.fx === 1 || it.fx === 3" class="dur mono auto" :title="it.fx === 0 ? 'Dauer läuft automatisch aus (Anzahl × Abstand + Auslaufzeit)' : 'Dauer endet beim letzten Keyframe'">~{{ autoDur(it) }}s</span>
           <span v-else class="dur mono">
             <button @click="bumpDur(it, -5)">−</button><b>{{ it.dur }}s</b><button @click="bumpDur(it, 5)">+</button>
           </span>
-          <button class="pstep" :class="{ on: isCurrent(it) }" title="Ab hier abspielen" @click="playFrom(i)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z" /></svg></button>
+          <button v-if="!it.kind" class="pstep" :class="{ on: isCurrent(it) }" title="Ab hier abspielen" @click="playFrom(i)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z" /></svg></button>
           <button class="ic del sm" @click="removeItem(it)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M9 7V5h6v2M7 7l1 12h8l1-12" /></svg></button>
         </div>
         <div v-if="it.note && it.note.trim() && expanded !== it.uid" class="inote mono">{{ it.note }}</div>
 
-        <!-- expanded: transition + live params -->
-        <div v-if="expanded === it.uid" class="iexp">
+        <!-- expanded: element params (transition rows) -->
+        <div v-if="expanded === it.uid && it.kind" class="iexp">
+          <div class="frow"><span class="flbl">{{ elementDef(it.kind).desc }}</span></div>
+          <div class="frow">
+            <span class="flbl">Dauer</span>
+            <span class="dur mono"><button @click="bumpElDur(it, -0.5)">−</button><b>{{ it.dur }}s</b><button @click="bumpElDur(it, 0.5)">+</button></span>
+          </div>
+          <div v-if="it.kind !== 'pause'" class="frow">
+            <span class="flbl">Easing</span>
+            <span class="seg">
+              <button v-for="o in EASE_OPTS" :key="o.v" :class="{ on: (it.ease || 0) === o.v }" @click="setElEase(it, o.v)">{{ o.l }}</button>
+            </span>
+          </div>
+        </div>
+
+        <!-- expanded: effect params -->
+        <div v-if="expanded === it.uid && !it.kind" class="iexp">
           <div class="steppv">
-            <MiniPlan v-if="stepPvMode === 'tubes'" :fx="it.fx" :p="it.p" :delay="it.delay || 0" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
-            <TexturePreview v-else :fx="it.fx" :p="it.p" :delay="it.delay || 0" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
+            <MiniPlan v-if="stepPvMode === 'tubes'" :fx="it.fx" :p="it.p" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
+            <TexturePreview v-else :fx="it.fx" :p="it.p" local :restart-key="stepRestart" :timeline="it.dur" class="spvcanvas" />
             <button class="pvrestart2" title="Animation neu starten" @click="restartStep(it, i)">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4" /><path d="M3 4.5V10h5.5" /></svg>
             </button>
@@ -271,19 +304,8 @@ function confirmImport () {
             <input class="ftxt" type="text" :value="it.note || ''" placeholder="Notiz zu diesem Schritt…" @input="setStepNote(it, $event.target.value)">
           </div>
           <div class="frow">
-            <span class="flbl">Pause davor</span>
-            <span class="dur mono"><button @click="bumpDelay(it, -0.5)">−</button><b>{{ it.delay || 0 }}s</b><button @click="bumpDelay(it, 0.5)">+</button></span>
-          </div>
-          <div class="frow">
-            <span class="flbl">Übergang</span>
-            <span class="seg">
-              <button :class="{ on: it.trType === 'fade' }" @click="setTr(it, 'fade')">Fade</button>
-              <button :class="{ on: it.trType === 'black' }" @click="setTr(it, 'black')">Schwarzblende</button>
-            </span>
-          </div>
-          <div class="frow">
-            <span class="flbl">Übergangsdauer</span>
-            <span class="dur mono"><button @click="bumpTrDur(it, -0.5)">−</button><b>{{ it.trDur }}s</b><button @click="bumpTrDur(it, 0.5)">+</button></span>
+            <span class="flbl">Wiederholungen<small style="display:block;font-size:10px;color:var(--muted2)">Effekt läuft {{ it.repeat || 1 }}× hintereinander</small></span>
+            <span class="dur mono"><button @click="bumpRepeat(it, -1)">−</button><b>{{ it.repeat || 1 }}×</b><button @click="bumpRepeat(it, 1)">+</button></span>
           </div>
           <div class="plbl mono">PARAMETER<span v-if="isCurrent(it)" class="livetag"> · LIVE</span></div>
           <div v-for="p in effectById(it.fx).params.filter(pp => !pp.show || pp.show(it.p))" :key="p.key" class="ctl">
@@ -293,12 +315,21 @@ function confirmImport () {
             <GradientEditor v-else-if="p.type === 'gradient'" :cols="gradColsOf(it)" :cw="gradCwOf(it)" @update="setGradStep(it, $event)" />
             <KeyframeList v-else-if="p.type === 'keyframes'" :model-value="keysValStep(it, p)" :v-min="p.vMin" :v-max="p.vMax" :v-step="p.vStep || 1" :v-unit="p.vUnit || ''" :label="p.label || 'Frequenz'" :with-color="p.withColor || false" @update="setKeysStep(it, p, $event)" />
             <ColorList v-else-if="p.type === 'colorlist'" :model-value="keysValStep(it, p)" @update="setKeysStep(it, p, $event)" />
+            <SourcesEditor v-else-if="p.type === 'sources'" :model-value="keysValStep(it, p)" @update="setKeysStep(it, p, $event)" />
+            <StrobeTimeline v-else-if="p.type === 'strobetime'" :p="it.p" :restart-key="stepRestart" />
             <div v-else-if="p.type === 'select'" class="seg">
               <button v-for="o in p.options" :key="o.v" :class="{ on: selVal(it, p) === o.v }" @click="setParam(it, p.key, o.v)">{{ o.l }}</button>
             </div>
             <button v-else-if="p.type === 'toggle'" class="sw" :class="{ on: toggleVal(it, p) }" @click="setParam(it, p.key, !toggleVal(it, p))"><span /></button>
           </div>
         </div>
+      </div>
+
+      <div class="plbl mono" style="margin-top:14px">ELEMENT HINZUFÜGEN</div>
+      <div class="chips">
+        <button v-for="e in ELEMENTS" :key="e.kind" class="chip elchip" @click="addElement(e.kind)">
+          <span class="cprev" :style="{ background: e.color }" />{{ e.name }} <span class="plus">+</span>
+        </button>
       </div>
 
       <div class="plbl mono" style="margin-top:14px">EFFEKT HINZUFÜGEN</div>
@@ -370,13 +401,19 @@ function confirmImport () {
 .dur.auto { font-size: 12px; color: var(--accent); font-weight: 600; }
 .dur.wait { font-size: 12px; color: var(--text2); font-weight: 600; }
 .ifx { font-size: 11px; font-weight: 600; color: var(--muted2); }
+.ifx.rep { color: var(--accent); }
+.elchip { border-style: dashed; }
 .inote { margin: 4px 2px 0 30px; font-size: 11.5px; color: var(--muted2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ftxt { flex: 1; min-width: 0; max-width: 62%; background: var(--inset); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font-size: 12.5px; color: var(--text); }
 .pstep { flex: none; width: 28px; height: 28px; border-radius: 8px; background: var(--inset); border: 1px solid var(--line); color: var(--accent); cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .pstep.on { background: var(--accent); color: #1a1206; border-color: transparent; }
 
 .iexp { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.06); }
-.steppv { position: relative; height: 110px; border-radius: 12px; overflow: hidden; background: var(--inset); border: 1px solid var(--line); margin-bottom: 12px; }
+.steppv {
+  position: sticky; top: 0; z-index: 7;              /* keep the step preview visible while scrolling its params */
+  height: 110px; border-radius: 12px; overflow: hidden; background: var(--inset); border: 1px solid var(--line); margin-bottom: 12px;
+  box-shadow: 0 -14px 0 0 var(--panel), 0 8px 18px -10px rgba(0,0,0,.7);
+}
 .spvcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .ovprev { position: relative; height: 150px; border-radius: 16px; overflow: hidden; background: var(--inset); border: 1px solid var(--line2); margin-bottom: 10px; }
 .ovcanvas { position: absolute; inset: 0; width: 100%; height: 100%; }

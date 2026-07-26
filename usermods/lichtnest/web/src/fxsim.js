@@ -43,19 +43,28 @@ export function phaseRate (fx, p, N) {
   if (fx === 2) return ((p.speed || 0) / 100) * 0.5 * (N || 1)
   return 0.3 + ((p.tempo ?? 35) / 100) * 2
 }
-// linear interpolation over keyframes [{ t, v }] (t in seconds), clamped at the ends
+// interpolation over keyframes [{ t, v[, e] }] (t in seconds), clamped at the ends.
+// `e` on a key eases the segment ARRIVING at it (0 linear, 1 in, 2 out, 3 in-out).
 export function sampleCurve (keys, t) {
   if (!keys || !keys.length) return 0
   if (t <= keys[0].t) return keys[0].v
   const last = keys[keys.length - 1]
   if (t >= last.t) return last.v
-  for (let i = 1; i < keys.length; i++) { const a = keys[i - 1], b = keys[i]; if (t <= b.t) { const s = b.t - a.t; const f = s > 0 ? (t - a.t) / s : 0; return a.v + (b.v - a.v) * f } }
+  for (let i = 1; i < keys.length; i++) { const a = keys[i - 1], b = keys[i]; if (t <= b.t) { const s = b.t - a.t; const f = s > 0 ? (t - a.t) / s : 0; return a.v + (b.v - a.v) * easeVal(b.e || 0, f) } }
   return last.v
+}
+// integral of the easing shape from 0..x (x in 0..1) — used to keep the flash phase
+// (= integral of the Hz curve) analytic even with eased segments
+export function easeInt (mode, x) {
+  if (mode === 1) return x * x * x / 3                        // ease-in  f²
+  if (mode === 2) return x * x - x * x * x / 3                // ease-out 2f−f²
+  if (mode === 3) return x * x * x - x * x * x * x / 2        // in-out   3f²−2f³
+  return x * x / 2                                            // linear
 }
 // strobe frequency follows a keyframe list (Zeitpunkt + Hz); the step ends at the last keyframe
 const DEF_HZKEYS = [{ t: 0, v: 2 }, { t: 2, v: 10 }]
 export const strobeKeys = (p) => (p.hzKeys && p.hzKeys.length ? p.hzKeys.slice().sort((a, b) => a.t - b.t) : DEF_HZKEYS)
-export const strobeRateAt = (p, elapsed) => Math.max(1, sampleCurve(strobeKeys(p), elapsed))
+export const strobeRateAt = (p, elapsed) => Math.max(0, sampleCurve(strobeKeys(p), elapsed))
 export const strobeDuration = (p) => { const k = strobeKeys(p); return Math.max(0.5, k[k.length - 1].t) }
 // integral of a piecewise-linear keyframe list [{t,v}] from 0..elapsed. Deterministic in
 // `elapsed`, so the preview can sync exactly to the running step. Used for any rate-over-time.
@@ -63,14 +72,33 @@ export function curvePhaseAt (keys, elapsed) {
   if (!keys || !keys.length || elapsed <= 0) return 0
   let ph = 0, t0 = 0, v0 = keys[0].v
   for (let i = 0; i < keys.length; i++) {
-    const t1 = keys[i].t, v1 = keys[i].v
+    const t1 = keys[i].t, v1 = keys[i].v, e = keys[i].e || 0
     if (t1 <= t0) { v0 = v1; continue }
-    if (elapsed < t1) { const v = v0 + (v1 - v0) * ((elapsed - t0) / (t1 - t0)); return ph + (elapsed - t0) * (v0 + v) / 2 }
-    ph += (t1 - t0) * (v0 + v1) / 2; t0 = t1; v0 = v1
+    const s = t1 - t0, dv = v1 - v0
+    if (elapsed < t1) { const x = (elapsed - t0) / s; return ph + s * (v0 * x + dv * easeInt(e, x)) }
+    ph += s * (v0 + dv * easeInt(e, 1))
+    t0 = t1; v0 = v1
   }
   return ph + (elapsed - t0) * v0   // after the last keyframe: hold the last value
 }
 export const strobePhaseAt = (p, elapsed) => curvePhaseAt(strobeKeys(p), elapsed)
+// easing curves for the flash fade (0 linear, 1 ease-in, 2 ease-out, 3 ease-in-out)
+export const easeVal = (mode, x) => (mode === 1 ? x * x : mode === 2 ? 1 - (1 - x) * (1 - x) : mode === 3 ? x * x * (3 - 2 * x) : x)
+// brightness 0..1 of the flash train at a given phase — duty gates the on-window,
+// sfade shapes it (0 hard, 1 fade-out, 2 fade-in, 3 in&out), sease picks the easing
+export function flashEnv (p, phase) {
+  const inFrac = phase - Math.floor(phase)
+  const duty = Math.min(0.98, Math.max(0.02, (p.duty ?? 30) / 100))
+  if (inFrac >= duty) return 0
+  const fade = p.sfade || 0
+  if (!fade) return 1
+  const t = inFrac / duty
+  const env = fade === 1 ? 1 - t : fade === 2 ? t : (t < 0.5 ? t * 2 : 2 - t * 2)
+  return easeVal(p.sease || 0, env)
+}
+// envelope over step time (for the time-behaviour preview).
+// 0 Hz means SILENCE: the phase stalls, and instead of freezing a lit flash we go dark.
+export const strobeEnvelopeAt = (p, elapsed) => (strobeRateAt(p, elapsed) < 0.05 ? 0 : flashEnv(p, strobePhaseAt(p, elapsed)))
 
 // Solid/Atmen: ONE keyframe list [{ t, v(Hz), c:[r,g,b] }] drives both the breathe rate
 // and the colour over time. Phase in radians → sin() per breath; colour interpolated.
@@ -85,7 +113,7 @@ export function sampleColorAt (keys, t) {
   const last = keys[keys.length - 1]; if (t >= last.t) return last.c
   for (let i = 1; i < keys.length; i++) {
     const a = keys[i - 1], b = keys[i]
-    if (t <= b.t) { const s = b.t - a.t, f = s > 0 ? (t - a.t) / s : 0; return [a.c[0] + (b.c[0] - a.c[0]) * f, a.c[1] + (b.c[1] - a.c[1]) * f, a.c[2] + (b.c[2] - a.c[2]) * f] }
+    if (t <= b.t) { const s = b.t - a.t; const f = easeVal(b.e || 0, s > 0 ? (t - a.t) / s : 0); return [a.c[0] + (b.c[0] - a.c[0]) * f, a.c[1] + (b.c[1] - a.c[1]) * f, a.c[2] + (b.c[2] - a.c[2]) * f] }
   }
   return last.c
 }
@@ -188,9 +216,11 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       return scale(c, rev)
     }
     case 1: {
-      const flash = Math.floor(phase); const inFrac = phase - flash
-      if (inFrac >= (p.duty || 30) / 100) return [0, 0, 0]   // off part of the flash cycle
-      return strobeColor(p, tubeIdx, tubeTotal, flash)       // handles which tubes are lit + their colour
+      const flash = Math.floor(phase)
+      const env = flashEnv(p, phase)                         // duty gate + optional fade/easing
+      if (env <= 0) return [0, 0, 0]
+      const c = strobeColor(p, tubeIdx, tubeTotal, flash)    // handles which tubes are lit + their colour
+      return env >= 1 ? c : scale(c, env)
     }
     case 2: {
       const N = chainTotal || 1

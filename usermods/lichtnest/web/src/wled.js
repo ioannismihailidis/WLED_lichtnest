@@ -11,7 +11,7 @@
 // ?host=http://4.3.2.1 (remembered in localStorage, same idea as WLED's file mode).
 import { reactive } from 'vue'
 import { phaseRate, strobeDuration, solidDuration } from './fxsim.js'
-import { impulseUmax, impulseDuration } from './impulse.js'
+import { impulseField, impulseDuration } from './impulse.js'
 
 /* global __LN_PROXY__ */
 const useDevProxy = typeof __LN_PROXY__ !== 'undefined' && !!__LN_PROXY__
@@ -74,6 +74,7 @@ export const wled = reactive({
   seg: { fx: 0, sx: 128, ix: 128, pal: 0, on: true, col: [[255, 160, 60], [0, 0, 0], [0, 0, 0]] },
   segments: [],   // full segment list (= Tubes)
   testTube: null, // id of the tube currently in test mode (toggle), or null
+  idle: false,    // playlist stopped -> device holds black until play / "Auf LEDs legen"
   // live playlist state, mirrored from the lichtnest usermod (/json/state .lichtnest.pl)
   pl: { active: false, id: '', name: '', idx: 0, total: 0, fx: 3, nextFx: 3, loop: false, elapsedMs: 0, durMs: 1, syncAt: 0 },
   info: { name: 'WLED', ver: '', leds: { count: 0, pwr: 0, fps: 0 }, ports: [] },
@@ -130,11 +131,12 @@ function applyState (s) {
   }
   if (s.lichtnest) {
     if (typeof s.lichtnest.ph === 'number') syncDevicePhase(s.lichtnest.ph)
+    if (typeof s.lichtnest.idle === 'boolean') wled.idle = s.lichtnest.idle
     const q = s.lichtnest.pl
     // mirror the device's params into the editor pool ONLY in manual mode — while a
     // playlist plays, the device reports the *step's* params and must not clobber the editor
     const playing = q ? !!q.active : wled.pl.active
-    if (!playing) {
+    if (!playing && !isEditingParams()) {   // never clobber values the user is actively dragging
       if (typeof s.lichtnest.fx === 'number') lichtnest.fx = s.lichtnest.fx
       if (s.lichtnest.p) lichtnest.p = { ...lichtnest.p, ...s.lichtnest.p }
     }
@@ -921,29 +923,34 @@ async function flushPlaylists () {
 
 // --- offline playback engine (local timer; the device runs its own engine when online) ---
 let offTimer = null
-const offItems = (pl) => (pl ? (pl.items || []).filter((it) => it.fx != null) : [])
+const offItems = (pl) => (pl ? (pl.items || []).filter((it) => it.fx != null || it.kind) : [])
 const offFind = () => playlists.list.find((p) => p.id === wled.pl.id)
-// step length in ms: pause (delay) + effect duration — impulse/strobe/solid auto-derive,
-// everything else uses the set duration
-export function stepDurationMs (it) {
+// marker position accessor for impulse sources (plan.points is the source of truth)
+export const markerPosOf = (id) => { const m = plan.points[id]; return m ? [m.x, m.y] : null }
+// duration of ONE iteration of an effect step (auto-derived for impulse/strobe/solid)
+export function stepBaseMs (it) {
   const p = it.p || {}
-  const delayMs = Math.max(0, (it.delay || 0) * 1000)
-  if (it.fx === 1) return delayMs + Math.max(200, strobeDuration(p) * 1000)   // strobe: ends at the last keyframe
-  if (it.fx === 3) return delayMs + Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
-  if (it.fx !== 0) return delayMs + Math.max(1, it.dur || 10) * 1000
+  if (it.fx === 1) return Math.max(200, strobeDuration(p) * 1000)   // strobe: ends at the last keyframe
+  if (it.fx === 3) return Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
+  if (it.fx !== 0) return Math.max(1, it.dur || 10) * 1000
   const g = tubeGeometry()
   const [cx, cy] = effectOrigin(p, g)
   const pts = []; for (const t of g) pts.push({ x: t.x1, y: t.y1 }, { x: t.x2, y: t.y2 })
-  return delayMs + Math.max(200, impulseDuration(p, impulseUmax(p, pts, cx, cy)) * 1000)
+  return Math.max(200, impulseDuration(p, impulseField(p, pts, cx, cy, markerPosOf).umax) * 1000)
+}
+// full row length: transition elements use their own duration, effect steps repeat
+export function stepDurationMs (it) {
+  if (it.kind) return Math.max(100, (it.dur || 1) * 1000)           // pause / black / fade element
+  return stepBaseMs(it) * Math.max(1, Math.min(20, it.repeat || 1))
 }
 function offApplyStep (pl, idx) {
   const items = offItems(pl); if (!items.length) { wled.pl.active = false; return }
   idx = ((idx % items.length) + items.length) % items.length
   const it = items[idx]
-  lichtnest.fx = it.fx; lichtnest.p = { ...it.p }
+  if (it.fx != null && !it.kind) { lichtnest.fx = it.fx; lichtnest.p = { ...it.p } }
   wled.pl.active = true; wled.pl.id = pl.id; wled.pl.name = pl.name
-  wled.pl.idx = idx; wled.pl.total = items.length; wled.pl.fx = it.fx
-  wled.pl.nextFx = items[(idx + 1) % items.length].fx
+  wled.pl.idx = idx; wled.pl.total = items.length; wled.pl.fx = it.fx ?? 3
+  wled.pl.nextFx = items[(idx + 1) % items.length].fx ?? 3
   wled.pl.elapsedMs = 0; wled.pl.durMs = stepDurationMs(it); wled.pl.syncAt = Date.now()
   if (offTimer) clearTimeout(offTimer)
   offTimer = setTimeout(() => offApplyStep(pl, playback.loop ? wled.pl.idx : wled.pl.idx + 1), wled.pl.durMs)
@@ -954,7 +961,8 @@ function offApplyStep (pl, idx) {
 // (pollState) to refresh wled.pl. Optimistic flips give instant visual feedback.
 export async function playPlaylist (pl, startIdx = 0) {
   if (!pl || !(pl.items || []).some((it) => it.fx != null)) return false
-  if (wled.offline) { offApplyStep(pl, startIdx); return true }
+  if (wled.offline) { wled.idle = false; offApplyStep(pl, startIdx); return true }
+  wled.idle = false
   await flushPlaylists()                                   // firmware reads the file on play
   wled.pl.active = true; wled.pl.id = pl.id; wled.pl.name = pl.name; wled.pl.idx = startIdx
   await postState({ lichtnest: { play: pl.id, from: startIdx } })
@@ -962,8 +970,9 @@ export async function playPlaylist (pl, startIdx = 0) {
   return true
 }
 export async function stopPlaylist () {
-  if (wled.offline) { if (offTimer) clearTimeout(offTimer); offTimer = null; wled.pl.active = false; return true }
+  if (wled.offline) { if (offTimer) clearTimeout(offTimer); offTimer = null; wled.pl.active = false; wled.idle = true; return true }
   wled.pl.active = false
+  wled.idle = true
   const r = await postState({ lichtnest: { stop: true } })
   await pollState()
   return r
@@ -992,10 +1001,24 @@ export const lichtnest = reactive({ fx: 3, p: {} })
 export function liveFxP () {
   if (wled.pl.active) {
     const pl = playlists.list.find((x) => x.id === wled.pl.id)
-    const it = pl && (pl.items || [])[wled.pl.idx]
-    if (it && it.fx != null) return { fx: it.fx, p: it.p || {}, delay: it.delay || 0 }
+    const items = pl ? (pl.items || []) : []
+    const it = items[wled.pl.idx]
+    if (it && it.kind) {
+      // transition element: expose the previous effect step; previews dim/hide it
+      let prev = null
+      for (let k = 1; k <= items.length; k++) {
+        const c = items[(wled.pl.idx - k + items.length) % items.length]
+        if (c && c.fx != null && !c.kind) { prev = c; break }
+      }
+      return {
+        kind: it.kind, dur: Math.max(0.1, it.dur || 1), ease: it.ease || 0,
+        fx: prev ? prev.fx : 3, p: prev ? (prev.p || {}) : {},
+        prevDur: prev ? stepBaseMs(prev) / 1000 : 0,
+      }
+    }
+    if (it && it.fx != null) return { fx: it.fx, p: it.p || {}, repeat: Math.max(1, it.repeat || 1) }
   }
-  return { fx: lichtnest.fx, p: lichtnest.p, delay: 0 }
+  return { fx: lichtnest.fx, p: lichtnest.p }
 }
 export function tubeGeometry () {
   return wled.segments.filter(isMappingTube).slice().sort((a, b) => a.start - b.start).map((s) => {
@@ -1003,14 +1026,39 @@ export function tubeGeometry () {
     return { id: s.id, x1: c.x1, y1: c.y1, x2: c.x2, y2: c.y2 }
   })
 }
+// Live param edits: coalesce rapid slider/dial input into one POST per ~150 ms, and
+// remember the edit time so the poll merge can't snap values back mid-drag.
+let pEditAt = 0
+let pPatch = null, pTimer = null
+function pushParamPatch (obj) {
+  pEditAt = Date.now()
+  pPatch = { ...(pPatch || {}), ...obj }
+  if (pTimer) return
+  pTimer = setTimeout(() => {
+    const body = pPatch; pPatch = null; pTimer = null
+    pEditAt = Date.now()
+    postState({ lichtnest: { p: body } })
+  }, 150)
+}
+export const isEditingParams = () => (Date.now() - pEditAt) < 2000
+
 export const fxActions = {
   // manual effect control (Effekte screen): sending fx makes the firmware leave any playlist
-  async setEffect (fxId) { lichtnest.fx = fxId; return postState({ lichtnest: { fx: fxId, geo: tubeGeometry() } }) },
-  async setParam (key, value) { lichtnest.p = { ...lichtnest.p, [key]: value }; return postState({ lichtnest: { fx: lichtnest.fx, p: { [key]: value } } }) },
-  async setParams (obj) { lichtnest.p = { ...lichtnest.p, ...obj }; return postState({ lichtnest: { fx: lichtnest.fx, p: obj } }) },
+  async setEffect (fxId) { lichtnest.fx = fxId; wled.idle = false; return postState({ lichtnest: { fx: fxId, geo: tubeGeometry() } }) },
+  // apply a full draft in one request: fx + params + geometry ("Auf LEDs legen")
+  async applyEffect (fxId, p) {
+    lichtnest.fx = fxId
+    wled.idle = false
+    lichtnest.p = { ...lichtnest.p, ...p }
+    return postState({ lichtnest: { fx: fxId, p, geo: tubeGeometry() } })
+  },
+  // NOTE: param edits deliberately do NOT send `fx` — the firmware restarts the
+  // effect timeline on `fx`, which made the animation jump on every slider tick.
+  async setParam (key, value) { lichtnest.p = { ...lichtnest.p, [key]: value }; pushParamPatch({ [key]: value }) },
+  async setParams (obj) { lichtnest.p = { ...lichtnest.p, ...obj }; pushParamPatch(obj) },
   // live-tweak the running playlist step (params only -> firmware keeps playing the step)
-  async setStepParam (key, value) { lichtnest.p = { ...lichtnest.p, [key]: value }; return postState({ lichtnest: { p: { [key]: value } } }) },
-  async setStepParams (obj) { lichtnest.p = { ...lichtnest.p, ...obj }; return postState({ lichtnest: { p: obj } }) },
+  async setStepParam (key, value) { lichtnest.p = { ...lichtnest.p, [key]: value }; pushParamPatch({ [key]: value }) },
+  async setStepParams (obj) { lichtnest.p = { ...lichtnest.p, ...obj }; pushParamPatch(obj) },
   async pushGeometry () { return postState({ lichtnest: { geo: tubeGeometry() } }) },
 }
 
