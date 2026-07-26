@@ -370,11 +370,13 @@ export const tubes = {
 let testSnapshot = null
 let editPreviewSeq = 0
 let tipSegId = null
+let tipBlinkId = null            // second helper: blinking last-LED marker (add flow)
 const TIP_SEG_NAME = '__ln_tip__'
 
 export function isMappingTube (s) {
   if (!s) return false
   if (tipSegId != null && s.id === tipSegId) return false
+  if (tipBlinkId != null && s.id === tipBlinkId) return false
   if (s.n === TIP_SEG_NAME) return false
   return (s.stop - s.start) > 0
 }
@@ -414,24 +416,23 @@ export function lockPortsToMapped () {
 
 async function clearTipSegment () {
   tipIdentFor = null
-  if (tipSegId == null && !wled.segments.some((s) => s.n === TIP_SEG_NAME)) return
-  const id = tipSegId ?? wled.segments.find((s) => s.n === TIP_SEG_NAME)?.id
-  tipSegId = null
-  if (id == null) return
-  if (wled.offline) {
-    wled.segments = wled.segments.filter((s) => s.id !== id)
-    return
-  }
-  await postState({ seg: [{ id, start: 0, stop: 0 }] })
-  wled.segments = wled.segments.filter((s) => s.id !== id)
+  const ids = new Set()
+  if (tipSegId != null) ids.add(tipSegId)
+  if (tipBlinkId != null) ids.add(tipBlinkId)
+  for (const s of wled.segments) if (s.n === TIP_SEG_NAME) ids.add(s.id)
+  tipSegId = null; tipBlinkId = null
+  if (!ids.size) return
+  if (wled.offline) { wled.segments = wled.segments.filter((s) => !ids.has(s.id)); return }
+  await postState({ seg: [...ids].map((id) => ({ id, start: 0, stop: 0 })) })
+  wled.segments = wled.segments.filter((s) => !ids.has(s.id))
 }
 
 function nextTipSegId () {
+  // overlapping segments render in id order — the tip must sit ABOVE the tube
   const ids = wled.segments.map((s) => s.id)
   if (tipSegId != null) ids.push(tipSegId)
-  let i = 0
-  while (ids.includes(i)) i++
-  return i
+  if (tipBlinkId != null) ids.push(tipBlinkId)
+  return ids.length ? Math.max(...ids) + 1 : 0
 }
 
 /**
@@ -567,7 +568,7 @@ async function applyTipIdentify (tubeId, tipPix, segGeometryPatch) {
   // tip accent: full-bri 1-LED segment on the end pixel (overlaps tube tip)
   patch.push(minimal
     ? { id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255 }
-    : { id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] })
+    : { id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255, fx: 1, sx: 200, ix: 128, pal: 0, col: [[255, 255, 255], [0, 0, 0]] })
   await postState(minimal
     ? { tt: 0, seg: patch }
     : { on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
@@ -604,9 +605,7 @@ export async function previewTipLeds (id, leds) {
   const { patch, used } = packPortSegPatch(portNow, lens)
   const tubeGeo = patch.find((p) => p.id === id)
   if (!tubeGeo) return false
-  // Prefer the first LED *after* the tube when the bus has headroom — overlapping the
-  // tip pixel with the tube segment made the end flicker during length preview.
-  const tipPix = (used < portNow.len) ? tubeGeo.stop : (tubeGeo.stop - 1)
+  const tipPix = tubeGeo.stop - 1              // the LAST LED of the tube blinks
   await applyTipIdentify(id, tipPix, patch)
   return seq === editPreviewSeq
 }
@@ -635,15 +634,25 @@ export async function previewAddTip (portIndex, leds) {
   const tipPix = stop - 1
   const previewId = tipSegId ?? nextTipSegId()
   tipSegId = previewId
+  const blinkId = tipBlinkId ?? nextTipSegId()
+  tipBlinkId = blinkId
 
   if (wled.testTube === null) testSnapshot = snapshotTestFx()
   wled.testTube = previewId
 
   const minimal = tipIdentFor === 'add:' + portIndex
   const patch = minimal ? [] : mappingTubesOnPort(port).map((s) => ({ id: s.id, on: false }))
+  // dim body (all but the last LED) + blinking last LED
+  if (tipPix > start) {
+    patch.push(minimal
+      ? { id: previewId, start, stop: tipPix, n: TIP_SEG_NAME, on: true, bri: 90 }
+      : { id: previewId, start, stop: tipPix, n: TIP_SEG_NAME, on: true, bri: 90, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] })
+  } else {
+    patch.push({ id: previewId, start: 0, stop: 0 })   // 1-LED tube: no body span
+  }
   patch.push(minimal
-    ? { id: previewId, start, stop, n: TIP_SEG_NAME, on: true, bri: 255 }
-    : { id: previewId, start, stop, n: TIP_SEG_NAME, on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] })
+    ? { id: blinkId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255 }
+    : { id: blinkId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255, fx: 1, sx: 200, ix: 128, pal: 0, col: [[255, 255, 255], [0, 0, 0]] })
   await postState(minimal
     ? { tt: 0, seg: patch }
     : { on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
