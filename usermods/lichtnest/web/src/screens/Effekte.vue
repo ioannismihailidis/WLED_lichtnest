@@ -8,6 +8,7 @@ import KeyframeList from '../components/KeyframeList.vue'
 import ColorList from '../components/ColorList.vue'
 import SourcesEditor from '../components/SourcesEditor.vue'
 import StrobeTimeline from '../components/StrobeTimeline.vue'
+import SolidTimeline from '../components/SolidTimeline.vue'
 import MiniPlan from '../components/MiniPlan.vue'
 import TexturePreview from '../components/TexturePreview.vue'
 
@@ -131,6 +132,7 @@ function restartPreview () { pvRestart.value++; if (isLive.value) fxActions.setE
         <ColorList v-else-if="p.type === 'colorlist'" :model-value="keysVal(p)" @update="setKeys(p, $event)" />
         <SourcesEditor v-else-if="p.type === 'sources'" :model-value="keysVal(p)" @update="setKeys(p, $event)" />
         <StrobeTimeline v-else-if="p.type === 'strobetime'" :p="draft.p" :restart-key="pvRestart" />
+        <SolidTimeline v-else-if="p.type === 'solidtime'" :p="draft.p" :restart-key="pvRestart" />
         <div v-else-if="p.type === 'select'" class="seg">
           <button v-for="o in p.options" :key="o.v" :class="{ on: selVal(p) === o.v }" @click="setSel(p, o.v)">{{ o.l }}</button>
         </div>

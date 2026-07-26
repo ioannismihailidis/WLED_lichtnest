@@ -47,8 +47,10 @@ export const EFFECTS = [
     desc: 'Farbe und Atem-Tempo laufen über Keyframes — beides über die Zeit einstellbar.',
     preview: 'linear-gradient(90deg,#27c5ff,#7b3cff,#ff5a3c)',
     params: [
-      { key: 'keys', type: 'keyframes', name: 'Zeit · Tempo · Farbe', vMin: 0.1, vMax: 5, vStep: 0.1, vUnit: ' Hz', label: 'Tempo', withColor: true, def: [{ t: 0, v: 0.3, c: [39, 197, 255] }, { t: 4, v: 0.3, c: [255, 90, 60] }] },
+      { key: 'keys', type: 'keyframes', name: 'Zeit · Tempo · Farbe', vMin: 0, vMax: 5, vStep: 0.1, vUnit: ' Hz', label: 'Tempo', withColor: true, def: [{ t: 0, v: 0.3, c: [39, 197, 255] }, { t: 4, v: 0.3, c: [255, 90, 60] }] },
+      { key: 'soltl', type: 'solidtime', name: 'Zeitverlauf' },
       { key: 'breathe', type: 'toggle', name: 'Atmen' },
+      { key: 'bease', type: 'select', name: 'Atem-Form', def: 0, show: (p) => p.breathe !== false, options: [{ v: 0, l: 'Sinus' }, { v: 1, l: 'Linear' }, { v: 2, l: 'Ease-In' }, { v: 3, l: 'Ease-Out' }, { v: 4, l: 'Ease-In-Out' }] },
     ],
   },
 ]

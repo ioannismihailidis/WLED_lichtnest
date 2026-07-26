@@ -10,6 +10,7 @@ import KeyframeList from '../components/KeyframeList.vue'
 import ColorList from '../components/ColorList.vue'
 import SourcesEditor from '../components/SourcesEditor.vue'
 import StrobeTimeline from '../components/StrobeTimeline.vue'
+import SolidTimeline from '../components/SolidTimeline.vue'
 import MiniPlan from '../components/MiniPlan.vue'
 import TexturePreview from '../components/TexturePreview.vue'
 
@@ -317,6 +318,7 @@ function confirmImport () {
             <ColorList v-else-if="p.type === 'colorlist'" :model-value="keysValStep(it, p)" @update="setKeysStep(it, p, $event)" />
             <SourcesEditor v-else-if="p.type === 'sources'" :model-value="keysValStep(it, p)" @update="setKeysStep(it, p, $event)" />
             <StrobeTimeline v-else-if="p.type === 'strobetime'" :p="it.p" :restart-key="stepRestart" />
+            <SolidTimeline v-else-if="p.type === 'solidtime'" :p="it.p" :restart-key="stepRestart" />
             <div v-else-if="p.type === 'select'" class="seg">
               <button v-for="o in p.options" :key="o.v" :class="{ on: selVal(it, p) === o.v }" @click="setParam(it, p.key, o.v)">{{ o.l }}</button>
             </div>

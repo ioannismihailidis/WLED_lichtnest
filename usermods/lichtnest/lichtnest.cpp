@@ -33,7 +33,8 @@
 #define ZV_MAXKF  8      // keyframes per list (strobe hz over time / solid rate+colour over time)
 #define ZV_MAXPAL 8      // strobe palette colours
 // one keyframe: time (s), value, colour (colour only used by the solid)
-struct KF { float t = 0; float v = 0; uint32_t c = 0xFFFFFF; };
+// e = easing of the segment ARRIVING at this key (0 lin, 1 in, 2 out, 3 in-out)
+struct KF { float t = 0; float v = 0; uint32_t c = 0xFFFFFF; uint8_t e = 0; };
 
 // one effect + its full parameter set (union over all effects)
 struct FxParams {
@@ -61,6 +62,8 @@ struct FxParams {
   uint8_t  srcMode[ZV_MAXSRC] = { 0, 0, 0, 0 };            // 0 linear, 1 radial
   uint16_t srcAng[ZV_MAXSRC]  = { 25, 25, 25, 25 };        // linear direction (deg)
   uint8_t  smix = 0;                                       // source mixing: 0 frontmost, 1 add, 2 max, 3 screen
+  uint8_t  sfade = 0, sease = 0;                           // strobe flash fade (0 hard,1 out,2 in,3 in&out) + easing
+  uint8_t  bease = 0;                                      // breath shape: 0 sinus, 1..4 = eased triangle
 };
 
 // one playlist row: an effect step (kind 0, optionally repeated) or a transition
@@ -179,24 +182,45 @@ class Lichtnest : public Usermod {
     }
 
     // --- keyframe curves (t, v[, c]) — mirror the web fxsim ------------------
+    // easing value + its integral from 0..x (mirrors the web sim's easeVal/easeInt)
+    static float easeV(uint8_t mode, float x) {
+      if (x < 0) x = 0; if (x > 1) x = 1;
+      if (mode == 1) return x * x;
+      if (mode == 2) return 1.0f - (1.0f - x) * (1.0f - x);
+      if (mode == 3) return x * x * (3.0f - 2.0f * x);
+      return x;
+    }
+    static float easeI(uint8_t mode, float x) {
+      if (mode == 1) return x * x * x / 3.0f;
+      if (mode == 2) return x * x - x * x * x / 3.0f;
+      if (mode == 3) return x * x * x - x * x * x * x / 2.0f;
+      return x * x / 2.0f;
+    }
     static float sampleKV(const KF* k, uint8_t n, float t) {
       if (n == 0) return 0;
       if (t <= k[0].t) return k[0].v;
       if (t >= k[n - 1].t) return k[n - 1].v;
-      for (uint8_t i = 1; i < n; i++) if (t <= k[i].t) { float s = k[i].t - k[i - 1].t; float f = s > 0 ? (t - k[i - 1].t) / s : 0; return k[i - 1].v + (k[i].v - k[i - 1].v) * f; }
+      for (uint8_t i = 1; i < n; i++) if (t <= k[i].t) { float s = k[i].t - k[i - 1].t; float f = s > 0 ? (t - k[i - 1].t) / s : 0; return k[i - 1].v + (k[i].v - k[i - 1].v) * easeV(k[i].e, f); }
       return k[n - 1].v;
     }
-    static float curvePhase(const KF* k, uint8_t n, float t) {   // integral of v from 0..t
+    static float curvePhase(const KF* k, uint8_t n, float t) {   // integral of the (eased) curve from 0..t
       if (n == 0 || t <= 0) return 0;
       float ph = 0, t0 = 0, v0 = k[0].v;
-      for (uint8_t i = 0; i < n; i++) { float t1 = k[i].t, v1 = k[i].v; if (t1 <= t0) { v0 = v1; continue; } if (t < t1) { float v = v0 + (v1 - v0) * ((t - t0) / (t1 - t0)); return ph + (t - t0) * (v0 + v) / 2; } ph += (t1 - t0) * (v0 + v1) / 2; t0 = t1; v0 = v1; }
+      for (uint8_t i = 0; i < n; i++) {
+        float t1 = k[i].t, v1 = k[i].v;
+        if (t1 <= t0) { v0 = v1; continue; }
+        float s = t1 - t0, dv = v1 - v0;
+        if (t < t1) { float x = (t - t0) / s; return ph + s * (v0 * x + dv * easeI(k[i].e, x)); }
+        ph += s * (v0 + dv * easeI(k[i].e, 1.0f));
+        t0 = t1; v0 = v1;
+      }
       return ph + (t - t0) * v0;
     }
     static uint32_t sampleKC(const KF* k, uint8_t n, float t) {
       if (n == 0) return 0xFFFFFF;
       if (t <= k[0].t) return k[0].c;
       if (t >= k[n - 1].t) return k[n - 1].c;
-      for (uint8_t i = 1; i < n; i++) if (t <= k[i].t) { float s = k[i].t - k[i - 1].t; float f = s > 0 ? (t - k[i - 1].t) / s : 0; return blendCol(k[i - 1].c, k[i].c, f); }
+      for (uint8_t i = 1; i < n; i++) if (t <= k[i].t) { float s = k[i].t - k[i - 1].t; float f = s > 0 ? (t - k[i - 1].t) / s : 0; return blendCol(k[i - 1].c, k[i].c, easeV(k[i].e, f)); }
       return k[n - 1].c;
     }
 
@@ -345,10 +369,20 @@ class Lichtnest : public Usermod {
         case 1: { // Tube-Strobe — frequency follows the keyframes; cpar colours across the tubes
           KF defk[2]; const KF* K = P.keys; uint8_t n = P.kcount;
           if (!n) { defk[0].t = 0; defk[0].v = 2; defk[1].t = 2; defk[1].v = 10; K = defk; n = 2; }   // = web DEF_HZKEYS
+          if (sampleKV(K, n, elapsed) < 0.05f) return 0;               // 0 Hz = silence, not a frozen flash
           float phase = curvePhase(K, n, elapsed);
           long flash = (long)floorf(phase);
-          if ((phase - (float)flash) >= (P.duty / 100.0f)) return 0;   // off part of the flash cycle
-          return strobeColor(P, tubeIdx, tubeTotal, flash);
+          float inFrac = phase - (float)flash;
+          float duty = P.duty / 100.0f; if (duty < 0.02f) duty = 0.02f; if (duty > 0.98f) duty = 0.98f;
+          if (inFrac >= duty) return 0;                                // off part of the flash cycle
+          float env = 1.0f;
+          if (P.sfade) {                                               // per-flash fade envelope + easing
+            float ft = inFrac / duty;
+            float e = (P.sfade == 1) ? (1.0f - ft) : (P.sfade == 2) ? ft : (ft < 0.5f ? ft * 2.0f : 2.0f - ft * 2.0f);
+            env = easeV(P.sease, e);
+          }
+          uint32_t c = strobeColor(P, tubeIdx, tubeTotal, flash);
+          return env >= 1.0f ? c : scaleCol(c, env);
         }
         case 2: { // Schwarm
           float N = chainTotal ? chainTotal : 1;
@@ -364,8 +398,14 @@ class Lichtnest : public Usermod {
           if (!n) { defk[0].t = 0; defk[0].v = 0.3f; defk[0].c = 0x27C5FF; defk[1].t = 4; defk[1].v = 0.3f; defk[1].c = 0xFF5A3C; K = defk; n = 2; }   // = web DEF_SOLIDKEYS
           uint32_t col = sampleKC(K, n, elapsed);
           float b = 1.0f;
-          if (P.breathe) { float ph = 6.2831853f * curvePhase(K, n, elapsed); b = 0.25f + 0.75f * (0.5f + 0.5f * sinf(ph)); }
-          return scaleCol(col, b);
+          if (P.breathe) {
+            float c = curvePhase(K, n, elapsed);               // breath position in cycles
+            float w;
+            if (P.bease == 0) w = 0.5f + 0.5f * sinf(6.2831853f * c);
+            else { float f = c - floorf(c); float tri = f < 0.5f ? f * 2.0f : 2.0f - f * 2.0f; w = easeV(P.bease - 1, tri); }
+            b = 0.25f + 0.75f * w;
+          }
+          return b >= 1.0f ? col : scaleCol(col, b);
         }
       }
     }
@@ -658,6 +698,7 @@ class Lichtnest : public Usermod {
       JsonArray sc = p["scols"];                             // strobe palette
       if (!sc.isNull()) { P.scount = 0; for (JsonVariant v : sc) { if (P.scount >= ZV_MAXPAL) break; if (v.is<JsonArray>() && v.size() >= 3) P.scols[P.scount++] = RGBW32((uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], 0); } }
       P.smix = p["smix"] | P.smix;
+      P.sfade = p["sfade"] | P.sfade; P.sease = p["sease"] | P.sease; P.bease = p["bease"] | P.bease;
       JsonArray srcs = p["sources"];                         // impulse emission sources
       if (!srcs.isNull()) {
         P.srcCount = 0;
@@ -679,7 +720,7 @@ class Lichtnest : public Usermod {
         for (JsonObject kf : kk) {
           if (P.kcount >= ZV_MAXKF) break;
           KF& k = P.keys[P.kcount++];
-          k.t = kf["t"] | 0.0f; k.v = kf["v"] | 0.0f;
+          k.t = kf["t"] | 0.0f; k.v = kf["v"] | 0.0f; k.e = kf["e"] | 0;
           if (solidKf) { JsonArray cc = kf["c"]; k.c = (!cc.isNull() && cc.size() >= 3) ? RGBW32((uint8_t)cc[0], (uint8_t)cc[1], (uint8_t)cc[2], 0) : 0xFFFFFF; }
           else k.c = 0xFFFFFF;
         }
@@ -700,6 +741,7 @@ class Lichtnest : public Usermod {
       p["rfin"] = P.rfin; p["rfout"] = P.rfout; p["rwidth"] = P.rwidth; p["rgap"] = P.rgap;
       p["count"] = P.count; p["interval"] = P.interval; p["cpar"] = P.cpar;
       p["smix"] = P.smix;
+      p["sfade"] = P.sfade; p["sease"] = P.sease; p["bease"] = P.bease;
       if (P.srcCount) {                                     // impulse emission sources
         JsonArray ss = p.createNestedArray("sources");
         for (uint8_t i = 0; i < P.srcCount; i++) {
@@ -716,6 +758,7 @@ class Lichtnest : public Usermod {
         for (uint8_t i = 0; i < P.kcount; i++) {
           JsonObject k = kk.createNestedObject();
           k["t"] = P.keys[i].t; k["v"] = P.keys[i].v;
+          if (P.keys[i].e) k["e"] = P.keys[i].e;
           if (P.fx == 3) { JsonArray c = k.createNestedArray("c"); c.add(cR(P.keys[i].c)); c.add(cG(P.keys[i].c)); c.add(cB(P.keys[i].c)); }
         }
       }
@@ -823,7 +866,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.3";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.4";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);

@@ -105,6 +105,22 @@ export const strobeEnvelopeAt = (p, elapsed) => (strobeRateAt(p, elapsed) < 0.05
 const DEF_SOLIDKEYS = [{ t: 0, v: 0.3, c: [39, 197, 255] }, { t: 4, v: 0.3, c: [255, 90, 60] }]
 export const solidKeys = (p) => (p.keys && p.keys.length ? p.keys.slice().sort((a, b) => a.t - b.t) : DEF_SOLIDKEYS)
 export const solidPhaseAt = (p, elapsed) => 2 * Math.PI * curvePhaseAt(solidKeys(p), elapsed)
+// breath brightness 0..1 at breath-cycle position c (cycles, fractional):
+// bease 0 = Sinus (classic), 1..4 = triangle shaped by easeVal(bease-1)
+export function breathVal (p, c) {
+  if (p.breathe === false) return 1
+  const mode = p.bease || 0
+  let w
+  if (mode === 0) w = 0.5 + 0.5 * Math.sin(2 * Math.PI * c)
+  else {
+    const f = c - Math.floor(c)
+    const tri = f < 0.5 ? f * 2 : 2 - f * 2
+    w = easeVal(mode - 1, tri)
+  }
+  return 0.25 + 0.75 * w
+}
+// brightness envelope over step time (for the time-behaviour preview)
+export const solidEnvelopeAt = (p, elapsed) => breathVal(p, curvePhaseAt(solidKeys(p), elapsed))
 export const solidDuration = (p) => { const k = solidKeys(p); return Math.max(0.5, k[k.length - 1].t) }
 // interpolate the colour of a keyframe list (reads .c) at time t
 export function sampleColorAt (keys, t) {
@@ -231,9 +247,8 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       return scale(col, Math.exp(-d / tl))
     }
     default: {
-      let b = 1
-      if (p.breathe !== false) b = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(phase))
-      return scale(col, b)
+      const b = breathVal(p, phase / (2 * Math.PI))
+      return b >= 1 ? col : scale(col, b)
     }
   }
 }
