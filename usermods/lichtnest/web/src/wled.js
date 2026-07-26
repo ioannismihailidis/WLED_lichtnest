@@ -453,6 +453,7 @@ export async function ensureBusLen (portIndex, needed) {
     ins = await ensureCfg()
   }
   if (!ins?.length || portIndex < 0 || portIndex >= ins.length) return false
+  if (!offline && !validBusList(ins)) return false
 
   const bounds = busBounds(ins)
   const lists = ins.map((_, i) => {
@@ -1191,9 +1192,23 @@ export function tubesTotalForPort (portStart, portEnd) {
   return wled.segments.filter((s) => s.start >= portStart && s.start < portEnd).reduce((m, s) => Math.max(m, s.stop - portStart), 0)
 }
 
+// ALWAYS re-fetch before a bus write: the cached copy may hold unsaved System-screen
+// drafts or predate a reboot — building bus posts on it corrupted configs before.
 async function ensureCfg () {
-  if (!cfg.loaded || !cfg.data?.hw?.led?.ins) await loadCfg()
+  await loadCfg()
   return cfg.data?.hw?.led?.ins
+}
+// a bus list is only usable if every entry has a sane, safe data pin and a length —
+// half-parsed entries (pin 0/boot pins, start collisions) must never be written back
+const SAFE_BUS_GPIOS = [16, 2, 13, 4, 5, 33, 12, 14]
+export function validBusList (ins) {
+  if (!Array.isArray(ins) || !ins.length || ins.length > 6) return false
+  for (const b of ins) {
+    const pin = Array.isArray(b.pin) ? b.pin[0] : b.pin
+    if (!SAFE_BUS_GPIOS.includes(pin | 0)) return false
+    if (!(Math.max(0, b.len | 0) >= 1)) return false
+  }
+  return true
 }
 
 function applySegPatchLocal (patch) {
@@ -1245,16 +1260,25 @@ export async function syncBusesFromTubes (opts = {}) {
   } else {
     ins = await ensureCfg()
     if (!ins?.length) return false
+    if (!validBusList(ins)) return false   // corrupt/half-parsed buses: never build on them
   }
 
-  // Group existing tubes by port span [start, nextPortStart)
+  // Group existing tubes by port span [start, nextPortStart) — mapping tubes only,
+  // tip/identify helper segments must never be packed into the bus layout
   const lists = ins.map((b, i) => {
     const end = i + 1 < ins.length ? ins[i + 1].start : (b.start + Math.max(b.len || 0, 1))
     return wled.segments
-      .filter((s) => (s.stop - s.start) > 0 && s.start >= b.start && s.start < end)
+      .filter((s) => isMappingTube(s) && s.start >= b.start && s.start < end)
       .sort((a, c) => a.start - c.start)
       .map((s) => ({ id: s.id, len: s.stop - s.start, n: s.n, col: s.col }))
   })
+  // Corrupt-span guard: if existing tubes fall OUTSIDE every port span, packing would
+  // silently delete them. Abort instead — the caller shows an error.
+  {
+    const grouped = lists.reduce((a, l) => a + l.length, 0)
+    const existing = wled.segments.filter(isMappingTube).length
+    if (grouped < existing) return false
+  }
 
   if (opts.removeId != null) {
     for (const list of lists) {
@@ -1386,7 +1410,7 @@ export function applyTubeLensToIns (ins) {
   const bounds = busBounds(ins)
   const byPort = ins.map(() => [])
   for (const s of wled.segments) {
-    if ((s.stop - s.start) <= 0) continue
+    if (!isMappingTube(s)) continue
     const oi = ownerBusIndex(s.start, bounds)
     if (oi >= 0) byPort[oi].push(s)
   }
