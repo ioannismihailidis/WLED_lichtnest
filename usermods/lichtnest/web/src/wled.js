@@ -413,6 +413,7 @@ export function lockPortsToMapped () {
 }
 
 async function clearTipSegment () {
+  tipIdentFor = null
   if (tipSegId == null && !wled.segments.some((s) => s.n === TIP_SEG_NAME)) return
   const id = tipSegId ?? wled.segments.find((s) => s.n === TIP_SEG_NAME)?.id
   tipSegId = null
@@ -534,35 +535,44 @@ function snapshotTestFx () {
   }))
 }
 
+let tipIdentFor = null   // tube id whose full identify state is already on the device
 async function applyTipIdentify (tubeId, tipPix, segGeometryPatch) {
   if (wled.testTube === null) testSnapshot = snapshotTestFx()
   wled.testTube = tubeId
   const tipId = tipSegId ?? nextTipSegId()
   tipSegId = tipId
+  // After the first full patch, later calls only move geometry (one lean post per
+  // step) — resending colours/on-flags for every segment made +/- feel sluggish.
+  const minimal = tipIdentFor === tubeId
   const patch = []
   const seen = new Set()
   for (const geo of segGeometryPatch) {
     seen.add(geo.id)
     if (geo.id === tubeId) {
-      patch.push({
-        id: geo.id, start: geo.start, stop: geo.stop,
-        on: true, bri: 90, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]],
-      })
+      patch.push(minimal
+        ? { id: geo.id, start: geo.start, stop: geo.stop }
+        : { id: geo.id, start: geo.start, stop: geo.stop, on: true, bri: 90, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] })
     } else {
-      patch.push({ id: geo.id, start: geo.start, stop: geo.stop, on: false })
+      patch.push(minimal
+        ? { id: geo.id, start: geo.start, stop: geo.stop }
+        : { id: geo.id, start: geo.start, stop: geo.stop, on: false })
     }
   }
-  for (const s of wled.segments) {
-    if (!isMappingTube(s) || seen.has(s.id)) continue
-    patch.push({ id: s.id, on: false })
+  if (!minimal) {
+    for (const s of wled.segments) {
+      if (!isMappingTube(s) || seen.has(s.id)) continue
+      patch.push({ id: s.id, on: false })
+    }
   }
   // tip accent: full-bri 1-LED segment on the end pixel (overlaps tube tip)
-  patch.push({
-    id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME,
-    on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]],
-  })
-  await postState({ on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
+  patch.push(minimal
+    ? { id: tipId, start: tipPix, stop: tipPix + 1 }
+    : { id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] })
+  await postState(minimal
+    ? { tt: 0, seg: patch }
+    : { on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
   applySegPatchLocal(patch)
+  tipIdentFor = tubeId
 }
 
 /**
@@ -598,20 +608,6 @@ export async function previewTipLeds (id, leds) {
   // tip pixel with the tube segment made the end flicker during length preview.
   const tipPix = (used < portNow.len) ? tubeGeo.stop : (tubeGeo.stop - 1)
   await applyTipIdentify(id, tipPix, patch)
-  // Brief tip-only pulse so the new/removed end is obvious, then settle to tube+tip accent
-  if (seq === editPreviewSeq && cur !== n) {
-    await postState({
-      tt: 0,
-      seg: [
-        { id, on: true, bri: 40, fx: 0, col: [[255, 255, 255]] },
-        { id: tipSegId, start: tipPix, stop: tipPix + 1, on: true, bri: 255, fx: 0, col: [[255, 255, 255]] },
-      ],
-    })
-    if (seq !== editPreviewSeq) return false
-    await new Promise((r) => setTimeout(r, 70))
-    if (seq !== editPreviewSeq) return false
-    await applyTipIdentify(id, tipPix, patch)
-  }
   return seq === editPreviewSeq
 }
 
@@ -643,29 +639,16 @@ export async function previewAddTip (portIndex, leds) {
   if (wled.testTube === null) testSnapshot = snapshotTestFx()
   wled.testTube = previewId
 
-  const patch = mappingTubesOnPort(port).map((s) => ({ id: s.id, on: false }))
-  // Prospective tube (dim) + will pulse tip via temporary geometry
-  patch.push({
-    id: previewId, start, stop, n: TIP_SEG_NAME,
-    on: true, bri: 90, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]],
-  })
-  await postState({ on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
+  const minimal = tipIdentFor === 'add:' + portIndex
+  const patch = minimal ? [] : mappingTubesOnPort(port).map((s) => ({ id: s.id, on: false }))
+  patch.push(minimal
+    ? { id: previewId, start, stop }
+    : { id: previewId, start, stop, n: TIP_SEG_NAME, on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] })
+  await postState(minimal
+    ? { tt: 0, seg: patch }
+    : { on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
   applySegPatchLocal(patch)
-  // Brief tip pulse at the new end pixel, then restore full preview span
-  if (seq === editPreviewSeq) {
-    await postState({
-      tt: 0,
-      seg: [{ id: previewId, start: tipPix, stop: tipPix + 1, on: true, bri: 255, fx: 0, col: [[255, 255, 255]] }],
-    })
-    if (seq !== editPreviewSeq) return false
-    await new Promise((r) => setTimeout(r, 70))
-    if (seq !== editPreviewSeq) return false
-    await postState({
-      tt: 0,
-      seg: [{ id: previewId, start, stop, on: true, bri: 255, fx: 0, col: [[255, 255, 255]] }],
-    })
-    applySegPatchLocal([{ id: previewId, start, stop }])
-  }
+  tipIdentFor = 'add:' + portIndex
   return seq === editPreviewSeq
 }
 
