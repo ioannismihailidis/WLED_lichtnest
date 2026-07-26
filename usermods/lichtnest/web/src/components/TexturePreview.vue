@@ -39,8 +39,11 @@ function frame (fx, p, umax, live) {
       dim = 1 - easeVal(live.ease || 0, f)
       elapsed = live.prevDur + elapsed                        // its curves clamp-hold past the end
     }
-  } else if (live && (live.repeat || 1) > 1 && !props.local && wled.pl.active) {
-    elapsed = elapsed % stepDur(fx, p, umax)                  // repeated step loops its own duration
+  } else if (!props.local && wled.pl.active && (fx === 0 || fx === 1 || fx === 3)) {
+    // repeated steps: device time runs 0..base*N — fold onto one iteration so the
+    // preview restarts exactly when the LEDs do (also covers the props-bound overall preview)
+    const base = stepDur(fx, p, umax)
+    if (base > 0.05 && elapsed > base) elapsed = elapsed % base
   }
   let phase
   if (fx === 1) phase = strobePhaseAt(p, elapsed)
