@@ -566,7 +566,7 @@ async function applyTipIdentify (tubeId, tipPix, segGeometryPatch) {
   }
   // tip accent: full-bri 1-LED segment on the end pixel (overlaps tube tip)
   patch.push(minimal
-    ? { id: tipId, start: tipPix, stop: tipPix + 1 }
+    ? { id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255 }
     : { id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] })
   await postState(minimal
     ? { tt: 0, seg: patch }
@@ -642,7 +642,7 @@ export async function previewAddTip (portIndex, leds) {
   const minimal = tipIdentFor === 'add:' + portIndex
   const patch = minimal ? [] : mappingTubesOnPort(port).map((s) => ({ id: s.id, on: false }))
   patch.push(minimal
-    ? { id: previewId, start, stop }
+    ? { id: previewId, start, stop, n: TIP_SEG_NAME, on: true, bri: 255 }
     : { id: previewId, start, stop, n: TIP_SEG_NAME, on: true, bri: 255, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]] })
   await postState(minimal
     ? { tt: 0, seg: patch }
