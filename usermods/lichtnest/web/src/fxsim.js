@@ -41,6 +41,7 @@ export function phaseRate (fx, p, N) {
   if (fx === 0) return Math.max(1, p.hz || 6) * 0.15
   if (fx === 1) return Math.max(1, p.hz || 6)
   if (fx === 2) return ((p.speed || 0) / 100) * 0.5 * (N || 1)
+  if (fx === 4) return ((p.speed ?? 30) / 100) * 0.4   // noise drift: pos += dt * speed
   return 0.3 + ((p.tempo ?? 35) / 100) * 2
 }
 // interpolation over keyframes [{ t, v[, e] }] (t in seconds), clamped at the ends.
@@ -203,7 +204,8 @@ export function strobeColor (p, tubeIdx, tubeTotal, flash) {
   return list[(((rank % M) + flash) % M + M) % M]
 }
 
-// fx: 0 fade, 1 strobe, 2 schwarm, 3 solid, 4 radial. p: param pool. (x,y) normalised 0..1.
+import { noiseValue } from './noise.js'
+// fx: 0 impulse, 1 strobe, 2 schwarm, 3 solid, 4 noise. p: param pool. (x,y) normalised 0..1.
 // `phase` is the accumulated phase for this effect; (cx,cy) is the radial centre.
 export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase, cx = 0.5, cy = 0.5) {
   const col = p.color || [255, 255, 255]
@@ -237,6 +239,10 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       if (env <= 0) return [0, 0, 0]
       const c = strobeColor(p, tubeIdx, tubeTotal, flash)    // handles which tubes are lit + their colour
       return env >= 1 ? c : scale(c, env)
+    }
+    case 4: { // Noise / Drift — hash noise field mapped through the gradient; phase = drift pos
+      const v = noiseValue(p, x, y, phase)
+      return gradN(v, fadeCols(p), fadeCw(p))
     }
     case 2: {
       const N = chainTotal || 1

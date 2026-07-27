@@ -43,6 +43,18 @@ export const EFFECTS = [
     ],
   },
   {
+    id: 4, key: 'noise', name: 'Noise / Drift',
+    desc: 'Organisches Rauschen zieht über die Fläche — Typ, Detail und Richtung einstellbar.',
+    preview: 'radial-gradient(circle at 20% 40%, #27c5ff 0 6%, transparent 12%), radial-gradient(circle at 55% 70%, #7b3cff 0 8%, transparent 16%), radial-gradient(circle at 80% 30%, #ff5a3c 0 7%, transparent 14%), #0d0f13',
+    params: [
+      { key: 'grad', type: 'gradient', name: 'Farbverlauf' },
+      { key: 'ntype', type: 'select', name: 'Typ', def: 0, options: [{ v: 0, l: 'Perlin' }, { v: 1, l: 'Cellular' }, { v: 2, l: 'Voronoi' }, { v: 3, l: 'Hash' }, { v: 4, l: 'Swirl' }] },
+      { key: 'nscale', type: 'range', name: 'Detail', min: 2, max: 30, def: 8 },
+      { key: 'speed', type: 'range', name: 'Geschwindigkeit', min: 0, max: 100, unit: '%', def: 30 },
+      { key: 'nang', type: 'range', name: 'Richtung', min: 0, max: 360, unit: '°', def: 0, show: (p) => (p.ntype || 0) !== 4 },
+    ],
+  },
+  {
     id: 3, key: 'solid', name: 'Solid / Atmen',
     desc: 'Farbe und Atem-Tempo laufen über Keyframes — beides über die Zeit einstellbar.',
     preview: 'linear-gradient(90deg,#27c5ff,#7b3cff,#ff5a3c)',

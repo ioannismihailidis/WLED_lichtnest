@@ -64,6 +64,8 @@ struct FxParams {
   uint8_t  smix = 0;                                       // source mixing: 0 frontmost, 1 add, 2 max, 3 screen
   uint8_t  sfade = 0, sease = 0;                           // strobe flash fade (0 hard,1 out,2 in,3 in&out) + easing
   uint8_t  bease = 0;                                      // breath shape: 0 sinus, 1..4 = eased triangle
+  uint8_t  ntype = 0, nscale = 8;                          // noise: type + detail
+  uint16_t nang = 0;                                       // noise drift direction (deg, pattern moves TOWARD it)
 };
 
 // one playlist row: an effect step (kind 0, optionally repeated) or a transition
@@ -119,6 +121,8 @@ class Lichtnest : public Usermod {
     // strobe "Zufall" state: current + previous flash's tube pick (no immediate repeats).
     // The previous pick stays addressable by its flash no., so transition crossfades that
     // render two strobes with different clocks don't re-roll per pixel.
+    float    _nPos = 0;                // noise drift position: noisepos += dt * speed
+    uint32_t _nPosMs = 0;
     uint32_t _zufFlash = 0xFFFFFFFF, _zufPrevFlash = 0xFFFFFFFF;
     uint8_t  _zufSel[ZV_MAXPAL], _zufPrev[ZV_MAXPAL]; uint8_t _zufSelN = 0, _zufPrevN = 0;
     float    _cx = 0.5f, _cy = 0.5f;   // radial centre = centroid of the tube geometry
@@ -222,6 +226,54 @@ class Lichtnest : public Usermod {
       if (t >= k[n - 1].t) return k[n - 1].c;
       for (uint8_t i = 1; i < n; i++) if (t <= k[i].t) { float s = k[i].t - k[i - 1].t; float f = s > 0 ? (t - k[i - 1].t) / s : 0; return blendCol(k[i - 1].c, k[i].c, easeV(k[i].e, f)); }
       return k[n - 1].c;
+    }
+
+    // --- noise field (fx4) — mirrors web noise.js bit-for-bit ---------------
+    static float nh2(int ix, int iy, uint32_t seed) {
+      uint32_t x = ((uint32_t)ix * 0x9E3779B1u) ^ ((uint32_t)iy * 0x85EBCA6Bu) ^ seed;
+      x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+      return (float)x / 4294967295.0f;
+    }
+    static float nvalue(float x, float y, uint32_t seed) {
+      int ix = (int)floorf(x), iy = (int)floorf(y);
+      float fx = x - ix, fy = y - iy;
+      float sx = fx * fx * (3.0f - 2.0f * fx), sy = fy * fy * (3.0f - 2.0f * fy);
+      float a = nh2(ix, iy, seed), b = nh2(ix + 1, iy, seed);
+      float c = nh2(ix, iy + 1, seed), d = nh2(ix + 1, iy + 1, seed);
+      return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+    }
+    static float nworley(float x, float y, bool wantOwner) {
+      int ix = (int)floorf(x), iy = (int)floorf(y);
+      float best = 9; int ox = 0, oy = 0;
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          int cx = ix + dx, cy = iy + dy;
+          float px = cx + nh2(cx, cy, 0x51ED1u);
+          float py = cy + nh2(cx, cy, 0xC0FFEEu);
+          float d2 = (px - x) * (px - x) + (py - y) * (py - y);
+          if (d2 < best) { best = d2; ox = cx; oy = cy; }
+        }
+      }
+      if (wantOwner) return nh2(ox, oy, 0xB10Bu);
+      float v = 1.0f - sqrtf(best) * 1.25f;
+      return v < 0 ? 0 : v;
+    }
+    float noiseVal(const FxParams& P, float x, float y) const {
+      uint8_t type = P.ntype;
+      float scale = P.nscale < 1 ? 1 : P.nscale;
+      if (type == 4) {                                   // Swirl: rotating spiral arms
+        float dx = x - 0.5f, dy = y - 0.5f;
+        float r = sqrtf(dx * dx + dy * dy);
+        float a = atan2f(dy, dx);
+        return 0.5f + 0.5f * sinf(a * 3.0f + r * scale * 1.5f - _nPos * 6.0f);
+      }
+      float ang = P.nang * 3.14159265f / 180.0f;
+      float sx = (x - cosf(ang) * _nPos) * scale;        // subtract -> pattern travels TOWARD the angle
+      float sy = (y - sinf(ang) * _nPos) * scale;
+      if (type == 1) return nworley(sx, sy, false);      // Cellular (F1)
+      if (type == 2) return nworley(sx, sy, true);       // Voronoi (flat regions)
+      if (type == 3) return nh2((int)floorf(sx), (int)floorf(sy), 0xA11CEu);   // Hash (blocky)
+      return nvalue(sx, sy, 0x9E1u);                     // Perlin-style value noise
     }
 
     // --- impulse geometry ---------------------------------------------------
@@ -384,6 +436,9 @@ class Lichtnest : public Usermod {
           uint32_t c = strobeColor(P, tubeIdx, tubeTotal, flash);
           return env >= 1.0f ? c : scaleCol(c, env);
         }
+        case 4: { // Noise / Drift — hash noise field through the gradient; drift pos accumulates
+          return gradN(P, noiseVal(P, x, y));
+        }
         case 2: { // Schwarm
           float N = chainTotal ? chainTotal : 1;
           float phase = (P.speed / 100.0f) * 0.5f * N * elapsed;
@@ -520,6 +575,15 @@ class Lichtnest : public Usermod {
         float D = stepSeconds(*pA); if (D > 0.05f) elA = fmodf(elA, D);
       }
 
+      // advance the noise drift position for whichever noise params render this frame
+      {
+        float dt = (_nPosMs && nowMs > _nPosMs) ? (nowMs - _nPosMs) / 1000.0f : 0;
+        _nPosMs = nowMs;
+        if (dt > 0.5f) dt = 0;   // resume after a stall: no jump
+        const FxParams* np = (pA && pA->fx == 4) ? pA : ((pB && pB->fx == 4) ? pB : nullptr);
+        if (np) _nPos += dt * (np->speed / 100.0f) * 0.4f;
+      }
+
       for (uint8_t g = 0; g < geoCount; g++) {
         if (geoId[g] >= strip.getSegmentsNum()) continue;
         Segment& seg = strip.getSegment(geoId[g]);
@@ -610,6 +674,7 @@ class Lichtnest : public Usermod {
         parseParams(o["p"], _manual);
         _blackout = false;                  // an applied effect ends the stop-blackout
         _manualStart = millis();            // restart the manual effect's timeline
+        _nPos = 0; _nPosMs = 0;             // fresh noise drift
         _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;   // fresh Zufall-strobe state
       } else if (o.containsKey("p")) {
         parseParams(o["p"], activeParams());
@@ -709,6 +774,7 @@ class Lichtnest : public Usermod {
       if (!sc.isNull()) { P.scount = 0; for (JsonVariant v : sc) { if (P.scount >= ZV_MAXPAL) break; if (v.is<JsonArray>() && v.size() >= 3) P.scols[P.scount++] = RGBW32((uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], 0); } }
       P.smix = p["smix"] | P.smix;
       P.sfade = p["sfade"] | P.sfade; P.sease = p["sease"] | P.sease; P.bease = p["bease"] | P.bease;
+      P.ntype = p["ntype"] | P.ntype; P.nscale = p["nscale"] | P.nscale; P.nang = p["nang"] | P.nang;
       JsonArray srcs = p["sources"];                         // impulse emission sources
       if (!srcs.isNull()) {
         P.srcCount = 0;
@@ -752,6 +818,7 @@ class Lichtnest : public Usermod {
       p["count"] = P.count; p["interval"] = P.interval; p["cpar"] = P.cpar;
       p["smix"] = P.smix;
       p["sfade"] = P.sfade; p["sease"] = P.sease; p["bease"] = P.bease;
+      p["ntype"] = P.ntype; p["nscale"] = P.nscale; p["nang"] = P.nang;
       if (P.srcCount) {                                     // impulse emission sources
         JsonArray ss = p.createNestedArray("sources");
         for (uint8_t i = 0; i < P.srcCount; i++) {
@@ -780,6 +847,7 @@ class Lichtnest : public Usermod {
       if (_stepCount == 0) return;
       idx = ((idx % _stepCount) + _stepCount) % _stepCount;
       _plIdx = (uint8_t)idx; _plStepStart = millis();   // elapsed = 0 → effects start from black
+      _nPos = 0; _nPosMs = 0;                            // fresh noise drift per step
       _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;   // fresh Zufall-strobe state per step
     }
 
@@ -876,7 +944,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.5";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.6";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);
