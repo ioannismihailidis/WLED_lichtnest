@@ -2,9 +2,11 @@ import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { viteSingleFile } from 'vite-plugin-singlefile'
 import { fileURLToPath } from 'node:url'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
+import { readFileSync } from 'node:fs'
 
 const root = dirname(fileURLToPath(import.meta.url))
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'))
 
 function deviceProxy (target) {
   const opts = { target, changeOrigin: true }
@@ -21,6 +23,7 @@ function deviceProxy (target) {
     '/plan.jpg': opts,
     '/lichtnest_plan.json': opts,
     '/lichtnest_playlists.json': opts,
+    '/lichtnest_sched.json': opts,
   }
 }
 
@@ -38,6 +41,7 @@ export default defineConfig(({ command, mode }) => {
     ],
     define: {
       __LN_PROXY__: JSON.stringify(proxying),
+      __UI_VERSION__: JSON.stringify(pkg.version),
     },
     server: {
       host: true,

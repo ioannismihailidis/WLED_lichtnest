@@ -1,10 +1,13 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { wled, connectDevice, goOffline } from './wled.js'
+import { wled, connectDevice, goOffline, lichtnest, deviceTimeMs } from './wled.js'
+import { uiNav } from './nav.js'
+import { EFFECTS } from './effects.js'
 import Start from './screens/Start.vue'
 import Effekte from './screens/Effekte.vue'
 import Tubes from './screens/Tubes.vue'
 import Playlists from './screens/Playlists.vue'
+import Zeitplan from './screens/Zeitplan.vue'
 import System from './screens/System.vue'
 import Stub from './screens/Stub.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
@@ -14,6 +17,7 @@ const NAV = [
   { id: 'tubes', label: 'Tubes', icon: '<rect x="3" y="6" width="18" height="4" rx="2"/><rect x="3" y="14" width="18" height="4" rx="2"/>' },
   { id: 'effects', label: 'Effekte', icon: '<path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/>' },
   { id: 'playlists', label: 'Playlists', icon: '<path d="M4 7h11M4 12h11M4 17h7"/><circle cx="18" cy="16" r="2.5"/>' },
+  { id: 'schedule', label: 'Zeitplan', icon: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>' },
   { id: 'system', label: 'System', icon: '<path d="M5 8h14M5 16h14"/><circle cx="9" cy="8" r="2.4"/><circle cx="15" cy="16" r="2.4"/>' },
 ]
 
@@ -21,8 +25,29 @@ const screen = ref('home')
 const width = ref(window.innerWidth)
 const wide = computed(() => width.value >= 760)
 const onResize = () => { width.value = window.innerWidth }
-onMounted(() => window.addEventListener('resize', onResize))
-onUnmounted(() => window.removeEventListener('resize', onResize))
+
+// clock: run on the CONTROLLER's time when it is set (that is what drives playlists
+// and schedules), otherwise fall back to the browser clock and flag it.
+const now = ref(Date.now())
+let clockTimer = null
+onMounted(() => {
+  window.addEventListener('resize', onResize)
+  clockTimer = setInterval(() => { now.value = Date.now() }, 1000)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', onResize)
+  if (clockTimer) clearInterval(clockTimer)
+})
+const clockOffset = computed(() => { const d = deviceTimeMs(); return d ? d - wled.infoAt : 0 })
+const clockSynced = computed(() => !wled.offline && deviceTimeMs() > 0)
+const clockText = computed(() => new Date(now.value + clockOffset.value).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+const uiVersion = typeof __UI_VERSION__ === 'string' ? __UI_VERSION__ : 'dev'
+const fwVersion = computed(() => {
+  const u = wled.info?.u?.['Lichtnest UI']
+  const v = Array.isArray(u) ? u[0] : u
+  return v ? String(v).replace(/^Lichtnest\s*/, 'FW ') : 'FW –'
+})
+const wledVersion = computed(() => wled.info?.ver || '')
 
 const screenComp = computed(() => {
   switch (screen.value) {
@@ -30,11 +55,14 @@ const screenComp = computed(() => {
     case 'effects': return Effekte
     case 'tubes': return Tubes
     case 'playlists': return Playlists
+    case 'schedule': return Zeitplan
     case 'system': return System
     default: return Stub
   }
 })
 const stubTitle = computed(() => (NAV.find((n) => n.id === screen.value) || {}).label || '')
+
+function openEffect (id) { screen.value = 'effects'; uiNav.openEffect = id }
 
 const statusText = computed(() => {
   if (wled.offline) return 'Lokales Projekt'
@@ -52,15 +80,36 @@ const statusText = computed(() => {
         <div class="brandname">Lichtnest</div>
       </div>
       <nav class="navlist">
-        <button v-for="n in NAV" :key="n.id" class="navbtn" :class="{ on: screen === n.id }" @click="screen = n.id">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="n.icon" />
-          <span>{{ n.label }}</span>
-        </button>
+        <template v-for="n in NAV" :key="n.id">
+          <button class="navbtn" :class="{ on: screen === n.id }" @click="screen = n.id">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="n.icon" />
+            <span>{{ n.label }}</span>
+          </button>
+          <!-- all effects, listed under "Effekte" while that screen is open -->
+          <div v-if="n.id === 'effects' && screen === 'effects'" class="subnav">
+            <button
+              v-for="e in EFFECTS" :key="e.id" class="subbtn"
+              :class="{ on: uiNav.currentEffect === e.id }"
+              @click="openEffect(e.id)"
+            >
+              <span class="subprev" :style="{ backgroundImage: e.preview }" />
+              <span class="sublbl">{{ e.name }}</span>
+              <span v-if="lichtnest.fx === e.id" class="subdot" title="Auf LEDs aktiv" />
+            </button>
+          </div>
+        </template>
       </nav>
       <div class="status">
         <span class="dot" :class="{ off: !wled.online && !wled.offline, local: wled.offline }" />
         <span class="mono">{{ statusText }}</span>
         <button class="connbtn" @click="wled.offline ? connectDevice() : goOffline()">{{ wled.offline ? 'Verbinden' : 'Offline' }}</button>
+      </div>
+      <div class="meta">
+        <div class="clock mono" :class="{ nosync: !clockSynced }" :title="clockSynced ? 'Uhrzeit vom Controller' : 'Controller-Uhr nicht gestellt — Browserzeit'">
+          {{ clockText }}<span v-if="!clockSynced" class="clockwarn">⚠</span>
+        </div>
+        <div class="vers mono">UI {{ uiVersion }} · {{ fwVersion }}</div>
+        <div v-if="wledVersion" class="vers mono dim">WLED {{ wledVersion }}</div>
       </div>
     </aside>
 
@@ -110,8 +159,21 @@ const statusText = computed(() => {
 }
 .navbtn:hover { color: var(--text2); background: rgba(255,255,255,.03); }
 .navbtn.on { background: rgba(240,162,60,.14); color: var(--accent); }
+.subnav { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 6px 14px; padding-left: 10px; border-left: 1px solid var(--line); }
+.subbtn { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: none; border-radius: 9px; background: transparent; color: var(--muted2); font-size: 12.5px; font-weight: 600; cursor: pointer; text-align: left; }
+.subbtn:hover { color: var(--text2); background: rgba(255,255,255,.03); }
+.subbtn.on { background: rgba(240,162,60,.12); color: var(--accent); }
+.subprev { flex: none; width: 18px; height: 10px; border-radius: 4px; border: 1px solid rgba(255,255,255,.14); background-repeat: no-repeat; background-origin: border-box; }
+.sublbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subdot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
 
 .status { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 10px; font-size: 11px; color: var(--muted); }
+.meta { padding: 2px 10px 0; display: flex; flex-direction: column; gap: 2px; }
+.clock { font-size: 15px; font-weight: 700; color: var(--text2); letter-spacing: .04em; }
+.clock.nosync { color: var(--muted); }
+.clockwarn { color: var(--accent); font-size: 11px; margin-left: 5px; vertical-align: 2px; }
+.vers { font-size: 10px; color: var(--muted2); }
+.vers.dim { opacity: .65; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
 .dot.off { background: #c4503f; box-shadow: 0 0 8px #c4503f; }
 .dot.local { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
