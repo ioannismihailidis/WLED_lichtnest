@@ -51,7 +51,7 @@ export const EFFECTS = [
       { key: 'ntype', type: 'select', name: 'Typ', def: 0, options: [{ v: 0, l: 'Perlin' }, { v: 1, l: 'Cellular' }, { v: 2, l: 'Voronoi' }, { v: 3, l: 'Hash' }, { v: 4, l: 'Swirl' }] },
       { key: 'nscale', type: 'range', name: 'Detail', min: 2, max: 30, def: 8 },
       { key: 'speed', type: 'range', name: 'Geschwindigkeit', min: 0, max: 100, unit: '%', def: 30 },
-      { key: 'nang', type: 'range', name: 'Richtung', min: 0, max: 360, unit: '°', def: 0, show: (p) => (p.ntype || 0) !== 4 },
+      { key: 'nang', type: 'angle', name: 'Richtung', def: 0, show: (p) => (p.ntype || 0) !== 4 },
     ],
   },
   {

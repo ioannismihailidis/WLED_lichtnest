@@ -9,6 +9,7 @@ import GradientEditor from '../components/GradientEditor.vue'
 import KeyframeList from '../components/KeyframeList.vue'
 import ColorList from '../components/ColorList.vue'
 import SourcesEditor from '../components/SourcesEditor.vue'
+import AngleDial from '../components/AngleDial.vue'
 import StrobeTimeline from '../components/StrobeTimeline.vue'
 import SolidTimeline from '../components/SolidTimeline.vue'
 import MiniPlan from '../components/MiniPlan.vue'
@@ -317,6 +318,7 @@ function confirmImport () {
             <KeyframeList v-else-if="p.type === 'keyframes'" :model-value="keysValStep(it, p)" :v-min="p.vMin" :v-max="p.vMax" :v-step="p.vStep || 1" :v-unit="p.vUnit || ''" :label="p.label || 'Frequenz'" :with-color="p.withColor || false" @update="setKeysStep(it, p, $event)" />
             <ColorList v-else-if="p.type === 'colorlist'" :model-value="keysValStep(it, p)" @update="setKeysStep(it, p, $event)" />
             <SourcesEditor v-else-if="p.type === 'sources'" :model-value="keysValStep(it, p)" @update="setKeysStep(it, p, $event)" />
+            <AngleDial v-else-if="p.type === 'angle'" :model-value="rangeVal(it, p)" @update="setParam(it, p.key, $event)" />
             <StrobeTimeline v-else-if="p.type === 'strobetime'" :p="it.p" :restart-key="stepRestart" />
             <SolidTimeline v-else-if="p.type === 'solidtime'" :p="it.p" :restart-key="stepRestart" />
             <div v-else-if="p.type === 'select'" class="seg">

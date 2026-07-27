@@ -7,6 +7,7 @@ import GradientEditor from '../components/GradientEditor.vue'
 import KeyframeList from '../components/KeyframeList.vue'
 import ColorList from '../components/ColorList.vue'
 import SourcesEditor from '../components/SourcesEditor.vue'
+import AngleDial from '../components/AngleDial.vue'
 import StrobeTimeline from '../components/StrobeTimeline.vue'
 import SolidTimeline from '../components/SolidTimeline.vue'
 import MiniPlan from '../components/MiniPlan.vue'
@@ -131,6 +132,7 @@ function restartPreview () { pvRestart.value++; if (isLive.value) fxActions.setE
         <KeyframeList v-else-if="p.type === 'keyframes'" :model-value="keysVal(p)" :v-min="p.vMin" :v-max="p.vMax" :v-step="p.vStep || 1" :v-unit="p.vUnit || ''" :label="p.label || 'Frequenz'" :with-color="p.withColor || false" @update="setKeys(p, $event)" />
         <ColorList v-else-if="p.type === 'colorlist'" :model-value="keysVal(p)" @update="setKeys(p, $event)" />
         <SourcesEditor v-else-if="p.type === 'sources'" :model-value="keysVal(p)" @update="setKeys(p, $event)" />
+        <AngleDial v-else-if="p.type === 'angle'" :model-value="rangeVal(p)" @update="setSel(p, $event)" />
         <StrobeTimeline v-else-if="p.type === 'strobetime'" :p="draft.p" :restart-key="pvRestart" />
         <SolidTimeline v-else-if="p.type === 'solidtime'" :p="draft.p" :restart-key="pvRestart" />
         <div v-else-if="p.type === 'select'" class="seg">
