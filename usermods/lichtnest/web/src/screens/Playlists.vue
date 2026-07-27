@@ -1,9 +1,10 @@
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { playlists, loadPlaylists, savePlaylists, playPlaylist, stopPlaylist, isPlaying, playlistProgress, stepDurationMs, fxActions, lichtnest, rgbToHex, hexToRgb } from '../wled.js'
 import { EFFECTS, effectById } from '../effects.js'
 import { fadeCols, fadeCw } from '../fxsim.js'
 import { confirmDialog } from '../confirm.js'
+import { uiNav } from '../nav.js'
 import PlaylistPlayer from '../components/PlaylistPlayer.vue'
 import GradientEditor from '../components/GradientEditor.vue'
 import KeyframeList from '../components/KeyframeList.vue'
@@ -24,6 +25,8 @@ const stepRestart = ref(0)        // bump to replay the step preview from animat
 const now = ref(Date.now())
 let timer = null
 onMounted(() => { loadPlaylists(); timer = setInterval(() => { now.value = Date.now() }, 500) })
+// jump straight into a playlist (e.g. from the Start screen)
+watch(() => uiNav.openPlaylist, (v) => { if (v != null) { editId.value = v; view.value = 'edit'; uiNav.openPlaylist = null } }, { immediate: true })
 onUnmounted(() => clearInterval(timer))
 
 const open = computed(() => playlists.list.find((p) => p.id === editId.value) || null)
@@ -85,6 +88,7 @@ async function removeItem (it) {
 }
 function bumpDur (it, d) { it.dur = Math.max(1, (it.dur || 10) + d); savePlaylists() }
 const autoDur = (it) => (stepDurationMs(it) / 1000).toFixed(1)   // impulse: auto-derived step length
+const hasAutoDur = (it) => !it.kind && (it.fx === 0 || it.fx === 1 || it.fx === 3 || (it.fx === 2 && ((it.p && it.p.swmode) || 0) !== 0))
 function setStepName (it, v) { it.name = v; savePlaylists() }
 function setStepNote (it, v) { it.note = v; savePlaylists() }
 const stepTitle = (it) => it.kind ? elementDef(it.kind).name : ((it.name && it.name.trim()) ? it.name : effectById(it.fx).name)
@@ -260,7 +264,7 @@ function confirmImport () {
           <span v-if="it.kind" class="dur mono">
             <button @click="bumpElDur(it, -0.5)">−</button><b>{{ it.dur }}s</b><button @click="bumpElDur(it, 0.5)">+</button>
           </span>
-          <span v-else-if="it.fx === 0 || it.fx === 1 || it.fx === 3" class="dur mono auto" :title="it.fx === 0 ? 'Dauer läuft automatisch aus (Anzahl × Abstand + Auslaufzeit)' : 'Dauer endet beim letzten Keyframe'">~{{ autoDur(it) }}s</span>
+          <span v-else-if="hasAutoDur(it)" class="dur mono auto" :title="it.fx === 0 ? 'Dauer läuft automatisch aus (Anzahl × Abstand + Auslaufzeit)' : 'Dauer automatisch aus den Effekt-Einstellungen'">~{{ autoDur(it) }}s</span>
           <span v-else class="dur mono">
             <button @click="bumpDur(it, -5)">−</button><b>{{ it.dur }}s</b><button @click="bumpDur(it, 5)">+</button>
           </span>

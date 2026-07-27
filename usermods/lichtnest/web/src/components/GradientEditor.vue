@@ -21,7 +21,7 @@ const gradCss = computed(() => gradientCss(props.cols, props.cw))
 
 <template>
   <div class="grad">
-    <div class="bar" :style="{ background: gradCss }" />
+    <div class="bar" :style="{ backgroundImage: gradCss }" />
     <div v-for="(s, i) in stops" :key="i" class="stop">
       <label class="sw" :style="{ background: rgbToHex(s.c) }">
         <input type="color" :value="rgbToHex(s.c)" @input="setColor(i, $event.target.value)">
@@ -41,7 +41,7 @@ const gradCss = computed(() => gradientCss(props.cols, props.cw))
 
 <style scoped>
 .grad { display: flex; flex-direction: column; gap: 9px; }
-.bar { height: 30px; border-radius: 9px; border: 1px solid var(--line2); }
+.bar { height: 30px; border-radius: 9px; border: 1px solid var(--line2); background-repeat: no-repeat; background-origin: border-box; }
 .stop { display: flex; align-items: center; gap: 10px; }
 .sw { width: 34px; height: 30px; flex: none; border-radius: 8px; border: 1px solid rgba(255,255,255,.25); cursor: pointer; overflow: hidden; position: relative; }
 .sw input { position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px); border: none; padding: 0; background: none; cursor: pointer; opacity: 0; }

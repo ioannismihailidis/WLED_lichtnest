@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import {
-  wled, cfg, loadCfg, saveCfg, saveLedBuses, postState, persistTubes,
+  wled, cfg, plan, loadCfg, saveCfg, saveLedBuses, postState, persistTubes, syncDeviceTime, deviceTimeMs,
   portMaxLeds, setPortMax, reindexPortMaxAfterRemove,
   applyTubeLensToIns, savePlan, cancelSavePlan, loadPlan,
   DEFAULT_PORT_MAX,
@@ -23,7 +23,7 @@ const LED_TYPES = [
   { v: 29, l: 'UCS8904 (RGBW)' },
   { v: 50, l: 'WS2801' },
 ]
-const COLOR_ORDERS = [{ v: 0, l: 'GRB' }, { v: 1, l: 'RGB' }, { v: 2, l: 'BRG' }, { v: 3, l: 'RBG' }, { v: 4, l: 'BGR' }, { v: 5, l: 'GBR' }]
+const COLOR_ORDERS = [{ v: 1, l: 'RGB' }, { v: 0, l: 'GRB' }, { v: 2, l: 'BRG' }, { v: 3, l: 'RBG' }, { v: 4, l: 'BGR' }, { v: 5, l: 'GBR' }]
 const MA_OPTS = [
   { v: 55, l: '55 mA (5V WS281x)' },
   { v: 35, l: '35 mA (eco)' },
@@ -32,26 +32,92 @@ const MA_OPTS = [
   { v: 12, l: '12 mA (WS2815)' },
 ]
 
+// installation defaults (Zugvoegel: WS2815 on 12 V, RGB order, 200 W supply)
+const DEF_ORDER = 1        // RGB
+const DEF_TYPE = 22        // WS2812B/13/15 family (WS2815)
+const DEF_LEDMA = 12       // WS2815 (12 V)
+const DEF_BUDGET = 12000   // mA
+const DEF_NTP = false      // no internet on site -> the browser is the time source
 const busy = ref(false)
 const msg = ref('')
+const timeMsg = ref('')
 const wifiPass = ref('')
 const apPass = ref('')
-let lastMax = 2000
+let lastMax = DEF_BUDGET
 
 onMounted(async () => {
   await Promise.all([loadCfg(), loadPlan()])   // plan carries the per-port LED guard limits
-  if (cfg.data?.hw?.led?.maxpwr) lastMax = cfg.data.hw.led.maxpwr
+  const budgetSum = (cfg.data?.hw?.led?.ins || []).reduce((a, b) => a + (b.maxpwr || 0), 0)
+  if (budgetSum) lastMax = budgetSum
+  else if (cfg.data?.hw?.led?.maxpwr) lastMax = cfg.data.hw.led.maxpwr
   busStructureSnapshot = busStructureKey(cfg.data?.hw?.led?.ins)
 })
 
 const c = computed(() => cfg.data)
 const ins = computed(() => c.value?.hw?.led?.ins || [])
+
+// --- power budget (ABL) ----------------------------------------------------
+// WLED 16 limits PER BUS (`ins[].maxpwr`); `hw.led.maxpwr` is only the fallback used
+// to derive bus budgets when a bus carries none. So we edit a total here and spread
+// it over the buses by length, keeping the global field in sync.
+// Estimate per bus (bus_manager.cpp): colourSum * ledma / 765 + 1 mA PER LED — and if
+// the budget drops below the LED count, WLED clamps brightness to 1 instead of scaling.
+const totalLen = computed(() => ins.value.reduce((a, b) => a + (b.len || 0), 0))
 const ablOn = computed({
-  get: () => (c.value?.hw?.led?.maxpwr || 0) > 0,
-  set: (v) => { c.value.hw.led.maxpwr = v ? lastMax || 2000 : 0 },
+  get: () => ins.value.some((b) => (b.maxpwr || 0) > 0),
+  set: (v) => setBudget(v ? (lastMax || 2000) : 0),
 })
-const maxpwr = computed({ get: () => c.value?.hw?.led?.maxpwr || 0, set: (v) => { c.value.hw.led.maxpwr = v; if (v > 0) lastMax = v } })
-const psuRec = computed(() => ((c.value?.hw?.led?.maxpwr || 0) / 1000).toFixed(1) + ' A')
+const maxpwr = computed({ get: () => ins.value.reduce((a, b) => a + (b.maxpwr || 0), 0), set: (v) => setBudget(v) })
+function setBudget (v) {
+  const arr = ins.value
+  if (!arr.length || !c.value?.hw?.led) return
+  if (v > 0) lastMax = v
+  const tl = totalLen.value
+  for (const b of arr) {
+    if (v <= 0) { b.maxpwr = 0; continue }
+    b.maxpwr = tl > 0 ? Math.max(1, Math.round((v * (b.len || 0)) / tl)) : Math.round(v / arr.length)
+  }
+  c.value.hw.led.maxpwr = v
+}
+const psuRec = computed(() => (maxpwr.value / 1000).toFixed(1) + ' A')
+const liveMa = computed(() => wled.info?.leds?.pwr || 0)
+const standbyMa = computed(() => totalLen.value)                 // WLED books 1 mA per configured LED
+const fullWhiteMa = computed(() => ins.value.reduce((a, b) => a + (b.len || 0) * ((b.ledma || 55) + 1), 0))
+// budget at or below the LED count -> brightness forced to 1 (hard cut, not a soft limit)
+const cliffPorts = computed(() => ins.value.map((b, i) => ({ i, bad: (b.maxpwr || 0) > 0 && (b.maxpwr || 0) <= (b.len || 0) })).filter((x) => x.bad).map((x) => x.i + 1))
+// standby alone eats more than half the budget -> everything stays dimmed down
+const tightPorts = computed(() => ins.value.map((b, i) => ({ i, bad: (b.maxpwr || 0) > (b.len || 0) && (b.maxpwr || 0) < (b.len || 0) * 2 })).filter((x) => x.bad).map((x) => x.i + 1))
+const fmtMa = (v) => (v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + ' A' : v + ' mA')
+// supply data lives in our own plan file (WLED has no notion of volts/watts)
+const psuVolt = computed({ get: () => plan.psu?.volt ?? 12, set: (v) => { plan.psu = { ...plan.psu, volt: v }; savePlan() } })
+const psuWatt = computed({ get: () => plan.psu?.watt ?? 200, set: (v) => { plan.psu = { ...plan.psu, watt: v }; savePlan() } })
+const budgetWatt = computed(() => (maxpwr.value * psuVolt.value) / 1000)
+const psuAmps = computed(() => (psuWatt.value / Math.max(1, psuVolt.value)))
+const overPsu = computed(() => ablOn.value && budgetWatt.value > psuWatt.value)
+
+// --- Zeit ------------------------------------------------------------------
+const TIMEZONES = [
+  { v: 0, l: 'UTC' }, { v: 1, l: 'GMT/BST (UK)' }, { v: 2, l: 'CET/CEST (Mitteleuropa)' }, { v: 3, l: 'EET/EEST' },
+  { v: 4, l: 'US-EST/EDT' }, { v: 5, l: 'US-CST/CDT' }, { v: 6, l: 'US-MST/MDT' }, { v: 7, l: 'US-AZ' },
+  { v: 8, l: 'US-PST/PDT' }, { v: 9, l: 'CST (AWST, PHST)' }, { v: 10, l: 'JST (KST)' }, { v: 11, l: 'AEST/AEDT' },
+  { v: 12, l: 'NZST/NZDT' }, { v: 13, l: 'Nordkorea' }, { v: 14, l: 'IST (Indien)' }, { v: 15, l: 'CA-Saskatchewan' },
+  { v: 16, l: 'ACST' }, { v: 17, l: 'ACST/ACDT' }, { v: 18, l: 'HST (Hawaii)' }, { v: 19, l: 'NOVT' },
+  { v: 20, l: 'AKST/AKDT' }, { v: 21, l: 'MX-CST' }, { v: 22, l: 'PKT (Pakistan)' }, { v: 23, l: 'BRT (Brasilia)' },
+  { v: 24, l: 'AWST (Perth)' },
+]
+const ntp = computed(() => { if (!c.value.if) c.value.if = {}; if (!c.value.if.ntp) c.value.if.ntp = {}; return c.value.if.ntp })
+const ntpOn = computed({
+  get: () => (ntp.value.en == null ? DEF_NTP : !!ntp.value.en),
+  set: (v) => { ntp.value.en = v; if (!v) pushBrowserTime() },   // off -> the browser takes over right away
+})
+const devTime = computed(() => wled.info?.time || '–')
+const devTimeOk = computed(() => deviceTimeMs() > 0)
+async function pushBrowserTime () {
+  timeMsg.value = 'Uhrzeit wird gesetzt …'
+  const ok = await syncDeviceTime()
+  timeMsg.value = ok ? 'Uhrzeit übernommen ✓' : 'Konnte die Uhrzeit nicht setzen'
+  setTimeout(() => { timeMsg.value = '' }, 2500)
+}
 // relay switching the strip's power supply (Gledopto: GPIO 18, inverted)
 const relayPin = computed({
   get: () => c.value?.hw?.relay?.pin ?? -1,
@@ -110,7 +176,7 @@ function addPort () {
   const start = arr.reduce((a, b) => a + (b.len || 0), 0)
   const i = arr.length
   // empty bus keeps len 1; capacity guard lives in plan.portMax
-  arr.push({ start, len: 1, pin: [gpio], order: 0, type: 22, skip: 0, ledma: 55, rev: false, ref: false })
+  arr.push({ start, len: 1, pin: [gpio], order: DEF_ORDER, type: DEF_TYPE, skip: 0, ledma: DEF_LEDMA, maxpwr: ablOn.value ? Math.round(lastMax / (arr.length + 1)) : 0, rev: false, ref: false })
   setPortMax(i, DEFAULT_PORT_MAX)
 }
 async function removePort (i) {
@@ -204,7 +270,13 @@ async function save () {
     },
     nw: { ins: [{ ssid: c.value.nw.ins[0].ssid, ip: c.value.nw.ins[0].ip, gw: c.value.nw.ins[0].gw, sn: c.value.nw.ins[0].sn }] },
     ap: { ssid: c.value.ap.ssid, chan: c.value.ap.chan, hide: c.value.ap.hide },
-    if: { sync: { send: { en: c.value.if?.sync?.send?.en } } },
+    if: {
+      sync: { send: { en: c.value.if?.sync?.send?.en } },
+      ntp: {
+        en: !!ntp.value.en, host: ntp.value.host || '0.wled.pool.ntp.org',
+        tz: ntp.value.tz | 0, offset: ntp.value.offset | 0, ampm: !!ntp.value.ampm,
+      },
+    },
     // note: def.ps (boot preset) is left untouched here — it points at the
     // Lichtnest tube-layout preset so the tubes survive a reboot.
   }
@@ -232,10 +304,56 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
         <div class="row"><span class="lbl">Auto-Helligkeitslimit (ABL)<small>begrenzt Strom automatisch</small></span>
           <button class="sw" :class="{ on: ablOn }" @click="ablOn = !ablOn"><span /></button></div>
         <div v-if="ablOn" class="row brd">
-          <span class="lbl">Max. Netzteil-Strom</span>
+          <span class="lbl">Strombudget<small>was das Netzteil liefert</small></span>
           <NumStepper v-model="maxpwr" :min="250" :max="65000" :step="250" unit="mA" />
         </div>
-        <div class="hint mono">Empf. Netzteil: <b>{{ psuRec }}</b></div>
+        <template v-if="ablOn">
+          <div class="row brd"><span class="lbl">Geschätzt gerade<small>WLED-Schätzung, keine Messung</small></span>
+            <span class="mono" :class="{ warn: liveMa > maxpwr }">{{ fmtMa(liveMa) }}</span></div>
+          <div class="row brd"><span class="lbl">davon Ruhestrom<small>1 mA je konfigurierter LED ({{ totalLen }})</small></span>
+            <span class="mono" :class="{ warn: standbyMa > maxpwr * 0.5 }">{{ fmtMa(standbyMa) }}</span></div>
+          <div class="row brd"><span class="lbl">Voll weiß bräuchte</span><span class="mono muted">{{ fmtMa(fullWhiteMa) }}</span></div>
+          <div v-if="cliffPorts.length" class="alert">
+            Budget kleiner als die LED-Zahl (Port {{ cliffPorts.join(', ') }}): WLED regelt die Helligkeit hart auf <b>1</b> herunter. Budget erhöhen oder ABL ausschalten.
+          </div>
+          <div v-else-if="tightPorts.length" class="alert soft">
+            Knapp (Port {{ tightPorts.join(', ') }}): Der Ruhestrom frisst über die Hälfte des Budgets — die LEDs laufen dauerhaft dunkel geregelt.
+          </div>
+        </template>
+        <div class="two">
+          <span><label class="flbl">Spannung</label><NumStepper full v-model="psuVolt" :min="3" :max="48" :step="1" unit="V" /></span>
+          <span><label class="flbl">Netzteil-Leistung</label><NumStepper full v-model="psuWatt" :min="10" :max="2000" :step="10" unit="W" /></span>
+        </div>
+        <div class="row brd"><span class="lbl">Netzteil liefert<small>{{ psuWatt }} W bei {{ psuVolt }} V</small></span>
+          <span class="mono muted">{{ psuAmps.toFixed(1) }} A</span></div>
+        <div v-if="ablOn" class="row brd"><span class="lbl">Budget entspricht</span>
+          <span class="mono" :class="{ warn: overPsu }">{{ budgetWatt.toFixed(0) }} W</span></div>
+        <div v-if="overPsu" class="alert">
+          Das Budget ({{ budgetWatt.toFixed(0) }} W) liegt über der Netzteil-Leistung ({{ psuWatt }} W).
+        </div>
+        <div v-if="ablOn" class="hint mono">Budget entspricht <b>{{ psuRec }}</b> und wird nach Länge auf die Ports verteilt. Gerechnet wird mit den <b>konfigurierten</b> LEDs — nicht angeschlossene Tubes zählen voll mit.</div>
+        <div v-else class="hint mono">Begrenzer aus: WLED regelt die Helligkeit nicht herunter. Das Netzteil muss die volle Last tragen — bei {{ totalLen }} LEDs wären das bis zu <b>{{ fmtMa(fullWhiteMa) }}</b>.</div>
+      </div>
+
+      <!-- ZEIT -->
+      <div class="seclbl mono">ZEIT</div>
+      <div class="panel pad">
+        <div class="row"><span class="lbl">Controller-Uhr<small>steuert Zeitpläne &amp; Presets</small></span>
+          <span class="mono" :class="{ warn: !devTimeOk }">{{ devTime }}</span></div>
+        <div class="row brd"><span class="lbl">Automatisch (NTP)<small>braucht Internet</small></span>
+          <button class="sw" :class="{ on: ntpOn }" @click="ntpOn = !ntpOn"><span /></button></div>
+        <template v-if="ntpOn">
+          <label class="flbl">NTP-Server</label>
+          <input class="in mono" v-model="ntp.host" placeholder="0.wled.pool.ntp.org">
+          <label class="flbl">Zeitzone</label>
+          <select class="sel" v-model.number="ntp.tz"><option v-for="t in TIMEZONES" :key="t.v" :value="t.v">{{ t.l }}</option></select>
+          <div class="row brd"><span class="lbl">Zusatz-Offset<small>Sekunden gegen UTC</small></span>
+            <NumStepper v-model="ntp.offset" :min="-65500" :max="65500" :step="900" unit="s" /></div>
+        </template>
+        <button class="tbtn" @click="pushBrowserTime()">Uhrzeit aus dem Browser übernehmen</button>
+        <div v-if="timeMsg" class="hint mono">{{ timeMsg }}</div>
+        <div v-else-if="!devTimeOk" class="alert soft">Die Uhr des Controllers ist nicht gestellt (steht bei 1970) — sie wird automatisch aus dem Browser übernommen.</div>
+        <div class="hint mono">Ohne NTP ist der Browser die Zeitquelle: die Oberfläche stellt die Uhr automatisch, sobald sie mehr als eine Minute abweicht — also auch nach jedem Neustart des Controllers. NTP-Einstellungen wirken nach „Speichern".</div>
       </div>
 
       <!-- RELAIS (schaltet die Strip-Versorgung bei An/Aus) -->
@@ -243,7 +361,7 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
       <div class="panel pad">
         <div class="row"><span class="lbl">GPIO<small>−1 = kein Relais · Gledopto: 18</small></span>
           <NumStepper v-model="relayPin" :min="-1" :max="39" :step="1" unit="" /></div>
-        <div class="row brd"><span class="lbl">Invertiert<small>Gledopto: an</small></span>
+        <div class="row brd"><span class="lbl">Invertiert<small>Standard: aus</small></span>
           <button class="sw" :class="{ on: relayRev }" @click="relayRev = !relayRev"><span /></button></div>
         <div class="hint mono">Schaltet die LED-Versorgung, wenn WLED an/aus geht. Falsche Polarität = Strip bleibt dunkel. Wirkt nach „Speichern"; Pin-Wechsel ggf. erst nach Neustart.</div>
       </div>
@@ -260,6 +378,11 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
           <div class="row"><span class="lbl">LED-Limit (Guard)<small>max. LEDs an diesem Port · kein Bus</small></span>
             <NumStepper :modelValue="guardOf(i)" @update:modelValue="(v) => setGuard(i, v)" :min="1" :step="10" unit="LEDs" /></div>
           <div class="row brd"><span class="lbl">Aktiv durch Tubes<small>= WLED-Bus-Länge</small></span><span class="mono muted">{{ busTubes(b, i) }} LEDs</span></div>
+          <div v-if="ablOn" class="row brd"><span class="lbl">Strombudget<small>Anteil dieses Ports</small></span>
+            <NumStepper v-model="b.maxpwr" :min="0" :max="65000" :step="250" unit="mA" /></div>
+          <div v-if="ablOn && (b.maxpwr || 0) > 0 && (b.maxpwr || 0) <= (b.len || 0)" class="alert">
+            {{ b.maxpwr }} mA für {{ b.len }} LEDs: unter dem Ruhestrom (1 mA/LED) — WLED zwingt die Helligkeit auf 1.
+          </div>
           <label class="flbl">LED-Typ</label>
           <select class="sel" v-model.number="b.type"><option v-for="t in LED_TYPES" :key="t.v" :value="t.v">{{ t.l }}</option></select>
           <div class="two">
@@ -346,6 +469,11 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
 .row.brd { border-bottom: 1px solid rgba(255,255,255,.05); }
 .lbl { font-size: 14px; color: var(--text2); display: flex; flex-direction: column; }
 .lbl small { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+.tbtn { width: 100%; margin-top: 10px; padding: 9px 0; border-radius: 9px; background: var(--inset); border: 1px solid var(--line2); color: var(--text2); font-size: 12px; font-weight: 700; cursor: pointer; }
+.tbtn:hover { border-color: var(--accent); color: var(--accent); }
+.alert { margin-top: 8px; padding: 8px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; background: rgba(224,97,79,.12); border: 1px solid rgba(224,97,79,.45); color: #ffb3a6; }
+.alert.soft { background: rgba(240,162,60,.10); border-color: rgba(240,162,60,.4); color: #f0c288; }
+.warn { color: #e0614f; font-weight: 700; }
 .hint { font-size: 12px; color: var(--muted); padding: 0 0 12px; }
 .hint b { color: var(--accent); }
 

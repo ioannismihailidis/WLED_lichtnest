@@ -1,6 +1,7 @@
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { lichtnest, fxActions, rgbToHex, hexToRgb, plan } from '../wled.js'
+import { uiNav } from '../nav.js'
 import { EFFECTS, effectById } from '../effects.js'
 import { fadeCols, fadeCw, gradientCss } from '../fxsim.js'
 import GradientEditor from '../components/GradientEditor.vue'
@@ -28,8 +29,13 @@ function open (id) {
   editId.value = id
   draft.p = JSON.parse(JSON.stringify(lichtnest.p))
   view.value = 'editor'
+  uiNav.currentEffect = id
 }
-function back () { view.value = 'list' }
+function back () { view.value = 'list'; uiNav.currentEffect = null }
+// sidebar clicks: open the requested effect editor
+watch(() => uiNav.openEffect, (v) => { if (v != null) { open(v); uiNav.openEffect = null } }, { immediate: true })
+onMounted(() => { if (view.value === 'editor') uiNav.currentEffect = editId.value })
+onUnmounted(() => { uiNav.currentEffect = null })
 async function applyEffect () {
   await fxActions.applyEffect(editId.value, JSON.parse(JSON.stringify(draft.p)))
   pvRestart.value++
@@ -70,7 +76,7 @@ function setKeys (p, arr) { commitP({ [p.key]: arr }) }
 function previewBg (e) {
   if (e.key === 'pulse') return gradientCss(gradCols.value, gradCw.value)
   if (e.key === 'strobe') return `repeating-linear-gradient(90deg,${colHex('color', [255, 255, 255])} 0 12px,#0d0f13 12px 30px)`
-  if (e.key === 'schwarm') return `linear-gradient(90deg,#0d0f13,${colHex('color', [240, 162, 60])} 75%,#fff)`
+  if (e.key === 'schwarm') return gradientCss(gradCols.value, gradCw.value)
   return colHex('color', [39, 197, 255])
 }
 const isActive = (id) => lichtnest.fx === id
