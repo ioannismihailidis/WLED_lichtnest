@@ -6,7 +6,17 @@
 //
 import fs from 'node:fs'
 
-const host = (process.env.ZV_HOST || 'http://4.3.2.1').replace(/\/$/, '')
+// host: shell env > web/.env > AP fallback
+function envHost () {
+  if (process.env.ZV_HOST) return process.env.ZV_HOST
+  try {
+    const env = fs.readFileSync(new URL('../.env', import.meta.url), 'utf8')
+    const m = env.match(/^ZV_HOST=(.+)$/m)
+    if (m) return m[1].trim()
+  } catch (e) { /* no .env */ }
+  return 'http://4.3.2.1'
+}
+const host = envHost().replace(/\/$/, '')
 const gzPath = new URL('../dist/index.htm.gz', import.meta.url)
 
 if (!fs.existsSync(gzPath)) {
