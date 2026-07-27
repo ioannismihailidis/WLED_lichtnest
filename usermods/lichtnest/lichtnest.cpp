@@ -64,6 +64,7 @@ struct FxParams {
   uint8_t  smix = 0;                                       // source mixing: 0 frontmost, 1 add, 2 max, 3 screen
   uint8_t  sfade = 0, sease = 0;                           // strobe flash fade (0 hard,1 out,2 in,3 in&out) + easing
   uint8_t  bease = 0;                                      // breath shape: 0 sinus, 1..4 = eased triangle
+  uint8_t  swmode = 0, swdur = 10, swcnt = 3;              // schwarm: run mode (0 endless, 1 s, 2 passes)
   uint8_t  ntype = 0, nscale = 8;                          // noise: type + detail
   uint16_t nang = 0;                                       // noise drift direction (deg, pattern moves TOWARD it)
 };
@@ -109,6 +110,15 @@ class Lichtnest : public Usermod {
     bool     _plActive    = false;
     bool     _plLoop      = false;
     uint8_t  _plIdx       = 0;
+    uint8_t  _plSrc       = 0;      // why playback started: 0 manual, 1 autostart, 2 schedule
+    // time-of-day schedule: which playlist runs between which hours
+    struct SchedRule { char pl[24]; uint16_t from, to; uint8_t days; bool en; };
+    static const uint8_t ZV_MAXSCHED = 8;
+    SchedRule _sched[ZV_MAXSCHED];
+    uint8_t  _schedCount  = 0;
+    bool     _schedOn     = false;
+    int8_t   _schedActive = -2;      // -2 = not evaluated yet, -1 = outside every window
+    uint32_t _schedCheck  = 0;
     uint32_t _plStepStart = 0;
     char     _plId[24]    = "";
     char     _plName[32]  = "";
@@ -165,23 +175,26 @@ class Lichtnest : public Usermod {
     // dynamic N-colour gradient: each colour is a solid band of its own width, with a
     // smooth blend at each boundary (half the smaller neighbour). Equal widths ⇒ a fully
     // smooth gradient; a wide colour ⇒ a wide solid band (not a long fade). phase in [0,1)
+    // dynamic N-colour gradient: each colour is a solid band of its own width, blended
+    // at the boundaries (half the smaller neighbour). NOT cyclic — 0 is the pure first
+    // colour and 1 the pure last one, so a leading edge stays hard. Mirrors the web sim.
     static uint32_t gradN(const FxParams& P, float ph) {
       uint8_t n = P.fcount; if (n < 1) n = 1; if (n > ZV_MAXCOL) n = ZV_MAXCOL;
       if (n == 1) return P.fcols[0];
+      if (ph <= 0) return P.fcols[0];
+      if (ph >= 1) return P.fcols[n - 1];
       float w[ZV_MAXCOL]; float total = 0;
       for (uint8_t k = 0; k < n; k++) { w[k] = (P.fcw[k] < 1 ? 1.0f : (float)P.fcw[k]); total += w[k]; }
-      ph -= floorf(ph);
       float u = ph * total, acc = 0;
       uint8_t i = n - 1;
       for (uint8_t k = 0; k < n; k++) { if (u < acc + w[k]) { i = k; break; } acc += w[k]; }
       float wi = w[i], ls = u - acc;
-      float wp = w[(i + n - 1) % n], wn = w[(i + 1) % n];
-      float zP = 0.5f * (wi < wp ? wi : wp);     // blend half-zone with previous colour
-      float zN = 0.5f * (wi < wn ? wi : wn);     // blend half-zone with next colour
+      float zP = (i > 0)     ? 0.5f * (wi < w[i - 1] ? wi : w[i - 1]) : 0;   // no wrap at the ends
+      float zN = (i < n - 1) ? 0.5f * (wi < w[i + 1] ? wi : w[i + 1]) : 0;
       uint32_t a, b; float t;
-      if (ls < zP)            { a = P.fcols[(i + n - 1) % n]; b = P.fcols[i];           t = 0.5f + ls / (2.0f * zP); }
-      else if (ls > wi - zN)  { a = P.fcols[i];               b = P.fcols[(i + 1) % n]; t = (ls - (wi - zN)) / (2.0f * zN); }
-      else                    return P.fcols[i];  // solid band
+      if (zP > 0 && ls < zP)           { a = P.fcols[i - 1]; b = P.fcols[i];     t = 0.5f + ls / (2.0f * zP); }
+      else if (zN > 0 && ls > wi - zN) { a = P.fcols[i];     b = P.fcols[i + 1]; t = (ls - (wi - zN)) / (2.0f * zN); }
+      else                             return P.fcols[i];   // solid band
       return RGBW32((uint8_t)lerpf(cR(a), cR(b), t), (uint8_t)lerpf(cG(a), cG(b), t), (uint8_t)lerpf(cB(a), cB(b), t), 0);
     }
 
@@ -371,10 +384,19 @@ class Lichtnest : public Usermod {
       float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
       return (Nn - 1) * iv + (pulseUmax(P) + w) / v + 0.2f;
     }
-    float stepSeconds(const FxParams& P) {   // 0 → use the playlist file's duration (schwarm etc.)
+    float stepSeconds(const FxParams& P) {   // 0 → use the playlist file's duration
       if (P.fx == 0) return impulseDur(P);
       if (P.fx == 1) return strobeDur(P);
       if (P.fx == 3) return solidDur(P);
+      if (P.fx == 2) {                       // schwarm: one pass = enter off-field .. tail fully out
+        if (P.swmode == 1) return (float)P.swdur;
+        if (P.swmode == 2) {
+          float sp = P.speed < 1 ? 1 : P.speed;
+          float N = (float)strip.getLengthTotal(); if (N < 1) N = 1;
+          float tl = (P.tail / 100.0f) * N; if (tl < 1) tl = 1;
+          return P.swcnt * ((N + 3 * tl + 1.0f) / (0.5f * N * sp / 100.0f));
+        }
+      }
       return 0.0f;
     }
 
@@ -439,14 +461,20 @@ class Lichtnest : public Usermod {
         case 4: { // Noise / Drift — hash noise field through the gradient; drift pos accumulates
           return gradN(P, noiseVal(P, x, y));
         }
-        case 2: { // Schwarm
+        case 2: { // Schwarm — non-cyclic pass: enters off-field, hard leading edge, tail = gradient
           float N = chainTotal ? chainTotal : 1;
-          float phase = (P.speed / 100.0f) * 0.5f * N * elapsed;
-          float pos = fmodf(phase, N); if (pos < 0) pos += N;
-          float ci = P.dir ? (N - 1 - chainIdx) : chainIdx;
-          float d = ci - pos; if (d < 0) d += N;
           float tl = (P.tail / 100.0f) * N; if (tl < 1) tl = 1;
-          return scaleCol(P.col, expf(-d / tl));
+          float span = N + 3 * tl + 1.0f;                  // exit margin = full windowed tail
+          float phase = (P.speed / 100.0f) * 0.5f * N * elapsed;
+          float pos = fmodf(phase, span); if (pos < 0) pos += span;
+          pos -= 1.0f;                                     // start off-field
+          float ci = P.dir ? (N - 1 - chainIdx) : chainIdx;
+          float d = pos - ci;
+          if (d < 0) return 0;                             // nothing ahead of the head
+          float w = 1.0f - d / (3 * tl);                   // window: tail ends cleanly at 3·tl
+          if (w <= 0) return 0;
+          float g = d / tl; if (g > 1) g = 1;
+          return scaleCol(gradN(P, g), expf(-d / tl) * w);
         }
         default: { // Solid / Atmen — colour and breathe rate follow the keyframes over time
           KF defk[2]; const KF* K = P.keys; uint8_t n = P.kcount;
@@ -476,6 +504,7 @@ class Lichtnest : public Usermod {
       // If playlists exist, the default one will autostart shortly — hold the field
       // black until then so the manual effect never flashes up first.
       if (WLED_FS.exists("/lichtnest_playlists.json")) _blackout = true;
+      loadSchedule();
       initDone = true;
     }
     void connected() override {}
@@ -514,7 +543,13 @@ class Lichtnest : public Usermod {
       if (!_autostartTried && millis() > 4000) {
         _autostartTried = true;
         // no default playlist -> release the boot blackout so the manual effect shows
-        if (!startPlaylist(nullptr, 0)) _blackout = false;
+        if (!startPlaylist(nullptr, 0, 1)) _blackout = false;
+      }
+      // time windows take over playback (only on window CHANGES, so manual control
+      // inside a window keeps working until the next boundary)
+      if (_schedOn && _schedCount && millis() - _schedCheck > 2000) {
+        _schedCheck = millis();
+        applySchedule();
       }
       if (!_plActive || _stepCount == 0) return;
       uint32_t nowMs = millis();
@@ -634,9 +669,14 @@ class Lichtnest : public Usermod {
       JsonObject p = o.createNestedObject("p");
       writeParams(p, A);
       // live playback state for the UI's player
+      JsonObject sc = o.createNestedObject("sched");
+      sc["en"]  = _schedOn;                // time-window scheduling active?
+      sc["act"] = _schedActive;            // index of the running window (-1 = none)
+      sc["clock"] = (uint32_t)localTime;   // so the UI can tell whether the clock is set
       JsonObject pl = o.createNestedObject("pl");
       pl["active"] = _plActive;
       pl["loop"]   = _plLoop;
+      pl["src"]    = _plSrc;              // 0 manual, 1 autostart, 2 schedule
       if (_plActive && _stepCount > 0) {
         pl["id"] = _plId; pl["name"] = _plName;
         pl["idx"] = _plIdx; pl["total"] = _stepCount;
@@ -657,6 +697,7 @@ class Lichtnest : public Usermod {
 
       // --- playback commands ---
       if (o.containsKey("loop"))   _plLoop = o["loop"] | _plLoop;
+      if (o.containsKey("sched") && (o["sched"] | false)) { loadSchedule(); applySchedule(); }
       if (o.containsKey("reload") && (o["reload"] | false)) {
         if (_plActive) { uint8_t i = _plIdx; loadPlaylist(_plId); if (i < _stepCount) _plIdx = i; }
       }
@@ -775,6 +816,7 @@ class Lichtnest : public Usermod {
       P.smix = p["smix"] | P.smix;
       P.sfade = p["sfade"] | P.sfade; P.sease = p["sease"] | P.sease; P.bease = p["bease"] | P.bease;
       P.ntype = p["ntype"] | P.ntype; P.nscale = p["nscale"] | P.nscale; P.nang = p["nang"] | P.nang;
+      P.swmode = p["swmode"] | P.swmode; P.swdur = p["swdur"] | P.swdur; P.swcnt = p["swcnt"] | P.swcnt;
       JsonArray srcs = p["sources"];                         // impulse emission sources
       if (!srcs.isNull()) {
         P.srcCount = 0;
@@ -819,6 +861,7 @@ class Lichtnest : public Usermod {
       p["smix"] = P.smix;
       p["sfade"] = P.sfade; p["sease"] = P.sease; p["bease"] = P.bease;
       p["ntype"] = P.ntype; p["nscale"] = P.nscale; p["nang"] = P.nang;
+      p["swmode"] = P.swmode; p["swdur"] = P.swdur; p["swcnt"] = P.swcnt;
       if (P.srcCount) {                                     // impulse emission sources
         JsonArray ss = p.createNestedArray("sources");
         for (uint8_t i = 0; i < P.srcCount; i++) {
@@ -851,8 +894,69 @@ class Lichtnest : public Usermod {
       _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;   // fresh Zufall-strobe state per step
     }
 
-    bool startPlaylist(const char* id, int fromIdx) {
+    // --- schedule -----------------------------------------------------------
+    // /lichtnest_sched.json: { en, rules:[{ en, from:"HH:MM", to:"HH:MM", days, pl }] }
+    // `days` is a bitmask, bit 0 = Monday. A window with from > to spans midnight.
+    static uint16_t minutesOf(const char* hhmm) {
+      if (!hhmm) return 0;
+      int h = 0, m = 0;
+      if (sscanf(hhmm, "%d:%d", &h, &m) != 2) return 0;
+      if (h < 0) h = 0; if (h > 23) h = 23;
+      if (m < 0) m = 0; if (m > 59) m = 59;
+      return (uint16_t)(h * 60 + m);
+    }
+    bool loadSchedule() {
+      _schedCount = 0; _schedOn = false; _schedActive = -2;
+      if (!WLED_FS.exists("/lichtnest_sched.json")) return false;
+      File f = WLED_FS.open("/lichtnest_sched.json", "r");
+      if (!f) return false;
+      DynamicJsonDocument doc(4096);
+      DeserializationError err = deserializeJson(doc, f);
+      f.close();
+      if (err) return false;
+      _schedOn = doc["en"] | false;
+      JsonArray rules = doc["rules"];
+      if (rules.isNull()) return _schedOn;
+      for (JsonObject r : rules) {
+        if (_schedCount >= ZV_MAXSCHED) break;
+        SchedRule& sr = _sched[_schedCount];
+        strlcpy(sr.pl, r["pl"] | "", sizeof(sr.pl));
+        sr.from = minutesOf(r["from"] | "00:00");
+        sr.to   = minutesOf(r["to"] | "00:00");
+        sr.days = r["days"] | 127;
+        sr.en   = r["en"] | true;
+        if (sr.pl[0]) _schedCount++;
+      }
+      return true;
+    }
+    void applySchedule() {
+      if (localTime < 1600000000UL) return;          // clock not set -> never act on it
+      updateLocalTime();
+      uint16_t nowMin = (uint16_t)(hour(localTime) * 60 + minute(localTime));
+      uint8_t wd = (uint8_t)((weekdayMondayFirst() + 6) % 7);   // WLED: 1=Mon..7=Sun -> 0=Mon..6=Sun
+      uint8_t wdPrev = (uint8_t)((wd + 6) % 7);
+      int8_t hit = -1;
+      for (uint8_t i = 0; i < _schedCount; i++) {
+        const SchedRule& sr = _sched[i];
+        if (!sr.en) continue;
+        bool inWin, overMidnight = (sr.from > sr.to);
+        uint8_t day = wd;
+        if (!overMidnight) inWin = (nowMin >= sr.from && nowMin < sr.to);
+        else if (nowMin >= sr.from) inWin = true;                // evening part: today
+        else if (nowMin < sr.to)    { inWin = true; day = wdPrev; }  // after midnight: belongs to yesterday
+        else inWin = false;
+        if (!inWin || !((sr.days >> day) & 0x01)) continue;
+        hit = (int8_t)i; break;                      // first matching rule wins
+      }
+      if (hit == _schedActive) return;
+      _schedActive = hit;
+      if (hit >= 0) { if (!startPlaylist(_sched[hit].pl, 0, 2)) { _plActive = false; _blackout = true; } }
+      else { _plActive = false; _blackout = true; }  // outside every window -> dark
+    }
+
+    bool startPlaylist(const char* id, int fromIdx, uint8_t src = 0) {
       if (!loadPlaylist(id) || _stepCount == 0) return false;
+      _plSrc = src;
       _blackout = false;
       _plActive = true;
       jumpTo(fromIdx);
@@ -944,7 +1048,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.6";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.9";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);

@@ -14,23 +14,25 @@ export const fadeCols = (p) => (p.cols && p.cols.length ? p.cols : FADE_COLS)
 export const fadeCw = (p) => { const c = fadeCols(p); return (p.cw && p.cw.length >= c.length ? p.cw : c.map(() => 100)) }
 
 // dynamic N-colour gradient: each colour is a solid band of its own width, blended at
-// the boundaries (half the smaller neighbour). Equal widths ⇒ smooth; a wide colour ⇒
-// a wide solid band. Mirrors the firmware's gradN.
+// the boundaries (half the smaller neighbour). NOT cyclic — 0 is the pure first colour
+// and 1 the pure last one, so an effect's leading edge stays hard instead of bleeding
+// the last colour back in. Mirrors the firmware's gradN.
 export function gradN (ph, cols, cw) {
   const n = cols.length
   if (n === 0) return [0, 0, 0]
   if (n === 1) return cols[0]
+  if (ph <= 0) return cols[0]
+  if (ph >= 1) return cols[n - 1]
   const w = cols.map((_, i) => Math.max(1, cw[i] || 1))
   const total = w.reduce((a, b) => a + b, 0)
-  ph -= Math.floor(ph)
   let u = ph * total, acc = 0, i = n - 1
   for (let k = 0; k < n; k++) { if (u < acc + w[k]) { i = k; break } acc += w[k] }
   const wi = w[i], ls = u - acc
-  const zP = 0.5 * Math.min(wi, w[(i + n - 1) % n])
-  const zN = 0.5 * Math.min(wi, w[(i + 1) % n])
+  const zP = i > 0 ? 0.5 * Math.min(wi, w[i - 1]) : 0            // no wrap at the ends
+  const zN = i < n - 1 ? 0.5 * Math.min(wi, w[i + 1]) : 0
   let a, b, t
-  if (ls < zP) { a = cols[(i + n - 1) % n]; b = cols[i]; t = 0.5 + ls / (2 * zP) }
-  else if (ls > wi - zN) { a = cols[i]; b = cols[(i + 1) % n]; t = (ls - (wi - zN)) / (2 * zN) }
+  if (zP > 0 && ls < zP) { a = cols[i - 1]; b = cols[i]; t = 0.5 + ls / (2 * zP) }
+  else if (zN > 0 && ls > wi - zN) { a = cols[i]; b = cols[i + 1]; t = (ls - (wi - zN)) / (2 * zN) }
   else return cols[i]
   return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
 }
@@ -100,6 +102,20 @@ export function flashEnv (p, phase) {
 // envelope over step time (for the time-behaviour preview).
 // 0 Hz means SILENCE: the phase stalls, and instead of freezing a lit flash we go dark.
 export const strobeEnvelopeAt = (p, elapsed) => (strobeRateAt(p, elapsed) < 0.05 ? 0 : flashEnv(p, strobePhaseAt(p, elapsed)))
+
+// Schwarm run length: one pass = head enters off-field, tail fully exits
+export function schwarmDuration (p, N = 100) {
+  const m = p.swmode || 0
+  if (m === 1) return Math.max(1, p.swdur ?? 10)
+  if (m === 2) {
+    const sp = Math.max(1, p.speed ?? 42)
+    const n = Math.max(1, N)
+    const tl = Math.max(1, ((p.tail || 0) / 100) * n)
+    const pass = (n + 3 * tl + 1) / (0.5 * n * sp / 100)
+    return Math.max(0.5, (p.swcnt ?? 3) * pass)
+  }
+  return 0   // endless (step duration comes from the playlist row)
+}
 
 // Solid/Atmen: ONE keyframe list [{ t, v(Hz), c:[r,g,b] }] drives both the breathe rate
 // and the colour over time. Phase in radians → sin() per breath; colour interpolated.
@@ -245,12 +261,21 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
       return gradN(v, fadeCols(p), fadeCw(p))
     }
     case 2: {
+      // Non-cyclic run: the head enters from OUTSIDE the field, the tail trails behind
+      // it through the gradient, ahead of the head stays black (hard leading edge).
+      // Only after the tail has fully left does the next pass begin.
       const N = chainTotal || 1
-      const pos = ((phase % N) + N) % N
-      const ci = p.dir ? (N - 1 - chainIdx) : chainIdx
-      let d = ci - pos; if (d < 0) d += N
       let tl = ((p.tail || 0) / 100) * N; if (tl < 1) tl = 1
-      return scale(col, Math.exp(-d / tl))
+      const span = N + 3 * tl + 1                          // exit margin = full windowed tail
+      let pos = ((phase % span) + span) % span
+      pos -= 1                                             // start off-field
+      const ci = p.dir ? (N - 1 - chainIdx) : chainIdx
+      const d = pos - ci
+      if (d < 0) return [0, 0, 0]                          // nothing ahead of the head
+      const w = 1 - d / (3 * tl)                           // window: tail ends cleanly at 3·tl
+      if (w <= 0) return [0, 0, 0]
+      const g = Math.min(1, d / tl)
+      return scale(gradN(g, fadeCols(p), fadeCw(p)), Math.exp(-d / tl) * w)
     }
     default: {
       const b = breathVal(p, phase / (2 * Math.PI))
@@ -260,7 +285,10 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
 }
 export const rgbCss = (c) => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`
 
-// CSS preview of the gradient (solid plateaus + boundary blends, matching gradN)
+// CSS preview of the gradient — same solid bands and boundary blends as gradN, so the
+// bar shows exactly what the effect renders (CSS interpolates the blend zones linearly,
+// which is what gradN does too). Needs background-origin/repeat set on the element,
+// otherwise the border ring tiles the gradient and leaks one end into the other.
 export function gradientCss (cols, cw) {
   const n = cols.length
   if (!n) return '#000'
@@ -270,8 +298,8 @@ export function gradientCss (cols, cw) {
   const stops = []
   let acc = 0
   for (let i = 0; i < n; i++) {
-    const zP = 0.5 * Math.min(w[i], w[(i + n - 1) % n])
-    const zN = 0.5 * Math.min(w[i], w[(i + 1) % n])
+    const zP = i > 0 ? 0.5 * Math.min(w[i], w[i - 1]) : 0
+    const zN = i < n - 1 ? 0.5 * Math.min(w[i], w[i + 1]) : 0
     const a = (acc + zP) / total * 100, b = (acc + w[i] - zN) / total * 100
     stops.push(`${rgbCss(cols[i])} ${a.toFixed(1)}%`)
     if (b > a) stops.push(`${rgbCss(cols[i])} ${b.toFixed(1)}%`)

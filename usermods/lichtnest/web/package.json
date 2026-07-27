@@ -1,9 +1,9 @@
 {
   "name": "lichtnest-ui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.9.9",
   "type": "module",
-  "description": "Zugvögel Lichtnest custom WLED UI (Vue 3)",
+  "description": "Zugv\u00f6gel Lichtnest custom WLED UI (Vue 3)",
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/gzip.mjs",

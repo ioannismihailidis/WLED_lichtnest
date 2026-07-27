@@ -36,10 +36,13 @@ export const EFFECTS = [
     desc: 'Ein Lichtpuls zieht wie ein Vogelschwarm über die Tubes.',
     preview: 'linear-gradient(90deg,#0d0f13,#f0a23c 70%,#fff)',
     params: [
-      { key: 'color', type: 'color', name: 'Schwarm-Farbe' },
+      { key: 'grad', type: 'gradient', name: 'Farbverlauf' },
       { key: 'speed', type: 'range', name: 'Fluggeschwindigkeit', min: 0, max: 100, unit: '%' },
       { key: 'tail', type: 'range', name: 'Schweiflänge', min: 0, max: 100, unit: '%' },
       { key: 'dir', type: 'select', name: 'Flugrichtung', options: [{ v: 0, l: 'Vorwärts' }, { v: 1, l: 'Rückwärts' }] },
+      { key: 'swmode', type: 'select', name: 'Laufzeit', def: 0, options: [{ v: 0, l: 'Wiederholen' }, { v: 1, l: 'Dauer' }, { v: 2, l: 'Anzahl' }] },
+      { key: 'swdur', type: 'range', name: 'Dauer', min: 1, max: 120, unit: 's', def: 10, show: (p) => (p.swmode || 0) === 1 },
+      { key: 'swcnt', type: 'range', name: 'Durchläufe', min: 1, max: 50, def: 3, show: (p) => (p.swmode || 0) === 2 },
     ],
   },
   {

@@ -10,7 +10,7 @@
 // WebSocket, same-origin — preferred) or point at the device with
 // ?host=http://4.3.2.1 (remembered in localStorage, same idea as WLED's file mode).
 import { reactive } from 'vue'
-import { phaseRate, strobeDuration, solidDuration } from './fxsim.js'
+import { phaseRate, strobeDuration, solidDuration, schwarmDuration } from './fxsim.js'
 import { impulseField, impulseDuration } from './impulse.js'
 
 /* global __LN_PROXY__ */
@@ -65,6 +65,7 @@ function wsUrl () {
 
 export const wled = reactive({
   ready: false,
+  infoAt: 0,        // when /json/info was last received (anchors the device clock)
   online: false,
   offline: false,   // true = local-project mode (no device), persisted in localStorage
   error: '',
@@ -76,7 +77,7 @@ export const wled = reactive({
   testTube: null, // id of the tube currently in test mode (toggle), or null
   idle: false,    // playlist stopped -> device holds black until play / "Auf LEDs legen"
   // live playlist state, mirrored from the lichtnest usermod (/json/state .lichtnest.pl)
-  pl: { active: false, id: '', name: '', idx: 0, total: 0, fx: 3, nextFx: 3, loop: false, elapsedMs: 0, durMs: 1, syncAt: 0 },
+  pl: { active: false, id: '', name: '', idx: 0, total: 0, fx: 3, nextFx: 3, loop: false, elapsedMs: 0, durMs: 1, syncAt: 0, src: 0 },
   info: { name: 'WLED', ver: '', leds: { count: 0, pwr: 0, fps: 0 }, ports: [] },
   effects: [],
   palettes: [],
@@ -143,6 +144,7 @@ function applyState (s) {
     if (q) {
       wled.pl.active = !!q.active
       wled.pl.loop = !!q.loop
+      wled.pl.src = q.src | 0            // 0 manuell, 1 Autostart, 2 Zeitplan
       playback.loop = !!q.loop
       if (q.active) {
         wled.pl.id = q.id || ''
@@ -178,6 +180,7 @@ function saveProject () {
         on: wled.on, bri: wled.bri, segments: wled.segments, ports: wled.info.ports,
         plan: { photo: plan.photo, photoData: plan.photoData, tubes: plan.tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax },
         playlists: playlists.list, lichtnest: { fx: lichtnest.fx, p: lichtnest.p },
+        schedule: { en: schedule.en, rules: schedule.rules },
       }))
     } catch (e) { /* localStorage quota — photo too big? */ }
   }, 400)
@@ -749,7 +752,8 @@ export async function endEditIdentify () {
 // `points` are named markers placed on the 2D plan (§ Marker) — e.g. a tree, a door —
 // that spatial effects (radial "Impuls") can pick as their origin instead of the
 // automatic tube centroid. Referenced from an effect's params as `origin: <id>`.
-export const plan = reactive({ loaded: false, photo: false, photoData: null, rev: 0, tubes: {}, points: {}, ports: {}, portMax: {} })
+export const PSU_DEFAULT = { volt: 12, watt: 200 }
+export const plan = reactive({ loaded: false, photo: false, photoData: null, rev: 0, tubes: {}, points: {}, ports: {}, portMax: {}, psu: { ...PSU_DEFAULT } })
 
 // resolve a spatial effect's origin: a named marker if `p.origin` points at one,
 // else the centroid of the given tube list (mirrors the firmware's computeCenter).
@@ -819,7 +823,7 @@ export async function loadPlan () {
   if (wled.offline) { plan.loaded = true; return }   // already hydrated by enterOffline()
   try {
     const r = await fetch(httpUrl('/lichtnest_plan.json?v=' + Date.now()))
-    if (r.ok) { const d = await r.json(); plan.photo = !!d.photo; plan.tubes = d.tubes || {}; plan.points = d.points || {}; plan.ports = d.ports || {}; plan.portMax = d.portMax || {}; plan.rev++ }
+    if (r.ok) { const d = await r.json(); plan.photo = !!d.photo; plan.tubes = d.tubes || {}; plan.points = d.points || {}; plan.ports = d.ports || {}; plan.portMax = d.portMax || {}; plan.psu = { ...PSU_DEFAULT, ...(d.psu || {}) }; plan.rev++ }
   } catch (e) { /* no plan yet */ }
   plan.loaded = true
 }
@@ -831,7 +835,7 @@ export function savePlan () {
   planTimer = setTimeout(() => {
     // never mid-identify: the geo push would re-enable the overlay and kill the white test
     if (wled.testTube != null || tipSegId != null) { savePlan(); return }
-    const body = JSON.stringify({ photo: plan.photo, tubes: plan.tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax })
+    const body = JSON.stringify({ photo: plan.photo, tubes: plan.tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax, psu: plan.psu })
     const fd = new FormData()
     fd.append('file', new Blob([body], { type: 'application/json' }), 'lichtnest_plan.json')
     fetch(httpUrl('/upload'), { method: 'POST', body: fd }).catch(() => {})
@@ -925,6 +929,10 @@ export function stepBaseMs (it) {
   const p = it.p || {}
   if (it.fx === 1) return Math.max(200, strobeDuration(p) * 1000)   // strobe: ends at the last keyframe
   if (it.fx === 3) return Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
+  if (it.fx === 2) {                                                // schwarm: Dauer/Anzahl auto-derive
+    const d = schwarmDuration(p, wled.info.leds?.count || 100)
+    return d > 0 ? Math.max(200, d * 1000) : Math.max(1, it.dur || 10) * 1000
+  }
   if (it.fx !== 0) return Math.max(1, it.dur || 10) * 1000
   const g = tubeGeometry()
   const [cx, cy] = effectOrigin(p, g)
@@ -1057,6 +1065,113 @@ export const fxActions = {
 
 // --- device config (/json/cfg) ----------------------------------------------
 export const cfg = reactive({ loaded: false, data: null })
+// --- schedule --------------------------------------------------------------
+// Time windows live in /lichtnest_sched.json and are evaluated ON THE DEVICE, so the
+// installation keeps switching without a browser. Rules are checked top down; the
+// first matching window wins, outside every window the field goes dark.
+// { en, rules: [{ id, en, from: "HH:MM", to: "HH:MM", days: <bitmask, bit0 = Monday>, pl }] }
+export const schedule = reactive({ loaded: false, en: false, rules: [] })
+export const ALL_DAYS = 127
+export const DAY_NAMES = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']
+const schedId = () => 'sc' + Math.random().toString(36).slice(2, 9)
+
+export async function loadSchedule () {
+  if (wled.offline) {
+    let p = null
+    try { p = JSON.parse(localStorage.getItem(PROJECT_KEY)) } catch (e) { /* none */ }
+    const sc = p?.schedule || {}
+    schedule.en = !!sc.en; schedule.rules = Array.isArray(sc.rules) ? sc.rules : []
+    schedule.loaded = true
+    return
+  }
+  try {
+    const r = await fetch(httpUrl('/lichtnest_sched.json?v=' + Date.now()))
+    if (r.ok) { const d = await r.json(); schedule.en = !!d.en; schedule.rules = Array.isArray(d.rules) ? d.rules : [] }
+  } catch (e) { /* no schedule yet */ }
+  schedule.loaded = true
+}
+
+let schedTimer = null
+export function saveSchedule () {
+  if (wled.offline) { saveProject(); return }
+  if (schedTimer) clearTimeout(schedTimer)
+  schedTimer = setTimeout(async () => {
+    const body = JSON.stringify({ en: schedule.en, rules: schedule.rules })
+    const fd = new FormData()
+    fd.append('file', new Blob([body], { type: 'application/json' }), 'lichtnest_sched.json')
+    try {
+      await fetch(httpUrl('/upload'), { method: 'POST', body: fd })
+      await postState({ lichtnest: { sched: true } })    // let the device re-read and re-evaluate
+    } catch (e) { /* offline */ }
+  }, 500)
+}
+
+export function addScheduleRule (pl) {
+  schedule.rules.push({ id: schedId(), en: true, from: '18:00', to: '23:00', days: ALL_DAYS, pl: pl || '' })
+  saveSchedule()
+}
+export function removeScheduleRule (id) {
+  schedule.rules = schedule.rules.filter((r) => r.id !== id)
+  saveSchedule()
+}
+export function toggleScheduleDay (rule, day) {
+  const mask = rule.days == null ? ALL_DAYS : rule.days
+  rule.days = mask ^ (1 << day)
+  saveSchedule()
+}
+// minutes since midnight; a window with from > to spans midnight (mirrors the firmware)
+const minutesOf = (hhmm) => { const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || ''); return m ? Math.min(23, +m[1]) * 60 + Math.min(59, +m[2]) : 0 }
+export function scheduleRuleActive (rule, at = new Date()) {
+  if (!schedule.en || rule.en === false) return false
+  const now = at.getHours() * 60 + at.getMinutes()
+  const from = minutesOf(rule.from), to = minutesOf(rule.to)
+  const today = (at.getDay() + 6) % 7                    // JS: 0 = Sunday -> our bit 0 = Monday
+  let day = today, inWin
+  if (from <= to) inWin = now >= from && now < to
+  else if (now >= from) inWin = true                     // evening part: today
+  else if (now < to) { inWin = true; day = (today + 6) % 7 }   // after midnight: counts as yesterday
+  else inWin = false
+  if (!inWin) return false
+  return (((rule.days == null ? ALL_DAYS : rule.days) >> day) & 1) === 1
+}
+// what the schedule says should run right now (first match wins, like the firmware)
+export function scheduleCurrentRule (at = new Date()) {
+  return schedule.rules.find((r) => scheduleRuleActive(r, at)) || null
+}
+
+// --- device clock ----------------------------------------------------------
+// WLED reports "YYYY-M-D, HH:MM:SS" in /json/info; an unsynced device sits at 1970.
+export function deviceTimeMs () {
+  const t = wled.info?.time
+  if (typeof t !== 'string') return 0
+  const m = t.match(/(\d{4})-(\d{1,2})-(\d{1,2}),\s*(\d{1,2}):(\d{2}):(\d{2})/)
+  if (!m) return 0
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])
+  const ms = d.getTime()
+  return (+m[1] >= 2020 && !Number.isNaN(ms)) ? ms : 0
+}
+// push the browser clock to the device (setTimeFromAPI on the firmware side)
+export async function syncDeviceTime () {
+  if (wled.offline) return false
+  try { await postState({ time: Math.floor(Date.now() / 1000) }); await pollState(); return true } catch (e) { return false }
+}
+// Without NTP the controller boots at 1970 and drifts, so the browser becomes the
+// time source: whenever NTP is off and the device clock is unset or more than a
+// minute off, push our clock. NTP on -> hands off, it would just fight the sync.
+const CLOCK_TOLERANCE_MS = 60000
+let clockCheckAt = 0
+export async function maybeSyncClock () {
+  if (wled.offline || !wled.online) return
+  const now = Date.now()
+  if (now - clockCheckAt < 30000) return
+  clockCheckAt = now
+  if (!cfg.loaded) { try { await loadCfg() } catch (e) { return } }
+  if (cfg.data?.if?.ntp?.en) return                     // NTP owns the clock
+  const dev = deviceTimeMs()
+  if (dev && Math.abs(dev - Date.now()) < CLOCK_TOLERANCE_MS) return
+  await syncDeviceTime()
+}
+
 export async function loadCfg () {
   if (wled.offline) return null   // hardware config needs a connected device
   try { const r = await fetch(httpUrl('/json/cfg')); if (r.ok) { cfg.data = await r.json(); cfg.loaded = true } } catch (e) { /* ignore */ }
@@ -1228,7 +1343,7 @@ async function refreshPortsFromInfo () {
     if (!r.ok) return
     const info = await r.json()
     if (Array.isArray(info.ports)) wled.info.ports = info.ports
-    Object.assign(wled.info, info)
+    Object.assign(wled.info, info); wled.infoAt = Date.now()
     recomputeLeds()
   } catch (e) { /* ignore */ }
 }
@@ -1438,12 +1553,13 @@ async function load () {
     const d = await r.json()
     if (Array.isArray(d.effects)) wled.effects = d.effects
     if (Array.isArray(d.palettes)) wled.palettes = d.palettes
-    if (d.info) Object.assign(wled.info, d.info)
+    if (d.info) { Object.assign(wled.info, d.info); wled.infoAt = Date.now() }
     applyState(d.state)
     wled.ready = true
     wled.online = true
     wled.error = ''
     cleanupStaleTips()
+    maybeSyncClock()                                    // keep the controller clock sane without NTP
   } catch (e) {
     wled.error = 'Keine Verbindung zum Controller'
     wled.online = false
@@ -1471,7 +1587,7 @@ function connect () {
     try {
       const d = JSON.parse(ev.data)
       if (d.state) applyState(d.state)
-      if (d.info) Object.assign(wled.info, d.info)
+      if (d.info) { Object.assign(wled.info, d.info); wled.infoAt = Date.now() }
       wled.online = true
     } catch (e) { /* ignore non-JSON (e.g. live-peek frames) */ }
   }
