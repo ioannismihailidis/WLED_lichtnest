@@ -117,6 +117,52 @@ export function schwarmDuration (p, N = 100) {
   return 0   // endless (step duration comes from the playlist row)
 }
 
+// Füllen: the level follows a keyframe list (t seconds -> level %). The step ends at
+// the last keyframe, like the other keyframe-driven effects.
+const DEF_LVLKEYS = [{ t: 0, v: 0 }, { t: 6, v: 100 }]
+export const fillKeys = (p) => (p.lvlKeys && p.lvlKeys.length ? p.lvlKeys.slice().sort((a, b) => a.t - b.t) : DEF_LVLKEYS)
+export const fillDuration = (p) => { const k = fillKeys(p); return Math.max(0.5, k[k.length - 1].t) }
+export const fillLevelAt = (p, elapsed) => Math.max(0, Math.min(1, sampleCurve(fillKeys(p), elapsed) / 100))
+// axis along the fill direction: 0 at the "bottom", 1 at the far end of the field.
+// `perp` runs along the surface and drives the wave. Both normalised over the unit square.
+export function fillAxis (ang, x, y) {
+  const a = (ang * Math.PI) / 180
+  const c = Math.cos(a), s = Math.sin(a)
+  const span = Math.abs(c) + Math.abs(s) || 1
+  const lo = Math.min(0, c) + Math.min(0, s)
+  return { u: (x * c + y * s - lo) / span, perp: (x * -s + y * c + 1) / span }
+}
+// Water-like surface: counter-travelling trochoidal trains. Their interference makes the
+// crests rise and fall in place instead of only sliding past, and sharper crests over
+// flatter troughs read as water rather than a plain sine. The amplitude dies out as the
+// level reaches 0, so an empty field shows no ripples. Mirrors the firmware.
+const trochoid = (th) => (Math.sin(th) + 0.32 * Math.sin(2 * th)) / 1.32
+const WAVE_LEN = [1, 0.61, 1.53]      // relative wavelength per train
+const WAVE_SPD = [1, -0.72, 0.45]     // negative = travels the other way
+const WAVE_W = [0.62, 0.27, 0.11]     // weight
+export function fillWave (p, elapsed, perp, lvl) {
+  const amp = ((p.wamp ?? 8) / 100) * 0.5
+  const len = Math.max(0.05, (p.wlen ?? 45) / 100)
+  const spd = ((p.wspd ?? 35) / 100) * 0.9
+  const n = Math.max(1, Math.min(3, p.wcnt ?? 2))
+  let w = 0, sum = 0
+  for (let i = 0; i < n; i++) {
+    const th = 2 * Math.PI * (perp / (len * WAVE_LEN[i]) - spd * WAVE_SPD[i] * elapsed) + i * 1.9
+    w += WAVE_W[i] * trochoid(th)
+    sum += WAVE_W[i]
+  }
+  if (sum > 0) w /= sum
+  const swell = 0.82 + 0.18 * Math.sin(2 * Math.PI * 0.11 * elapsed)   // slow breathing
+  const fade = Math.max(0, Math.min(1, lvl / 0.12))
+  return amp * w * swell * fade
+}
+// surface height at this point: level plus the wave offset (0 = flat)
+export function fillSurface (p, elapsed, perp) {
+  const lvl = fillLevelAt(p, elapsed)
+  if ((p.fmode || 0) !== 1) return lvl
+  return lvl + fillWave(p, elapsed, perp, lvl)
+}
+
 // Solid/Atmen: ONE keyframe list [{ t, v(Hz), c:[r,g,b] }] drives both the breathe rate
 // and the colour over time. Phase in radians → sin() per breath; colour interpolated.
 const DEF_SOLIDKEYS = [{ t: 0, v: 0.3, c: [39, 197, 255] }, { t: 4, v: 0.3, c: [255, 90, 60] }]
@@ -259,6 +305,18 @@ export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, 
     case 4: { // Noise / Drift — hash noise field mapped through the gradient; phase = drift pos
       const v = noiseValue(p, x, y, phase)
       return gradN(v, fadeCols(p), fadeCw(p))
+    }
+    case 5: {
+      // Füllen — everything below the surface carries the gradient (0 = bottom,
+      // 1 = the moving edge), above it stays dark. `phase` carries the step elapsed.
+      const { u, perp } = fillAxis(p.fang ?? 270, x, y)
+      const h = fillSurface(p, phase, perp)
+      if (h <= 0) return [0, 0, 0]
+      const soft = 0.02
+      const k = Math.min(1, (h - u) / soft)
+      if (k <= 0) return [0, 0, 0]
+      const g = Math.max(0, Math.min(1, u / Math.max(h, 1e-4)))
+      return scale(gradN(g, fadeCols(p), fadeCw(p)), k)
     }
     case 2: {
       // Non-cyclic run: the head enters from OUTSIDE the field, the tail trails behind

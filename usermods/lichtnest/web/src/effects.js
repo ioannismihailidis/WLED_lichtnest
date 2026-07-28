@@ -58,6 +58,22 @@ export const EFFECTS = [
     ],
   },
   {
+    id: 5, key: 'fill', name: 'Füllen',
+    desc: 'Die Fläche füllt sich von unten — der Füllstand folgt Keyframes, die Oberkante kann wellen.',
+    preview: 'linear-gradient(0deg,#27c5ff 0 55%,#0d0f13 58% 100%)',
+    params: [
+      { key: 'grad', type: 'gradient', name: 'Farbverlauf' },
+      { key: 'lvlKeys', type: 'keyframes', name: 'Füllstand', vMin: 0, vMax: 100, vUnit: '%', label: 'Stand', def: [{ t: 0, v: 0 }, { t: 6, v: 100 }] },
+      { key: 'ftl', type: 'filltime', name: 'Zeitverlauf' },
+      { key: 'fang', type: 'angle', name: 'Richtung', def: 270 },
+      { key: 'fmode', type: 'select', name: 'Oberfläche', def: 0, options: [{ v: 0, l: 'Normal' }, { v: 1, l: 'Wellen' }] },
+      { key: 'wamp', type: 'range', name: 'Wellenhöhe', min: 1, max: 40, unit: '%', def: 8, show: (p) => (p.fmode || 0) === 1 },
+      { key: 'wlen', type: 'range', name: 'Wellenlänge', min: 5, max: 200, unit: '%', def: 45, show: (p) => (p.fmode || 0) === 1 },
+      { key: 'wspd', type: 'range', name: 'Wellentempo', min: 0, max: 100, unit: '%', def: 35, show: (p) => (p.fmode || 0) === 1 },
+      { key: 'wcnt', type: 'range', name: 'Wellenzüge', min: 1, max: 3, def: 2, show: (p) => (p.fmode || 0) === 1 },
+    ],
+  },
+  {
     id: 3, key: 'solid', name: 'Solid / Atmen',
     desc: 'Farbe und Atem-Tempo laufen über Keyframes — beides über die Zeit einstellbar.',
     preview: 'linear-gradient(90deg,#27c5ff,#7b3cff,#ff5a3c)',

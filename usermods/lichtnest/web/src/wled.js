@@ -10,7 +10,7 @@
 // WebSocket, same-origin — preferred) or point at the device with
 // ?host=http://4.3.2.1 (remembered in localStorage, same idea as WLED's file mode).
 import { reactive } from 'vue'
-import { phaseRate, strobeDuration, solidDuration, schwarmDuration } from './fxsim.js'
+import { phaseRate, strobeDuration, solidDuration, schwarmDuration, fillDuration } from './fxsim.js'
 import { impulseField, impulseDuration } from './impulse.js'
 
 /* global __LN_PROXY__ */
@@ -343,7 +343,12 @@ export const tubes = {
   async update (id, { leds, name } = {}) {
     await clearTipSegment()
     const opts = {}
-    if (leds != null) opts.resize = { id, leds }
+    if (leds != null) {
+      // shrinking pushes the tail LEDs out of the bus — blank them while we still can
+      const cur = wled.segments.find((s) => s.id === id)
+      if (cur && (leds | 0) < (cur.stop - cur.start)) await blankTubeBeforeStructuralChange(id)
+      opts.resize = { id, leds }
+    }
     if (name != null) opts.rename = { id, name }
     if (!opts.resize && !opts.rename) return false
     const ok = await syncBusesFromTubes(opts)
@@ -352,8 +357,15 @@ export const tubes = {
   },
   async remove (id) {
     await clearTipSegment()
+    await blankTubeBeforeStructuralChange(id)     // its LEDs leave the bus right after this
     const ok = await syncBusesFromTubes({ removeId: id })
-    if (ok) { lockPortsToMapped(); persistTubes() }
+    if (ok) {
+      lockPortsToMapped()
+      // Push the new geometry right away instead of waiting for the debounced save, so the
+      // effect stops addressing the tube that is gone.
+      if (!wled.offline && wled.testTube == null) { try { await postState({ lichtnest: { geo: tubeGeometry() } }) } catch (e) { /* retried by persistTubes */ } }
+      persistTubes()
+    }
     return ok
   },
   async setSelected (id, sel) { return postState({ seg: [{ id, sel: !!sel }] }) },
@@ -371,6 +383,38 @@ export const tubes = {
 // Test mode is a TOGGLE: light only the selected tube (white), blank the rest;
 // toggling off restores the snapshot taken when entering test mode.
 let testSnapshot = null
+// What was playing when the test started, so it can be picked up again afterwards:
+// a playlist (resumed at the same step) or the manual effect (just made visible again).
+let testPlayback = null
+function snapshotPlayback () {
+  if (wled.pl.active && wled.pl.id) return { pl: wled.pl.id, idx: wled.pl.idx | 0 }
+  if (!wled.idle) return { fx: true }
+  return null
+}
+// restore whatever ran before the test; identify itself stops playback so nothing
+// advances or paints while a tube is lit white. Verified and retried once: a stop that
+// was still in flight when the test ended would otherwise leave the field dark.
+async function resumePlayback () {
+  const snap = testPlayback
+  testPlayback = null
+  if (!snap) return
+  const apply = () => (snap.pl
+    ? postState({ lichtnest: { play: snap.pl, from: snap.idx } })
+    : postState({ lichtnest: { resume: true } }))
+  await apply()
+  await pollState()
+  if (snap.pl ? !wled.pl.active : wled.idle) { await apply(); await pollState() }
+}
+
+// Identify writes a lot of state (segments, geometry, playback). Tapping test on/off
+// quickly used to overlap those requests, and a late-arriving "stop" could undo the
+// resume. Every entry/exit runs through this chain, so they can never interleave.
+let testChain = Promise.resolve()
+function serializeTest (fn) {
+  const run = testChain.then(fn, fn)
+  testChain = run.then(() => {}, () => {})
+  return run
+}
 let editPreviewSeq = 0
 let tipSegId = null
 let tipBlinkId = null            // second helper: blinking last-LED marker (add flow)
@@ -541,7 +585,7 @@ function snapshotTestFx () {
 
 let tipIdentFor = null   // tube id whose full identify state is already on the device
 async function applyTipIdentify (tubeId, tipPix, segGeometryPatch) {
-  if (wled.testTube === null) testSnapshot = snapshotTestFx()
+  if (wled.testTube === null) { testSnapshot = snapshotTestFx(); testPlayback = snapshotPlayback() }
   wled.testTube = tubeId
   const tipId = tipSegId ?? nextTipSegId()
   tipSegId = tipId
@@ -574,7 +618,7 @@ async function applyTipIdentify (tubeId, tipPix, segGeometryPatch) {
     : { id: tipId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255, fx: 1, sx: 200, ix: 128, pal: 0, col: [[255, 255, 255], [0, 0, 0]] })
   await postState(minimal
     ? { tt: 0, seg: patch }
-    : { on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
+    : { on: true, bri: 255, tt: 0, lichtnest: { stop: true, geo: [] }, seg: patch })
   applySegPatchLocal(patch)
   tipIdentFor = tubeId
 }
@@ -640,7 +684,7 @@ export async function previewAddTip (portIndex, leds) {
   const blinkId = tipBlinkId ?? nextTipSegId()
   tipBlinkId = blinkId
 
-  if (wled.testTube === null) testSnapshot = snapshotTestFx()
+  if (wled.testTube === null) { testSnapshot = snapshotTestFx(); testPlayback = snapshotPlayback() }
   wled.testTube = previewId
 
   const minimal = tipIdentFor === 'add:' + portIndex
@@ -658,21 +702,34 @@ export async function previewAddTip (portIndex, leds) {
     : { id: blinkId, start: tipPix, stop: tipPix + 1, n: TIP_SEG_NAME, on: true, bri: 255, fx: 1, sx: 200, ix: 128, pal: 0, col: [[255, 255, 255], [0, 0, 0]] })
   await postState(minimal
     ? { tt: 0, seg: patch }
-    : { on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
+    : { on: true, bri: 255, tt: 0, lichtnest: { stop: true, geo: [] }, seg: patch })
   applySegPatchLocal(patch)
   tipIdentFor = 'add:' + portIndex
   return seq === editPreviewSeq
 }
 
-/** Cap identify brightness so ABL/bus limits (~10 A) don't pump near full-white on long tubes. */
-function identifyBri (ledCount) {
+/**
+ * Identify brightness. Full white unless THIS tube's bus actually runs a current limit —
+ * then stay under it so the strip doesn't sit at the limiter's edge (which makes WLED
+ * scale the whole bus and the tube looks grey instead of white).
+ * Reads the real per-bus values; a hard-coded 55 mA / 10 A guess used to dim long tubes
+ * on 12 V strips that draw a fraction of that.
+ */
+function identifyBri (ledCount, segStart = null) {
   const n = Math.max(1, ledCount | 0)
-  const infoMax = wled.info?.leds?.maxpwr || 12000
-  const maxpwr = Math.min(infoMax, 10000) // bus0 is typically the tight limit
-  const ledma = 55
+  const ins = cfg.data?.hw?.led?.ins || []
+  let bus = ins[0]
+  if (segStart != null) {
+    for (const b of ins) {
+      const s0 = b.start || 0
+      if (segStart >= s0 && segStart < s0 + Math.max(1, b.len || 1)) { bus = b; break }
+    }
+  }
+  const limit = (bus?.maxpwr | 0)
+  if (!limit) return 255                                   // limiter off -> supply decides
+  const ledma = bus.ledma === 255 ? 12 : (bus.ledma || 55)  // 255 = WLED's WS2815 model (~12 mA)
   const est = n * ledma
-  // Stay well under ABL so mid-chain tubes don't pump at the limit edge.
-  const budget = maxpwr * 0.65
+  const budget = limit * 0.65
   if (est <= budget) return 255
   return Math.max(40, Math.min(255, Math.round((budget * 255) / est)))
 }
@@ -682,12 +739,15 @@ async function applyTestPattern (id) {
   cancelSavePlan()
   cancelPersistTubes()
   if (wled.offline) { wled.testTube = id; return true }
-  if (wled.testTube === null) testSnapshot = snapshotTestFx()
+  if (wled.testTube === null) { testSnapshot = snapshotTestFx(); testPlayback = snapshotPlayback() }
   wled.testTube = id
   const tube = wled.segments.find((s) => s.id === id)
-  const bri = identifyBri(tube ? (tube.stop - tube.start) : 96)
+  const bri = identifyBri(tube ? (tube.stop - tube.start) : 96, tube ? tube.start : null)
   const patch = wled.segments.filter(isMappingTube).map((s) => s.id === id
-    ? { id: s.id, on: true, bri, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255]], frz: true }
+    // NO frz here: a frozen segment is not rendered, so it would keep whatever frame was
+    // on it and the white we send below would never reach the LEDs. Nothing can paint over
+    // it anyway — the overlay is silenced by clearing the geometry.
+    ? { id: s.id, on: true, bri, fx: 0, sx: 0, ix: 128, pal: 0, col: [[255, 255, 255], [0, 0, 0], [0, 0, 0]], frz: false }
     : { id: s.id, on: false, frz: false })
   // Stale tip / helper segments must not keep painting over the tip pixel.
   for (const s of wled.segments) {
@@ -696,11 +756,12 @@ async function applyTestPattern (id) {
   }
   // Stop playlist + mute overlay so Fill/etc. cannot paint over solid identify white.
   // tt:0 bypasses the global ~0.7s transition that made test feel laggy
-  await postState({ on: true, bri: 255, tt: 0, lichtnest: { stop: true, mute: true, geo: [] }, seg: patch })
+  await postState({ on: true, bri: 255, tt: 0, lichtnest: { stop: true, geo: [] }, seg: patch })
   return true
 }
 
-export async function toggleTest (id) {
+export async function toggleTest (id) { return serializeTest(() => toggleTestInner(id)) }
+async function toggleTestInner (id) {
   if (wled.offline) { wled.testTube = wled.testTube === id ? null : id; return } // preview reads testTube directly
   // A pending persistTubes() / savePlan would re-push geo and fight the solid test.
   cancelPersistTubes()
@@ -709,8 +770,9 @@ export async function toggleTest (id) {
   if (wled.testTube === id) {                 // off -> restore segments + re-enable the effect
     // tt:0 = no crossfade; identify should feel instant
     const thaw = (testSnapshot || []).map((s) => ({ ...s, frz: false }))
-    await postState({ tt: 0, seg: thaw, lichtnest: { mute: false, geo: tubeGeometry() } })
+    await postState({ tt: 0, seg: thaw, lichtnest: { geo: tubeGeometry() } })
     testSnapshot = null; wled.testTube = null
+    await resumePlayback()
     return
   }
   // Make sure the target tube still has a non-zero span (mapping tip can leave 0-len ghosts)
@@ -733,7 +795,8 @@ export function cancelEditPreview () { editPreviewSeq++ }
  * Does not cancel a pending persistTubes() — add/save schedules that on purpose;
  * persistTubes itself defers while testTube is set.
  */
-export async function endEditIdentify () {
+export async function endEditIdentify () { return serializeTest(() => endEditIdentifyInner()) }
+async function endEditIdentifyInner () {
   cancelEditPreview()
   await clearTipSegment()
   if (wled.testTube == null && !testSnapshot) return
@@ -742,7 +805,8 @@ export async function endEditIdentify () {
   testSnapshot = null
   wled.testTube = null
   const thaw = fx.map((s) => ({ ...s, frz: false }))
-  await postState({ tt: 0, seg: thaw, lichtnest: { mute: false, geo: tubeGeometry() } })
+  await postState({ tt: 0, seg: thaw, lichtnest: { geo: tubeGeometry() } })
+  await resumePlayback()
 }
 
 // --- 2D plan (photo + per-tube endpoint layout, stored on the device FS) ----
@@ -835,7 +899,13 @@ export function savePlan () {
   planTimer = setTimeout(() => {
     // never mid-identify: the geo push would re-enable the overlay and kill the white test
     if (wled.testTube != null || tipSegId != null) { savePlan(); return }
-    const body = JSON.stringify({ photo: plan.photo, tubes: plan.tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax, psu: plan.psu })
+    // drop coordinates of tubes that no longer exist: the firmware seeds its geometry from
+    // this file on boot, and a stale entry would occupy a slot in per-tube effects
+    const live = new Set(wled.segments.filter(isMappingTube).map((s) => String(s.id)))
+    const tubes = {}
+    for (const [id, c] of Object.entries(plan.tubes)) if (live.has(String(id))) tubes[id] = c
+    plan.tubes = tubes
+    const body = JSON.stringify({ photo: plan.photo, tubes, points: plan.points, ports: plan.ports, portMax: plan.portMax, psu: plan.psu })
     const fd = new FormData()
     fd.append('file', new Blob([body], { type: 'application/json' }), 'lichtnest_plan.json')
     fetch(httpUrl('/upload'), { method: 'POST', body: fd }).catch(() => {})
@@ -929,6 +999,7 @@ export function stepBaseMs (it) {
   const p = it.p || {}
   if (it.fx === 1) return Math.max(200, strobeDuration(p) * 1000)   // strobe: ends at the last keyframe
   if (it.fx === 3) return Math.max(200, solidDuration(p) * 1000)    // solid: ends at the last colour/rate keyframe
+  if (it.fx === 5) return Math.max(200, fillDuration(p) * 1000)     // fill: ends at the last level keyframe
   if (it.fx === 2) {                                                // schwarm: Dauer/Anzahl auto-derive
     const d = schwarmDuration(p, wled.info.leds?.count || 100)
     return d > 0 ? Math.max(200, d * 1000) : Math.max(1, it.dur || 10) * 1000
@@ -1021,6 +1092,28 @@ export function liveFxP () {
   }
   return { fx: lichtnest.fx, p: lichtnest.p }
 }
+/**
+ * Paint a tube black BEFORE its pixels leave the bus. Removing (or shortening) a tube
+ * shrinks the bus to the sum of the remaining tube lengths, and LEDs beyond that end are
+ * no longer part of any bus — WLED never clocks data into them again, so they freeze on
+ * whatever they last showed. Clearing them afterwards is impossible; it has to happen
+ * while they are still inside the strip.
+ * Pushing the geometry without this tube first stops our overlay from repainting it, then
+ * plain solid black on the segment gets shown for a frame.
+ */
+async function blankTubeBeforeStructuralChange (id) {
+  if (wled.offline || wled.testTube != null) return
+  const geoWithout = tubeGeometry().filter((g) => g.id !== id)
+  try {
+    await postState({
+      tt: 0,
+      lichtnest: { geo: geoWithout },
+      seg: [{ id, on: true, bri: 0, fx: 0, sx: 0, ix: 0, pal: 0, col: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] }],
+    })
+    await new Promise((r) => setTimeout(r, 220))   // let the strip actually show it
+  } catch (e) { /* device gone — the structural change still has to run */ }
+}
+
 export function tubeGeometry () {
   return wled.segments.filter(isMappingTube).slice().sort((a, b) => a.start - b.start).map((s) => {
     const c = plan.tubes[s.id] || { x1: 0.12, y1: 0.4, x2: 0.5, y2: 0.4 }

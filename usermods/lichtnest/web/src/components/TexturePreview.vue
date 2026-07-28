@@ -4,7 +4,7 @@
 // device-phase clock as the tube preview so it stays in lock-step.
 import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { wled, lichtnest, plan, liveFxP, effectOrigin, isMappingTube } from '../wled.js'
-import { fxColor, phaseRate, strobePhaseAt, strobeRateAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt, easeVal } from '../fxsim.js'
+import { fxColor, fillDuration, phaseRate, strobePhaseAt, strobeRateAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt, easeVal } from '../fxsim.js'
 import { impulsePositions, impulseDuration, impulseColorAtField, impulseField } from '../impulse.js'
 
 // optional fx/p override (e.g. a playlist step); `local` free-runs its own clock;
@@ -21,7 +21,7 @@ function origin (p) {
   return effectOrigin(p, list)
 }
 let lph = 0, lts = 0, lelapsed = 0
-const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1 ? strobeDuration(p) : fx === 3 ? solidDuration(p) : Math.max(0.1, props.timeline))
+const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1 ? strobeDuration(p) : fx === 3 ? solidDuration(p) : fx === 5 ? fillDuration(p) : Math.max(0.1, props.timeline))
 function frame (fx, p, umax, live) {
   const now = performance.now(); let dt = lts ? (now - lts) / 1000 : 0; lts = now
   if (!(dt > 0 && dt < 1)) dt = 0
@@ -48,6 +48,7 @@ function frame (fx, p, umax, live) {
   let phase
   if (fx === 1) phase = strobePhaseAt(p, elapsed)
   else if (fx === 3) phase = solidPhaseAt(p, elapsed)
+  else if (fx === 5) phase = elapsed                    // fill reads the level curve directly
   else { lph += dt * phaseRate(fx, p, wled.info.leds?.count || 1); phase = lph }
   return { elapsed, phase, dim }
 }

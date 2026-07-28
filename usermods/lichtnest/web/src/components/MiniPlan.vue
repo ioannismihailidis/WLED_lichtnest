@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { wled, lichtnest, plan, liveFxP, effectOrigin, isMappingTube } from '../wled.js'
-import { fxColor, rgbCss, phaseRate, strobePhaseAt, strobeRateAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt, easeVal } from '../fxsim.js'
+import { fxColor, fillDuration, rgbCss, phaseRate, strobePhaseAt, strobeRateAt, strobeDuration, solidPhaseAt, solidDuration, solidColorAt, easeVal } from '../fxsim.js'
 import { impulsePositions, impulseDuration, impulseColorAtField, impulseField } from '../impulse.js'
 
 // optional fx/p override (e.g. a playlist step); `local` free-runs its own clock;
@@ -12,7 +12,7 @@ const efx = () => (props.fx != null ? props.fx : (props.local ? lichtnest.fx : l
 const ep = () => (props.p != null ? props.p : (props.local ? lichtnest.p : liveFxP().p))
 let lph = 0, lts = 0, lelapsed = 0
 // step length: impulse auto-derives from Anzahl×Abstand+Auslaufzeit, else the given timeline
-const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1 ? strobeDuration(p) : fx === 3 ? solidDuration(p) : Math.max(0.1, props.timeline))
+const stepDur = (fx, p, umax) => (fx === 0 ? impulseDuration(p, umax) : fx === 1 ? strobeDuration(p) : fx === 3 ? solidDuration(p) : fx === 5 ? fillDuration(p) : Math.max(0.1, props.timeline))
 // elapsed since the (loop/step) start — playback-synced when this is the live overall preview
 function frame (fx, p, umax, live) {
   const now = performance.now(); let dt = lts ? (now - lts) / 1000 : 0; lts = now
@@ -40,6 +40,7 @@ function frame (fx, p, umax, live) {
   let phase
   if (fx === 1) phase = strobePhaseAt(p, elapsed)
   else if (fx === 3) phase = solidPhaseAt(p, elapsed)
+  else if (fx === 5) phase = elapsed                    // fill reads the level curve directly
   else { lph += dt * phaseRate(fx, p, wled.info.leds?.count || 1); phase = lph }
   return { elapsed, phase, dim }
 }

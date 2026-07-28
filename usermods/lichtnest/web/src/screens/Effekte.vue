@@ -10,6 +10,7 @@ import ColorList from '../components/ColorList.vue'
 import SourcesEditor from '../components/SourcesEditor.vue'
 import AngleDial from '../components/AngleDial.vue'
 import StrobeTimeline from '../components/StrobeTimeline.vue'
+import FillTimeline from '../components/FillTimeline.vue'
 import SolidTimeline from '../components/SolidTimeline.vue'
 import MiniPlan from '../components/MiniPlan.vue'
 import TexturePreview from '../components/TexturePreview.vue'
@@ -140,6 +141,7 @@ function restartPreview () { pvRestart.value++; if (isLive.value) fxActions.setE
         <SourcesEditor v-else-if="p.type === 'sources'" :model-value="keysVal(p)" @update="setKeys(p, $event)" />
         <AngleDial v-else-if="p.type === 'angle'" :model-value="rangeVal(p)" @update="setSel(p, $event)" />
         <StrobeTimeline v-else-if="p.type === 'strobetime'" :p="draft.p" :restart-key="pvRestart" />
+        <FillTimeline v-else-if="p.type === 'filltime'" :p="draft.p" :restart-key="pvRestart" />
         <SolidTimeline v-else-if="p.type === 'solidtime'" :p="draft.p" :restart-key="pvRestart" />
         <div v-else-if="p.type === 'select'" class="seg">
           <button v-for="o in p.options" :key="o.v" :class="{ on: selVal(p) === o.v }" @click="setSel(p, o.v)">{{ o.l }}</button>

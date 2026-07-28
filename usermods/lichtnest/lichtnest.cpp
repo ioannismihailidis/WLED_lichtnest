@@ -65,6 +65,9 @@ struct FxParams {
   uint8_t  sfade = 0, sease = 0;                           // strobe flash fade (0 hard,1 out,2 in,3 in&out) + easing
   uint8_t  bease = 0;                                      // breath shape: 0 sinus, 1..4 = eased triangle
   uint8_t  swmode = 0, swdur = 10, swcnt = 3;              // schwarm: run mode (0 endless, 1 s, 2 passes)
+  uint8_t  fmode = 0, wamp = 8, wcnt = 2;                  // fill: flat/waves + wave height, trains
+  uint8_t  wlen = 45, wspd = 35;                           // fill: wave length (%) + speed
+  uint16_t fang = 270;                                     // fill: direction (0 = right, clockwise)
   uint8_t  ntype = 0, nscale = 8;                          // noise: type + detail
   uint16_t nang = 0;                                       // noise drift direction (deg, pattern moves TOWARD it)
 };
@@ -91,6 +94,7 @@ class Lichtnest : public Usermod {
 
     // --- geometry: per-tube endpoints (normalised 0..1), in chain order ---
     uint8_t geoCount = 0;
+    bool    _wipeOnce = false;   // a tube vanished -> blank the whole strip for one frame
     uint8_t geoId[ZV_MAXGEO];
     float gx1[ZV_MAXGEO], gy1[ZV_MAXGEO], gx2[ZV_MAXGEO], gy2[ZV_MAXGEO];
 
@@ -384,10 +388,48 @@ class Lichtnest : public Usermod {
       float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
       return (Nn - 1) * iv + (pulseUmax(P) + w) / v + 0.2f;
     }
+    // Water-like surface: counter-travelling trochoidal trains. Their interference makes
+    // crests rise and fall in place instead of just sliding past, and sharper crests over
+    // flatter troughs read as water rather than a sine. Dies out as the level reaches 0,
+    // so an empty field has no ripples left.
+    static float trochoid(float th) { return (sinf(th) + 0.32f * sinf(2 * th)) / 1.32f; }
+    static float waveOffset(const FxParams& P, float elapsed, float perp, float lvl) {
+      float amp = (P.wamp / 100.0f) * 0.5f;
+      float len = (P.wlen / 100.0f); if (len < 0.05f) len = 0.05f;
+      float spd = (P.wspd / 100.0f) * 0.9f;
+      uint8_t n = P.wcnt < 1 ? 1 : (P.wcnt > 3 ? 3 : P.wcnt);
+      static const float LF[3] = { 1.0f,  0.61f, 1.53f };   // relative wavelength per train
+      static const float SF[3] = { 1.0f, -0.72f, 0.45f };   // negative = travels the other way
+      static const float WT[3] = { 0.62f, 0.27f, 0.11f };   // weight
+      float w = 0, sum = 0;
+      for (uint8_t i = 0; i < n; i++) {
+        float th = 6.2831853f * (perp / (len * LF[i]) - spd * SF[i] * elapsed) + i * 1.9f;
+        w += WT[i] * trochoid(th);
+        sum += WT[i];
+      }
+      if (sum > 0) w /= sum;
+      float swell = 0.82f + 0.18f * sinf(6.2831853f * 0.11f * elapsed);   // slow breathing
+      float fade = lvl / 0.12f; if (fade > 1) fade = 1; if (fade < 0) fade = 0;
+      return amp * w * swell * fade;
+    }
+
+    // fill: level 0..1 from the keyframe curve (values are percent)
+    float fillLevel(const FxParams& P, float elapsed) {
+      if (P.kcount == 0) return elapsed >= 6.0f ? 1.0f : elapsed / 6.0f;   // default ramp
+      float v = sampleKV(P.keys, P.kcount, elapsed) / 100.0f;
+      return v < 0 ? 0 : (v > 1 ? 1 : v);
+    }
+    float fillDur(const FxParams& P) {
+      if (P.kcount == 0) return 6.0f;
+      float t = P.keys[P.kcount - 1].t;
+      return t < 0.5f ? 0.5f : t;
+    }
+
     float stepSeconds(const FxParams& P) {   // 0 → use the playlist file's duration
       if (P.fx == 0) return impulseDur(P);
       if (P.fx == 1) return strobeDur(P);
       if (P.fx == 3) return solidDur(P);
+      if (P.fx == 5) return fillDur(P);
       if (P.fx == 2) {                       // schwarm: one pass = enter off-field .. tail fully out
         if (P.swmode == 1) return (float)P.swdur;
         if (P.swmode == 2) {
@@ -460,6 +502,24 @@ class Lichtnest : public Usermod {
         }
         case 4: { // Noise / Drift — hash noise field through the gradient; drift pos accumulates
           return gradN(P, noiseVal(P, x, y));
+        }
+        case 5: { // Fuellen — gradient below the surface, dark above; level from keyframes
+          float lvl = fillLevel(P, elapsed);
+          float a = P.fang * 3.14159265f / 180.0f;
+          float c = cosf(a), sn = sinf(a);
+          float span = fabsf(c) + fabsf(sn); if (span < 0.001f) span = 1;
+          float lo = (c < 0 ? c : 0) + (sn < 0 ? sn : 0);
+          float u = (x * c + y * sn - lo) / span;          // 0 = bottom, 1 = far end
+          float perp = (x * -sn + y * c + 1.0f) / span;    // along the surface -> wave phase
+          float h = lvl;
+          if (P.fmode == 1) h += waveOffset(P, elapsed, perp, lvl);
+          if (h <= 0) return 0;
+          float k = (h - u) / 0.02f;                       // soft edge right at the surface
+          if (k <= 0) return 0;
+          if (k > 1) k = 1;
+          float g = u / (h > 1e-4f ? h : 1e-4f);           // gradient spans bottom -> surface
+          if (g < 0) g = 0; if (g > 1) g = 1;
+          return scaleCol(gradN(P, g), k);
         }
         case 2: { // Schwarm — non-cyclic pass: enters off-field, hard leading edge, tail = gradient
           float N = chainTotal ? chainTotal : 1;
@@ -565,7 +625,12 @@ class Lichtnest : public Usermod {
 
     // render our effect over all placed tubes, overriding the stock FX
     void handleOverlayDraw() override {
-      if (!enabled || geoCount == 0) return;
+      if (!enabled) return;
+      if (_wipeOnce) {                       // tube removed/shortened: clear orphaned pixels
+        _wipeOnce = false;
+        for (uint16_t i = 0; i < strip.getLengthTotal(); i++) strip.setPixelColor(i, 0);
+      }
+      if (geoCount == 0) return;
       uint16_t chainTotal = strip.getLengthTotal();
       uint32_t nowMs = millis();
 
@@ -619,21 +684,29 @@ class Lichtnest : public Usermod {
         if (np) _nPos += dt * (np->speed / 100.0f) * 0.4f;
       }
 
+      // Only tubes that really exist may take part. The geometry can still list deleted
+      // ones (it is loaded from the plan file on boot, and that file may be stale), and a
+      // ghost entry would take a slot in the strobe rotation — a gap where nothing lights.
+      uint8_t vg[ZV_MAXGEO], vCount = 0;
       for (uint8_t g = 0; g < geoCount; g++) {
         if (geoId[g] >= strip.getSegmentsNum()) continue;
+        if (!strip.getSegment(geoId[g]).isActive()) continue;
+        vg[vCount++] = g;
+      }
+      for (uint8_t k = 0; k < vCount; k++) {
+        uint8_t g = vg[k];
         Segment& seg = strip.getSegment(geoId[g]);
-        if (!seg.isActive()) continue;
         uint16_t start = seg.start, stop = seg.stop;
         uint16_t len = (stop > start) ? (stop - start) : 1;
         for (uint16_t i = start; i < stop; i++) {
           float f = (len > 1) ? (float)(i - start) / (len - 1) : 0.0f;
           float x = lerpf(gx1[g], gx2[g], f), y = lerpf(gy1[g], gy2[g], f);
           uint32_t c = 0;
-          if (mode == 0)      c = pA ? computeColor(*pA, elA, x, y, i, chainTotal, g, geoCount) : 0;
-          else if (mode == 2) c = pA ? scaleCol(computeColor(*pA, elA, x, y, i, chainTotal, g, geoCount), 1.0f - mixE) : 0;
+          if (mode == 0)      c = pA ? computeColor(*pA, elA, x, y, i, chainTotal, k, vCount) : 0;
+          else if (mode == 2) c = pA ? scaleCol(computeColor(*pA, elA, x, y, i, chainTotal, k, vCount), 1.0f - mixE) : 0;
           else if (mode == 3) {
-            uint32_t a = pA ? computeColor(*pA, elA, x, y, i, chainTotal, g, geoCount) : 0;
-            uint32_t b = pB ? computeColor(*pB, elB, x, y, i, chainTotal, g, geoCount) : 0;
+            uint32_t a = pA ? computeColor(*pA, elA, x, y, i, chainTotal, k, vCount) : 0;
+            uint32_t b = pB ? computeColor(*pB, elB, x, y, i, chainTotal, k, vCount) : 0;
             c = blendCol(a, b, mixE);
           }
           strip.setPixelColor(i, c);
@@ -697,12 +770,17 @@ class Lichtnest : public Usermod {
 
       // --- playback commands ---
       if (o.containsKey("loop"))   _plLoop = o["loop"] | _plLoop;
+      // reload + evaluate right away: switching the schedule on must pick up a window that
+      // is due at this very moment instead of waiting for the next boundary
       if (o.containsKey("sched") && (o["sched"] | false)) { loadSchedule(); applySchedule(); }
       if (o.containsKey("reload") && (o["reload"] | false)) {
         if (_plActive) { uint8_t i = _plIdx; loadPlaylist(_plId); if (i < _stepCount) _plIdx = i; }
       }
       if (o.containsKey("play"))   { const char* id = o["play"] | (const char*)nullptr; startPlaylist(id, o["from"] | 0); }
       if (o.containsKey("stop")  && (o["stop"] | false)) { _plActive = false; _blackout = true; }   // stop -> black, not the manual effect
+      // resume: leave the stopped-black state without restarting anything — used when a
+      // tube test ends and the manual effect should simply become visible again
+      if (o.containsKey("resume") && (o["resume"] | false)) _blackout = false;
       if (o.containsKey("next")  && (o["next"] | false)) { if (_plActive) jumpTo((int)_plIdx + 1); }
       if (o.containsKey("prev")  && (o["prev"] | false)) { if (_plActive) jumpTo((int)_plIdx - 1); }
 
@@ -724,6 +802,9 @@ class Lichtnest : public Usermod {
       // --- geometry ---
       JsonArray geo = o["geo"];
       if (!geo.isNull()) {
+        uint8_t prevCount = geoCount;
+        uint8_t prevId[ZV_MAXGEO];
+        for (uint8_t i = 0; i < prevCount; i++) prevId[i] = geoId[i];
         geoCount = 0;
         for (JsonObject t : geo) {
           if (geoCount >= ZV_MAXGEO) break;
@@ -732,6 +813,16 @@ class Lichtnest : public Usermod {
           gx2[geoCount] = t["x2"] | 0.0f; gy2[geoCount] = t["y2"] | 0.0f;
           geoCount++;
         }
+        // A tube that is gone (deleted, shortened, moved to another port) leaves its
+        // pixels outside every segment — nothing writes them again, so they would keep
+        // their last colour forever. Blank the strip once; the overlay repaints the
+        // remaining tubes in the same frame.
+        for (uint8_t i = 0; i < prevCount && !_wipeOnce; i++) {
+          bool stillThere = false;
+          for (uint8_t j = 0; j < geoCount; j++) if (geoId[j] == prevId[i]) { stillThere = true; break; }
+          if (!stillThere) _wipeOnce = true;
+        }
+        if (geoCount < prevCount) _wipeOnce = true;
         computeCenter();
       }
 
@@ -817,6 +908,8 @@ class Lichtnest : public Usermod {
       P.sfade = p["sfade"] | P.sfade; P.sease = p["sease"] | P.sease; P.bease = p["bease"] | P.bease;
       P.ntype = p["ntype"] | P.ntype; P.nscale = p["nscale"] | P.nscale; P.nang = p["nang"] | P.nang;
       P.swmode = p["swmode"] | P.swmode; P.swdur = p["swdur"] | P.swdur; P.swcnt = p["swcnt"] | P.swcnt;
+      P.fmode = p["fmode"] | P.fmode; P.wamp = p["wamp"] | P.wamp; P.wcnt = p["wcnt"] | P.wcnt;
+      P.wlen = p["wlen"] | P.wlen; P.wspd = p["wspd"] | P.wspd; P.fang = p["fang"] | P.fang;
       JsonArray srcs = p["sources"];                         // impulse emission sources
       if (!srcs.isNull()) {
         P.srcCount = 0;
@@ -828,11 +921,12 @@ class Lichtnest : public Usermod {
           P.srcCount++;
         }
       }
-      // keyframes: strobe (fx1) uses hzKeys (t,v); solid (fx3) uses keys (t,v,c). Parse ONLY the
-      // field that belongs to this effect — a step's `p` may carry the other one as leftover bloat
-      // (addItem copies the whole param pool), and it must not clobber the effect's own curve.
+      // keyframes: strobe (fx1) uses hzKeys (t,v), solid (fx3) keys (t,v,c), fill (fx5)
+      // lvlKeys (t,level%). Parse ONLY the field that belongs to this effect — a step's `p`
+      // may carry the others as leftover bloat (addItem copies the whole param pool), and
+      // they must not clobber the effect's own curve.
       bool solidKf = (P.fx == 3);
-      JsonArray kk = p[solidKf ? "keys" : "hzKeys"];
+      JsonArray kk = p[solidKf ? "keys" : (P.fx == 5 ? "lvlKeys" : "hzKeys")];
       if (!kk.isNull()) {
         P.kcount = 0;
         for (JsonObject kf : kk) {
@@ -862,6 +956,8 @@ class Lichtnest : public Usermod {
       p["sfade"] = P.sfade; p["sease"] = P.sease; p["bease"] = P.bease;
       p["ntype"] = P.ntype; p["nscale"] = P.nscale; p["nang"] = P.nang;
       p["swmode"] = P.swmode; p["swdur"] = P.swdur; p["swcnt"] = P.swcnt;
+      p["fmode"] = P.fmode; p["wamp"] = P.wamp; p["wcnt"] = P.wcnt;
+      p["wlen"] = P.wlen; p["wspd"] = P.wspd; p["fang"] = P.fang;
       if (P.srcCount) {                                     // impulse emission sources
         JsonArray ss = p.createNestedArray("sources");
         for (uint8_t i = 0; i < P.srcCount; i++) {
@@ -874,7 +970,7 @@ class Lichtnest : public Usermod {
         for (uint8_t i = 0; i < P.scount; i++) { JsonArray a = sc.createNestedArray(); a.add(cR(P.scols[i])); a.add(cG(P.scols[i])); a.add(cB(P.scols[i])); }
       }
       if (P.kcount) {                                       // keyframes under the fx's own field name
-        JsonArray kk = p.createNestedArray(P.fx == 3 ? "keys" : "hzKeys");
+        JsonArray kk = p.createNestedArray(P.fx == 3 ? "keys" : (P.fx == 5 ? "lvlKeys" : "hzKeys"));
         for (uint8_t i = 0; i < P.kcount; i++) {
           JsonObject k = kk.createNestedObject();
           k["t"] = P.keys[i].t; k["v"] = P.keys[i].v;
@@ -930,6 +1026,7 @@ class Lichtnest : public Usermod {
       return true;
     }
     void applySchedule() {
+      if (!_schedOn || _schedCount == 0) return;     // master switch off -> never touch playback
       if (localTime < 1600000000UL) return;          // clock not set -> never act on it
       updateLocalTime();
       uint16_t nowMin = (uint16_t)(hour(localTime) * 60 + minute(localTime));
@@ -1048,7 +1145,7 @@ class Lichtnest : public Usermod {
 
 const char Lichtnest::_name[]    PROGMEM = "Lichtnest";
 const char Lichtnest::_enabled[] PROGMEM = "enabled";
-const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.9.9";
+const char Lichtnest::UI_VERSION[] PROGMEM = "Lichtnest 0.10.9";
 
 static Lichtnest lichtnest;
 REGISTER_USERMOD(lichtnest);

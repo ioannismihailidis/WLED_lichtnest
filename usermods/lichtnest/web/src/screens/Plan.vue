@@ -425,7 +425,9 @@ const stageTransform = computed(() => `translate(${pan.x}px,${pan.y}px) scale(${
 .viewport.placing { cursor: crosshair; }
 .placebanner { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 6; font-size: 11px; font-weight: 800; letter-spacing: .1em; color: #a58bff; background: rgba(13,15,19,.85); border: 1px solid rgba(123,60,255,.45); padding: 6px 12px; border-radius: 9px; pointer-events: none; }
 .stage { position: absolute; inset: 0; transform-origin: 0 0; will-change: transform; }
-.photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; user-select: none; }
+/* cover, not contain: the photo fills the viewport without distortion. Anything past the
+   4:3 frame is cropped — reachable by zooming/panning the stage. */
+.photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; user-select: none; }
 .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; background: none; border: 1.5px dashed rgba(255,255,255,.12); pointer-events: none; user-select: none; }
 .fxcanvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 

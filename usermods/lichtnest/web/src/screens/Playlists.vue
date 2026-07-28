@@ -12,6 +12,7 @@ import ColorList from '../components/ColorList.vue'
 import SourcesEditor from '../components/SourcesEditor.vue'
 import AngleDial from '../components/AngleDial.vue'
 import StrobeTimeline from '../components/StrobeTimeline.vue'
+import FillTimeline from '../components/FillTimeline.vue'
 import SolidTimeline from '../components/SolidTimeline.vue'
 import MiniPlan from '../components/MiniPlan.vue'
 import TexturePreview from '../components/TexturePreview.vue'
@@ -88,7 +89,10 @@ async function removeItem (it) {
 }
 function bumpDur (it, d) { it.dur = Math.max(1, (it.dur || 10) + d); savePlaylists() }
 const autoDur = (it) => (stepDurationMs(it) / 1000).toFixed(1)   // impulse: auto-derived step length
-const hasAutoDur = (it) => !it.kind && (it.fx === 0 || it.fx === 1 || it.fx === 3 || (it.fx === 2 && ((it.p && it.p.swmode) || 0) !== 0))
+// effects whose step length comes from their own settings, not from the row's `dur`:
+// impulse (count x interval), strobe + solid + fill (last keyframe), schwarm in
+// Dauer/Anzahl mode. Their rows show the derived time instead of a stepper.
+const hasAutoDur = (it) => !it.kind && (it.fx === 0 || it.fx === 1 || it.fx === 3 || it.fx === 5 || (it.fx === 2 && ((it.p && it.p.swmode) || 0) !== 0))
 function setStepName (it, v) { it.name = v; savePlaylists() }
 function setStepNote (it, v) { it.note = v; savePlaylists() }
 const stepTitle = (it) => it.kind ? elementDef(it.kind).name : ((it.name && it.name.trim()) ? it.name : effectById(it.fx).name)
@@ -173,7 +177,9 @@ function addImported (arr) {
     pl.id = 'pl' + Date.now().toString(36) + i.toString(36) + Math.floor(Math.random() * 1296).toString(36)
     pl.default = false
     pl.name = pl.name || 'Importiert'
-    pl.items = (pl.items || []).filter((it) => it && it.fx != null).map((it) => ({ ...it, uid: uid() }))
+    // keep element rows too (Pause / Schwarzblende / Fade carry `kind`, not `fx`) —
+    // filtering on fx alone silently dropped every pause on import
+    pl.items = (pl.items || []).filter((it) => it && (it.fx != null || it.kind)).map((it) => ({ ...it, uid: uid() }))
   })
   playlists.list.push(...arr)
   savePlaylists()
@@ -264,7 +270,7 @@ function confirmImport () {
           <span v-if="it.kind" class="dur mono">
             <button @click="bumpElDur(it, -0.5)">−</button><b>{{ it.dur }}s</b><button @click="bumpElDur(it, 0.5)">+</button>
           </span>
-          <span v-else-if="hasAutoDur(it)" class="dur mono auto" :title="it.fx === 0 ? 'Dauer läuft automatisch aus (Anzahl × Abstand + Auslaufzeit)' : 'Dauer automatisch aus den Effekt-Einstellungen'">~{{ autoDur(it) }}s</span>
+          <span v-else-if="hasAutoDur(it)" class="dur mono auto" :title="it.fx === 0 ? 'Dauer läuft automatisch aus (Anzahl × Abstand + Auslaufzeit)' : (it.fx === 5 ? 'Dauer endet beim letzten Füllstand-Keyframe' : 'Dauer automatisch aus den Effekt-Einstellungen')">~{{ autoDur(it) }}s</span>
           <span v-else class="dur mono">
             <button @click="bumpDur(it, -5)">−</button><b>{{ it.dur }}s</b><button @click="bumpDur(it, 5)">+</button>
           </span>
@@ -324,6 +330,7 @@ function confirmImport () {
             <SourcesEditor v-else-if="p.type === 'sources'" :model-value="keysValStep(it, p)" @update="setKeysStep(it, p, $event)" />
             <AngleDial v-else-if="p.type === 'angle'" :model-value="rangeVal(it, p)" @update="setParam(it, p.key, $event)" />
             <StrobeTimeline v-else-if="p.type === 'strobetime'" :p="it.p" :restart-key="stepRestart" />
+            <FillTimeline v-else-if="p.type === 'filltime'" :p="it.p" :restart-key="stepRestart" />
             <SolidTimeline v-else-if="p.type === 'solidtime'" :p="it.p" :restart-key="stepRestart" />
             <div v-else-if="p.type === 'select'" class="seg">
               <button v-for="o in p.options" :key="o.v" :class="{ on: selVal(it, p) === o.v }" @click="setParam(it, p.key, o.v)">{{ o.l }}</button>
