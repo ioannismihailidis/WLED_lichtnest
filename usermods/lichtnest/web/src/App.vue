@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { wled, connectDevice, goOffline, lichtnest, deviceTimeMs } from './wled.js'
+import { wled, connectDevice, goOffline, lichtnest, deviceTimeMs, playlists, loadPlaylists, isPlaying } from './wled.js'
 import { uiNav } from './nav.js'
 import { EFFECTS } from './effects.js'
 import Start from './screens/Start.vue'
@@ -33,6 +33,7 @@ let clockTimer = null
 onMounted(() => {
   window.addEventListener('resize', onResize)
   clockTimer = setInterval(() => { now.value = Date.now() }, 1000)
+  loadPlaylists()          // the sidebar lists them under the Playlists entry
 })
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
@@ -63,6 +64,8 @@ const screenComp = computed(() => {
 const stubTitle = computed(() => (NAV.find((n) => n.id === screen.value) || {}).label || '')
 
 function openEffect (id) { screen.value = 'effects'; uiNav.openEffect = id }
+function openPlaylist (id) { screen.value = 'playlists'; uiNav.openPlaylist = id }
+const stepCount = (pl) => (pl.items || []).length
 
 const statusText = computed(() => {
   if (wled.offline) return 'Lokales Projekt'
@@ -85,6 +88,20 @@ const statusText = computed(() => {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="n.icon" />
             <span>{{ n.label }}</span>
           </button>
+          <!-- all playlists, listed under "Playlists" while that screen is open -->
+          <div v-if="n.id === 'playlists' && screen === 'playlists'" class="subnav">
+            <button
+              v-for="pl in playlists.list" :key="pl.id" class="subbtn"
+              :class="{ on: uiNav.currentPlaylist === pl.id }"
+              @click="openPlaylist(pl.id)"
+            >
+              <span class="subnum mono">{{ stepCount(pl) }}</span>
+              <span class="sublbl">{{ pl.name }}</span>
+              <span v-if="isPlaying(pl.id)" class="subdot" title="Läuft gerade" />
+            </button>
+            <div v-if="!playlists.list.length" class="subempty">noch keine</div>
+          </div>
+
           <!-- all effects, listed under "Effekte" while that screen is open -->
           <div v-if="n.id === 'effects' && screen === 'effects'" class="subnav">
             <button
@@ -123,6 +140,11 @@ const statusText = computed(() => {
           <button class="connbtn" @click="wled.offline ? connectDevice() : goOffline()">{{ wled.offline ? 'Verbinden' : 'Offline' }}</button>
         </span>
       </header>
+      <!-- mobile: clock + versions always visible, same source as the sidebar block -->
+      <div v-if="!wide" class="metabar mono">
+        <span class="mclock" :class="{ nosync: !clockSynced }">{{ clockText }}<span v-if="!clockSynced" class="clockwarn">⚠</span></span>
+        <span class="mvers">UI {{ uiVersion }} · {{ fwVersion }}<template v-if="wledVersion"> · WLED {{ wledVersion }}</template></span>
+      </div>
 
       <div class="content scrl">
         <component :is="screenComp" :title="stubTitle" @navigate="screen = $event" />
@@ -173,6 +195,13 @@ const statusText = computed(() => {
 .clock.nosync { color: var(--muted); }
 .clockwarn { color: var(--accent); font-size: 11px; margin-left: 5px; vertical-align: 2px; }
 .vers { font-size: 10px; color: var(--muted2); }
+.subnum { flex: none; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 5px; background: rgba(255,255,255,.06); color: var(--muted2); font-size: 9.5px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.subbtn.on .subnum { background: rgba(240,162,60,.2); color: var(--accent); }
+.subempty { padding: 6px 10px; font-size: 11px; color: var(--muted2); opacity: .7; }
+.metabar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 14px 6px; border-bottom: 1px solid var(--line); background: var(--panel2); }
+.mclock { font-size: 12.5px; font-weight: 700; color: var(--text2); letter-spacing: .03em; }
+.mclock.nosync { color: var(--muted); }
+.mvers { font-size: 9.5px; color: var(--muted2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vers.dim { opacity: .65; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
 .dot.off { background: #c4503f; box-shadow: 0 0 8px #c4503f; }

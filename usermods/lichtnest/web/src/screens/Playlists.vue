@@ -28,6 +28,9 @@ let timer = null
 onMounted(() => { loadPlaylists(); timer = setInterval(() => { now.value = Date.now() }, 500) })
 // jump straight into a playlist (e.g. from the Start screen)
 watch(() => uiNav.openPlaylist, (v) => { if (v != null) { editId.value = v; view.value = 'edit'; uiNav.openPlaylist = null } }, { immediate: true })
+// tell the sidebar which playlist is open so it can highlight it
+watch([view, editId], () => { uiNav.currentPlaylist = view.value === 'edit' ? editId.value : null }, { immediate: true })
+onUnmounted(() => { uiNav.currentPlaylist = null })
 onUnmounted(() => clearInterval(timer))
 
 const open = computed(() => playlists.list.find((p) => p.id === editId.value) || null)

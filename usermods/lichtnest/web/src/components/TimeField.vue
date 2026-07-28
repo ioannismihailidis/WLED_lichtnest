@@ -40,7 +40,11 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
   <div ref="root" class="tf">
     <button class="tfval mono" :class="{ open }" @click.stop="open = !open">{{ text }}</button>
 
+    <!-- centred dialog instead of a popover anchored to the field: anchored, it ran off
+         the screen edge on the right-hand field and on narrow phones -->
+    <div v-if="open" class="tfback" @click.stop="open = false" />
     <div v-if="open" class="tfpop" @click.stop>
+      <div class="tftitle mono">{{ text }}</div>
       <div class="tfrow">
         <button class="tfstep" @click="bump(-60)">−1 h</button>
         <button class="tfstep" @click="bump(-1)">−1 min</button>
@@ -73,11 +77,14 @@ onUnmounted(() => document.removeEventListener('click', onDocClick))
 .tfval:hover { border-color: var(--line2); }
 .tfval.open { border-color: var(--accent); color: var(--accent); }
 
+.tfback { position: fixed; inset: 0; z-index: 40; background: rgba(6,7,9,.55); backdrop-filter: blur(2px); }
 .tfpop {
-  position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; min-width: 232px;
-  background: var(--panel2); border: 1px solid var(--line2); border-radius: 12px;
-  padding: 10px; box-shadow: 0 14px 34px rgba(0,0,0,.55);
+  position: fixed; z-index: 41; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(320px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto;
+  background: var(--panel2); border: 1px solid var(--line2); border-radius: 14px;
+  padding: 12px; box-shadow: 0 22px 50px rgba(0,0,0,.6);
 }
+.tftitle { text-align: center; font-size: 22px; font-weight: 800; letter-spacing: .04em; color: var(--accent); margin-bottom: 10px; }
 .tfrow { display: flex; gap: 4px; margin-bottom: 9px; }
 .tfstep { flex: 1; padding: 6px 0; border-radius: 7px; background: var(--inset); border: 1px solid var(--line); color: var(--muted2); font-size: 10.5px; font-weight: 700; cursor: pointer; }
 .tfstep:hover { border-color: var(--accent); color: var(--accent); }
