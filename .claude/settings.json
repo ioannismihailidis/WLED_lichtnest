@@ -11,7 +11,8 @@
       "Bash(node -e ' *)",
       "Bash(node tools/lichtnest-provision.mjs lichtnest-09 --port COM4 --yes)",
       "Bash(node tools/lichtnest-provision.mjs lichtnest-10 --port COM4 --yes)",
-      "Bash(node tools/lichtnest-provision.mjs lichtnest-11 --port COM4 --yes)"
+      "Bash(node tools/lichtnest-provision.mjs lichtnest-11 --port COM4 --yes)",
+      "Bash(node \"C:/Users/janni/AppData/Local/Temp/claude/c--Users-janni-Documents-Github-WLED-lichtnest/7647f813-ff56-4de8-a5fc-4b8a5532394c/scratchpad/offline-add.mjs\" \"C:/Users/janni/Documents/Github/WLED_lichtnest/usermods/lichtnest/web/src/wled.js\")"
     ]
   }
 }

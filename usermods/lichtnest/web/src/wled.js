@@ -1413,20 +1413,23 @@ export function validBusList (ins) {
 
 function applySegPatchLocal (patch) {
   for (const p of patch) {
-    if ((p.stop || 0) <= (p.start || 0)) {
+    // Only an EXPLICIT zero-length range means "remove". Identify/preview patches also
+    // carry field-only rows ({ id, on: false } to dim the other tubes) — reading those
+    // as start=stop=0 deleted real tubes from the local model (offline: for good).
+    const hasGeo = p.start != null && p.stop != null
+    if (hasGeo && p.stop <= p.start) {
       wled.segments = wled.segments.filter((s) => s.id !== p.id)
       continue
     }
     let s = wled.segments.find((x) => x.id === p.id)
     if (!s) {
+      if (!hasGeo) continue                      // nothing to create a segment from
       s = { id: p.id, on: true, bri: 255, fx: 0, col: p.col || [[240, 162, 60]] }
       wled.segments.push(s)
     }
-    if (p.start != null) s.start = p.start
-    if (p.stop != null) s.stop = p.stop
+    if (hasGeo) { s.start = p.start; s.stop = p.stop; s.len = s.stop - s.start }
     if (p.n != null) s.n = p.n
     if (p.col) s.col = p.col
-    s.len = s.stop - s.start
   }
 }
 
