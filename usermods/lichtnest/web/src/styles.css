@@ -16,7 +16,10 @@
   --mono:ui-monospace,'JetBrains Mono',SFMono-Regular,Menlo,monospace;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body,#app{height:100%}
+/* No pull-to-refresh and no rubber-band overscroll: the app is a fixed-height
+   shell that scrolls inside its own panes, so a stray downward swipe used to
+   reload the whole UI (and drop unsaved edits) instead of doing nothing. */
+html,body,#app{height:100%;overscroll-behavior:none}
 body{
   margin:0;background:var(--bg);color:var(--text);
   font-family:var(--sans);

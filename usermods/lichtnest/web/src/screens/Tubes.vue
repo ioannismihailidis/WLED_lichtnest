@@ -44,9 +44,9 @@ function tubeTitle (s) {
 // edit LED count + optional name via modal, re-flowing the port chain.
 // While open: tube is in test mode (full white) and LED changes apply live on the strip.
 const editTube = ref(null)
-const editLeds = ref(96)
+const editLeds = ref(95)
 const editName = ref('')
-const editOrigLeds = ref(96)
+const editOrigLeds = ref(95)
 const editLedsM = computed(() => (Math.round(editLeds.value / 96 * 10) / 10).toString().replace('.', ',') + ' m')
 let editPreviewTimer = null
 let skipEditWatch = false
@@ -125,7 +125,7 @@ async function saveEdit () {
 async function del (s) { if (!(await confirmDialog({ title: tubeTitle(s) + ' löschen?', body: 'Die Tube wird aus diesem Port entfernt.', confirmLabel: 'Löschen' }))) return; await tubes.remove(s.id) }
 
 // ---- add tube (length presets) ----
-const LEN_PRESETS = [{ m: '1 m', leds: 96 }, { m: '1,5 m', leds: 143 }, { m: '2 m', leds: 191 }]
+const LEN_PRESETS = [{ m: '1 m', leds: 95 }, { m: '1,5 m', leds: 143 }, { m: '2 m', leds: 191 }]
 const addPort = ref(null)
 const addLeds = ref(191)   // selected length (default 2 m, like the design)
 const addFree = computed(() => addPort.value ? softFreeOf(addPort.value) : 0)
@@ -151,7 +151,7 @@ async function openAdd (port) {
   }
   skipAddWatch = true
   addPort.value = port
-  addLeds.value = [191, 143, 96].find((l) => l <= free) || free  // largest preset that fits
+  addLeds.value = [191, 143, 95].find((l) => l <= free) || free  // largest preset that fits
   skipAddWatch = false
   await ensureBusLen(port.i, softMaxOf(port))
   await previewAddTip(port.i, Math.min(addLeds.value, free))
@@ -282,7 +282,7 @@ const isDragging = (s) => drag.id === s.id
       <div class="card" @click.stop>
         <div class="mhead">
           <span class="mtitle">Neue Tube · Port {{ addPort.i + 1 }}</span>
-          <span class="mono mhint">{{ addFree }} frei · 96 LEDs/m</span>
+          <span class="mono mhint">{{ addFree }} frei · 1 m = 95 LEDs</span>
         </div>
         <p class="note" style="margin:0 0 14px">Live: neuer Bereich leuchtet · Spitze pulsiert bei Längenänderung.</p>
         <div class="seclbl2 mono">LÄNGE</div>
@@ -309,7 +309,7 @@ const isDragging = (s) => drag.id === s.id
     <!-- EDIT TUBE (name + LEDs) — live white test on the strip while adjusting length -->
     <div v-if="editTube" class="modal" @click="cancelEdit">
       <div class="card" @click.stop>
-        <div class="mhead"><span class="mtitle">Tube bearbeiten</span><span class="mono mhint">max {{ editMaxFor(editTube) }} · 96 LEDs/m</span></div>
+        <div class="mhead"><span class="mtitle">Tube bearbeiten</span><span class="mono mhint">max {{ editMaxFor(editTube) }} · 1 m = 95 LEDs</span></div>
         <p class="note" style="margin:0 0 14px">Live-Test: Tube leuchtet weiß · Länge sofort auf dem Strip.</p>
         <div class="seclbl2 mono">NAME (OPTIONAL)</div>
         <input v-model="editName" class="cinput" placeholder="z. B. Mast links" style="text-align:left;margin-bottom:14px" @keyup.enter="saveEdit" />

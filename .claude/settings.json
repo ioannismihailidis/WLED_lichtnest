@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm ci *)",
+      "Bash(\"/c/Users/janni/.platformio/penv/Scripts/pio.exe\" run *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(curl -sS -m 180 -F \"file=@build_output/release/WLED_16.0.0_ESP32_Ethernet.bin\" http://lichtnest-02.local/update)",
+      "Bash(node tools/lichtnest-provision.mjs lichtnest-05 --port COM4 --yes)",
+      "PowerShell($p = Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'COM\\\\d+' } | Select-Object -ExpandProperty Name; if \\($p\\) { $p } else { Write-Output \"KEINE COM-PORTS\" })",
+      "Bash(node tools/lichtnest-provision.mjs lichtnest-08 --port COM4 --yes)",
+      "Bash(node -e ' *)",
+      "Bash(node tools/lichtnest-provision.mjs lichtnest-09 --port COM4 --yes)",
+      "Bash(node tools/lichtnest-provision.mjs lichtnest-10 --port COM4 --yes)",
+      "Bash(node tools/lichtnest-provision.mjs lichtnest-11 --port COM4 --yes)"
+    ]
+  }
+}

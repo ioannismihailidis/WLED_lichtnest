@@ -602,6 +602,11 @@ class Lichtnest : public Usermod {
       // autostart the default playlist a few seconds after boot (FS + segments ready)
       if (!_autostartTried && millis() > 4000) {
         _autostartTried = true;
+        // Tubes only exist once the boot preset has been applied, and that happens
+        // here in the loop (applyPreset just queues it) — long after our setup().
+        // So this is the earliest point where the segment list is complete.
+        seedMissingGeometry();
+        computeCenter();
         // no default playlist -> release the boot blackout so the manual effect shows
         if (!startPlaylist(nullptr, 0, 1)) _blackout = false;
       }
@@ -1109,37 +1114,61 @@ class Lichtnest : public Usermod {
     // load tube geometry + named markers from the UI's plan file so effects work after reboot
     // (DynamicJsonDocument on heap — StaticJsonDocument blew the setup()/loopTask stack)
     void loadGeometryFile() {
-      if (!WLED_FS.exists("/lichtnest_plan.json")) return;
-      File f = WLED_FS.open("/lichtnest_plan.json", "r");
-      if (!f) return;
-      DynamicJsonDocument doc(6144);
-      if (deserializeJson(doc, f) == DeserializationError::Ok) {
-        JsonObject tubes = doc["tubes"];
-        if (!tubes.isNull()) {
-          geoCount = 0;
-          for (JsonPair kv : tubes) {
-            if (geoCount >= ZV_MAXGEO) break;
-            JsonObject c = kv.value().as<JsonObject>();
-            geoId[geoCount] = atoi(kv.key().c_str());
-            gx1[geoCount] = c["x1"] | 0.0f; gy1[geoCount] = c["y1"] | 0.0f;
-            gx2[geoCount] = c["x2"] | 0.0f; gy2[geoCount] = c["y2"] | 0.0f;
-            geoCount++;
+      if (WLED_FS.exists("/lichtnest_plan.json")) {
+        File f = WLED_FS.open("/lichtnest_plan.json", "r");
+        if (f) {
+          DynamicJsonDocument doc(6144);
+          if (deserializeJson(doc, f) == DeserializationError::Ok) {
+            JsonObject tubes = doc["tubes"];
+            if (!tubes.isNull()) {
+              geoCount = 0;
+              for (JsonPair kv : tubes) {
+                if (geoCount >= ZV_MAXGEO) break;
+                JsonObject c = kv.value().as<JsonObject>();
+                geoId[geoCount] = atoi(kv.key().c_str());
+                gx1[geoCount] = c["x1"] | 0.0f; gy1[geoCount] = c["y1"] | 0.0f;
+                gx2[geoCount] = c["x2"] | 0.0f; gy2[geoCount] = c["y2"] | 0.0f;
+                geoCount++;
+              }
+            }
+            JsonObject points = doc["points"];
+            if (!points.isNull()) {
+              pointCount = 0;
+              for (JsonPair kv : points) {
+                if (pointCount >= ZV_MAXPTS) break;
+                JsonObject c = kv.value().as<JsonObject>();
+                pointId[pointCount] = atoi(kv.key().c_str());
+                pointX[pointCount] = c["x"] | 0.5f; pointY[pointCount] = c["y"] | 0.5f;
+                pointCount++;
+              }
+            }
           }
-          computeCenter();
-        }
-        JsonObject points = doc["points"];
-        if (!points.isNull()) {
-          pointCount = 0;
-          for (JsonPair kv : points) {
-            if (pointCount >= ZV_MAXPTS) break;
-            JsonObject c = kv.value().as<JsonObject>();
-            pointId[pointCount] = atoi(kv.key().c_str());
-            pointX[pointCount] = c["x"] | 0.5f; pointY[pointCount] = c["y"] | 0.5f;
-            pointCount++;
-          }
+          f.close();
         }
       }
-      f.close();
+      computeCenter();
+    }
+
+    // A tube only lands in the plan file once it has been placed on the 2D plan,
+    // so freshly added tubes are missing here. The web app substitutes a default
+    // position for those when it pushes geometry (see tubeGeometry() in
+    // web/src/wled.js) — without the same fallback the effect engine never paints
+    // them, and after a reboot they sit on their stored segment colour until the
+    // UI pushes geometry again.
+    // Must NOT be called from setup(): the boot preset that creates the tube
+    // segments is only queued by then and gets applied later from the loop.
+    void seedMissingGeometry() {
+      for (unsigned i = 0; i < strip.getSegmentsNum() && geoCount < ZV_MAXGEO; i++) {
+        const Segment& seg = strip.getSegment(i);
+        if (!seg.isActive() || seg.length() == 0) continue;
+        bool known = false;
+        for (uint8_t g = 0; g < geoCount; g++) if (geoId[g] == i) { known = true; break; }
+        if (known) continue;
+        geoId[geoCount] = i;
+        gx1[geoCount] = 0.12f; gy1[geoCount] = 0.4f;
+        gx2[geoCount] = 0.5f;  gy2[geoCount] = 0.4f;
+        geoCount++;
+      }
     }
 };
 
