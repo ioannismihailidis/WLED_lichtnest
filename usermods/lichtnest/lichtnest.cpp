@@ -224,6 +224,10 @@ class Lichtnest : public Usermod {
     float     _mFadeS = 2.0f;          // default fade
     uint32_t  _mLastFrame = 0, _mResolveMs = 0;
     MStat     _mStat;
+    // setup test stage (see applyTest)
+    uint8_t   _tPat = 0, _tHl = 0; int _tHi = -1;
+    float     _tLvl = 0.4f, _tGs = 100, _tGw = 8;
+    uint32_t  _tUntil = 0;
     // render cost of handleOverlayDraw(), reported in /json/info as "rt"
     uint32_t _rtSumUs = 0, _rtMaxUs = 0, _rtFrames = 0, _rtPx = 0, _rtWindowMs = 0;
     float    _rtAvgUs = 0, _rtPeakUs = 0, _rtFps = 0;
@@ -722,7 +726,17 @@ class Lichtnest : public Usermod {
       // black until then so the manual effect never flashes up first.
       if (WLED_FS.exists("/lichtnest_playlists.json")) _blackout = true;
       loadSchedule();
-      if (_masterCfg) initMaster();
+      if (_masterCfg) {
+        initMaster();
+        // the master serves its own UI at "/" (registered before WLED's routes, so it wins);
+        // the Lichtnest UI stays at /lichtnest, the stock UI at /classic
+        server.on("/", HTTP_GET, [](AsyncWebServerRequest* r) {
+          if (!handleFileRead(r, F("/master.htm")) && !handleFileRead(r, F("/index.htm"))) r->redirect(F("/classic"));
+        });
+        server.on("/lichtnest", HTTP_GET, [](AsyncWebServerRequest* r) {
+          if (!handleFileRead(r, F("/index.htm"))) r->redirect(F("/classic"));
+        });
+      }
       initDone = true;
     }
     void connected() override {}
@@ -941,9 +955,11 @@ class Lichtnest : public Usermod {
       if (!_fb || now - _mLastFrame < interval) return;
       _mLastFrame = now;
       uint32_t t0 = micros();
-      masterRender(now);
+      bool test = testActive(now);
+      if (!test || !_tPat) masterRender(now);            // a test pattern replaces the show completely
+      if (test) applyTest(now);
       uint32_t tr = micros() - t0;
-      if (_mOut) _art->send(*_ms, _fb, _mDim);
+      if (_mOut) _art->send(*_ms, _fb, test ? 255 : _mDim);   // the dimmer does not apply to tests
       _mStat.add(tr, _mOut ? _art->sendUs : 0, now);
     }
 
@@ -1130,6 +1146,100 @@ class Lichtnest : public Usermod {
       if (m.containsKey("layers")) { int n = m["layers"] | LN_MAX_LAYERS; _nLayers = n < 1 ? 1 : (n > LN_MAX_LAYERS ? LN_MAX_LAYERS : n); }
       if (m.containsKey("dfade")) { float f = m["dfade"] | 2.0f; _mFadeS = f < 0 ? 0 : f; }
       if (m["reload"] | false) loadMasterSetup();
+      if (m["open"].is<const char*>()) {                // switch the current setup file (kept in cfg)
+        strlcpy(_msetup, m["open"].as<const char*>(), sizeof(_msetup));
+        loadMasterSetup();
+        configNeedsWrite = true;
+      }
+      JsonObject t = m["test"];
+      if (!t.isNull()) {
+        _tPat = t["p"] | _tPat; _tHl = t["hl"] | _tHl; _tHi = t["hi"] | _tHi;
+        float l = t["lvl"] | _tLvl; _tLvl = l < 0 ? 0 : (l > 1 ? 1 : l);
+        _tGs = t["gs"] | _tGs; _tGw = t["gw"] | _tGw;
+        _tUntil = millis() + 5000;
+      }
+    }
+
+    // --- setup test stage: port of glsl_test_compute.glsl (TD project) ------------------
+    // Replaces / overlays the show output while the master UI's SETUP page is open. The UI
+    // re-sends the test state every couple of seconds; without it the stage switches off.
+    //   p   0 off (show) · 1 white · 2 red · 3 green · 4 blue · 5 tube colours · 6 bottom->top
+    //       7 data direction · 8 left->right · 9 universes · 10 nodes · 11 grid · 12 vertical
+    //       lines · 13 horizontal lines            lvl  brightness of pattern + highlight
+    //   hl  0 none · 1 tube · 2 tube type · 3 node  hi   index to highlight
+    //   gs / gw  grid spacing / line width in canvas pixels
+    bool testActive(uint32_t now) const { return (int32_t)(_tUntil - now) > 0 && (_tPat || _tHl); }
+
+    static inline float fractf(float x) { return x - floorf(x); }
+    static inline float smoothstepF(float e0, float e1, float x) {
+      float t = (x - e0) / (e1 - e0); t = t < 0 ? 0 : (t > 1 ? 1 : t);
+      return t * t * (3.0f - 2.0f * t);
+    }
+    static void idColor(float i, float* c) {            // neighbours get clearly different hues
+      float h = fractf(i * 0.618034f);
+      const float off[3] = { 0.0f, 2.0f / 3.0f, 1.0f / 3.0f };
+      for (uint8_t k = 0; k < 3; k++) { float v = fabsf(fractf(h + off[k]) * 6.0f - 3.0f) - 1.0f; c[k] = v < 0 ? 0 : (v > 1 ? 1 : v); }
+    }
+    float gridLine(float px) const {                    // 1 on a line every _tGs px, _tGw wide
+      float s = _tGs < 1 ? 1 : _tGs;
+      float x = px + s * 0.5f;
+      float d = fabsf(x - s * floorf(x / s) - s * 0.5f);
+      return 1.0f - smoothstepF(_tGw * 0.5f, _tGw * 0.5f + 1.0f, d);
+    }
+
+    void applyTest(uint32_t now) {
+      const float W = _ms->canvasW, H = _ms->canvasH, t = now / 1000.0f;
+      const float show = _mDim / 255.0f;                // the stage sees the show after the master dimmer
+      for (uint16_t ci = 0; ci < _ms->nChunks; ci++) {
+        const LnChunk& ch = _ms->chunks[ci];
+        const LnTube& tu = _ms->tubes[ch.tube];
+        uint16_t n = tu.leds;
+        float len = _ms->types[tu.type].length;
+        float step = n > 1 ? len / (n - 1) : 0;
+        for (uint16_t i = 0; i < ch.count; i++) {
+          uint16_t idx = ch.first + i;
+          uint16_t led = idx - tu.first;
+          float d = tu.flip ? (n - 1 - led) * step : led * step;
+          float u = len > 0 ? d / len : 0;
+          uint8_t* px = _fb + (size_t)idx * 3;
+          float c[3] = { px[0] / 255.0f * show, px[1] / 255.0f * show, px[2] / 255.0f * show };
+          switch (_tPat) {
+            case 1: c[0] = c[1] = c[2] = 1; break;
+            case 2: c[0] = 1; c[1] = c[2] = 0; break;
+            case 3: c[1] = 1; c[0] = c[2] = 0; break;
+            case 4: c[2] = 1; c[0] = c[1] = 0; break;
+            case 5: if (led < 3) c[0] = c[1] = c[2] = 1; else idColor(ch.tube, c); break;   // LED 1..3 white = data in
+            case 6: c[0] = c[1] = c[2] = smoothstepF(0.12f, 0.0f, fabsf(u - fractf(t * 0.4f))); break;
+            case 7: { float k = smoothstepF(4.0f, 0.0f, fabsf(led - fmodf(t * 40.0f, 160.0f))); c[0] = 0; c[1] = 0.6f * k; c[2] = k; break; }
+            case 8: c[0] = c[1] = c[2] = smoothstepF(0.05f, 0.0f, fabsf(tu.x / W - fractf(t * 0.25f))); break;
+            case 9: idColor(ch.uni, c); break;
+            case 10: idColor(ch.node + 3.0f, c); break;
+            case 11: case 12: case 13: {
+              float pxX = tu.x, pxY = tu.y + d;                    // canvas pixels, origin bottom left
+              float s = _tGs < 1 ? 1 : _tGs;
+              float v[3], h[3];
+              idColor(floorf(pxX / s + 0.5f), v);                   // each line its own colour
+              idColor(floorf(pxY / s + 0.5f) + 0.5f, h);            // horizontal lines: another sequence
+              float gv = gridLine(pxX), gh = gridLine(pxY);
+              for (uint8_t k = 0; k < 3; k++) {
+                v[k] *= gv; h[k] *= gh;
+                c[k] = _tPat == 11 ? (v[k] > h[k] ? v[k] : h[k]) : (_tPat == 12 ? v[k] : h[k]);
+              }
+              break;
+            }
+            default: break;
+          }
+          if (_tPat) for (uint8_t k = 0; k < 3; k++) c[k] *= _tLvl;
+          if (_tHl) {
+            int key = _tHl == 1 ? ch.tube : (_tHl == 2 ? tu.type : ch.node);
+            if (key == _tHi) {
+              if (led < 3) { c[0] = _tLvl; c[1] = 0.1f * _tLvl; c[2] = 0.05f * _tLvl; }   // red = LED 1 (data in)
+              else c[0] = c[1] = c[2] = _tLvl;
+            } else for (uint8_t k = 0; k < 3; k++) c[k] *= 0.12f;                        // everything else dimmed
+          }
+          for (uint8_t k = 0; k < 3; k++) { float v = c[k] < 0 ? 0 : (c[k] > 1 ? 1 : c[k]); px[k] = (uint8_t)(v * 255.0f + 0.5f); }
+        }
+      }
     }
 
     void addMasterInfo(JsonObject& root) {
@@ -1139,6 +1249,7 @@ class Lichtnest : public Usermod {
       m["fbOk"] = _fb != nullptr;
       m["out"] = _mOut; m["dim"] = _mDim; m["fpsSet"] = _mFps;
       m["fps"] = _mStat.fps; m["render"] = _mStat.renderAvg; m["renderPeak"] = _mStat.renderPeak;
+      m["test"] = testActive(millis());
       m["send"] = _mStat.sendAvg; m["packets"] = _art->packets;
       JsonArray nodes = m.createNestedArray("nodes");
       for (uint8_t k = 0; k < _ms->nNodes; k++) {

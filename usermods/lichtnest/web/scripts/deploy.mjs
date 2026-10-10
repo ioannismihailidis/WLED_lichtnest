@@ -17,10 +17,11 @@ function envHost () {
   return 'http://4.3.2.1'
 }
 const host = envHost().replace(/\/$/, '')
-const gzPath = new URL('../dist/index.htm.gz', import.meta.url)
+const gzPath = new URL(`../${process.argv[2] || 'dist/index.htm.gz'}`, import.meta.url)
+const destName = process.argv[3] || 'index.htm.gz'
 
 if (!fs.existsSync(gzPath)) {
-  console.error('dist/index.htm.gz not found — run `npm run build` first.')
+  console.error(`${gzPath.pathname} not found — run the build first.`)
   process.exit(1)
 }
 
@@ -28,7 +29,7 @@ const buf = fs.readFileSync(gzPath)
 const fd = new FormData()
 // WLED derives the destination path from the multipart filename; the field
 // name is irrelevant. Upload as index.htm.gz -> served at "/" gzip-encoded.
-fd.append('file', new Blob([buf], { type: 'application/octet-stream' }), 'index.htm.gz')
+fd.append('file', new Blob([buf], { type: 'application/octet-stream' }), destName)
 
 console.log(`Uploading ${(buf.length / 1024).toFixed(1)} KB to ${host}/upload ...`)
 try {

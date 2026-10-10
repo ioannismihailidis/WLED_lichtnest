@@ -3,12 +3,15 @@
   "private": true,
   "version": "0.11.0",
   "type": "module",
-  "description": "Zugv\u00f6gel Lichtnest custom WLED UI (Vue 3)",
+  "description": "Zugvögel Lichtnest custom WLED UI (Vue 3)",
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/gzip.mjs",
     "deploy": "npm run build && node scripts/deploy.mjs",
-    "push": "node scripts/deploy.mjs"
+    "push": "node scripts/deploy.mjs",
+    "dev:master": "vite -c vite.master.config.js",
+    "build:master": "vite build -c vite.master.config.js && node scripts/gzip.mjs dist-master master.htm.gz",
+    "deploy:master": "npm run build:master && node scripts/deploy.mjs dist-master/master.htm.gz master.htm.gz"
   },
   "dependencies": {
     "vue": "^3.4.38"
