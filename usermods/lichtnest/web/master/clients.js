@@ -67,31 +67,35 @@ function check (c) {
   const dmx = live.dmx || {}
   const ins = c.cfg?.hw?.led?.ins || []
   const d = []
-  if (!c.local) {                                   // own outputs need no Art-Net reception
-    if (!live.en) d.push('Empfang aus')
-    if (live.port !== ARTNET_PORT) d.push(`Port ${live.port} statt ${ARTNET_PORT}`)
-    if (dmx.mode !== DMX_RGB) d.push('Modus nicht RGB')
-    if (!dmx.pport) d.push('kein Universe pro Port')
-  }
+  // the master itself ("local") receives too: with its Art-Net output off, an outside
+  // source can feed its own tubes like those of any client
+  if (!live.en) d.push('Empfang aus')
+  if (live.port !== ARTNET_PORT) d.push(`Port ${live.port} statt ${ARTNET_PORT}`)
+  if (dmx.mode !== DMX_RGB) d.push('Modus nicht RGB')
+  if (!dmx.pport) d.push('kein Universe pro Port')
   c.ledDiff = false
   for (const w of c.want) {
     const i = w.port - 1
-    if (!c.local && (dmx.puni || [])[i] !== w.start) d.push(`Port ${w.port}: Universe ${(dmx.puni || [])[i] ?? '–'} statt ${w.start}`)
+    if ((dmx.puni || [])[i] !== w.start) d.push(`Port ${w.port}: Universe ${(dmx.puni || [])[i] ?? '–'} statt ${w.start}`)
     if (!ins[i]) { d.push(`Port ${w.port} fehlt am Client`); continue }
     if (ins[i].len !== w.leds) { d.push(`Port ${w.port}: ${ins[i].len} statt ${w.leds} LEDs`); c.ledDiff = true }
-    if (!c.local && w.perUni !== 170) d.push(`${w.node}: LEDs/Universe muss 170 sein`)
+    if (w.perUni !== 170) d.push(`${w.node}: LEDs/Universe muss 170 sein`)
   }
   c.diffs = d
 }
 
-// Art-Net receive + universes per output; takes effect at once
-export async function applyUniverses (c) {
-  if (c.local) return true
+// switching reception on or the listener port to Art-Net only takes effect after a reboot
+export const needsReboot = (c) => { const live = c.cfg?.if?.live || {}; return !live.en || live.port !== ARTNET_PORT }
+
+// Art-Net receive + universes per output; universes take effect at once
+export async function applyUniverses (c, reboot = false) {
   const dmx = c.cfg?.if?.live?.dmx || {}
   const n = Math.max((dmx.puni || []).length, (c.cfg?.hw?.led?.ins || []).length, ...c.want.map((w) => w.port))
   const puni = Array.from({ length: n }, (_, i) => (dmx.puni || [])[i] ?? 0)
   for (const w of c.want) puni[w.port - 1] = w.start
-  return postJson(clientUrl(c, '/json/cfg'), { if: { live: { en: true, port: ARTNET_PORT, mc: false, dmx: { mode: DMX_RGB, pport: true, puni } } } })
+  const body = { if: { live: { en: true, port: ARTNET_PORT, mc: false, dmx: { mode: DMX_RGB, pport: true, puni } } } }
+  if (reboot) body.rb = true
+  return postJson(clientUrl(c, '/json/cfg'), body, reboot ? 8000 : 6000)
 }
 
 // LED count per output (outputs are chained: start = sum of the previous lengths); the

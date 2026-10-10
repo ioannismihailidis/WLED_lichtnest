@@ -807,6 +807,9 @@ class Lichtnest : public Usermod {
     WLED_O2_ATTR void handleOverlayDraw() override {
       if (!enabled) return;
       if (_master) {                                     // the show goes out over Art-Net; local nodes onto the own strip
+        // master output off + Art-Net / E1.31 / DDP coming in from outside: the own outputs
+        // show what arrives, like any client (universes per port as set by the client management)
+        if (!_mOut && realtimeMode && !realtimeOverride) return;
         for (uint16_t i = 0; i < strip.getLengthTotal(); i++) strip.setPixelColor(i, 0);
         if (_fb && _ms) outputLocal();
         return;

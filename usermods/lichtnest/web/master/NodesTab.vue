@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { setup, ui, compute, addNode, deleteNode, nodeInUse, renameNode, isLocal } from './setup.js'
 import { dev } from './api.js'
-import { clients, refreshClients, applyUniverses, applyLedCounts, discover } from './clients.js'
+import { clients, refreshClients, applyUniverses, applyLedCounts, discover, needsReboot } from './clients.js'
 
 const addr = computed(() => compute())
 const nd = computed(() => setup.nodes[ui.node] || null)
@@ -14,7 +14,9 @@ const patch = computed(() => addr.value.chunks.map((c) => ({ ...c, nr: c.tube + 
 onMounted(() => { refreshClients(); discover() })
 
 async function sendUniverses (c) {
-  if (await applyUniverses(c)) await refreshClients()
+  const rb = needsReboot(c)
+  if (rb && !window.confirm(`${c.local ? 'Master' : c.host}: Art-Net-Empfang wird eingeschaltet bzw. auf Port 6454 gestellt — das wirkt erst nach einem Neustart. Jetzt neu starten? Die LEDs gehen ein paar Sekunden aus.`)) return
+  if (await applyUniverses(c, rb)) setTimeout(refreshClients, rb ? 14000 : 300)
   else window.alert(`${c.host}: Senden fehlgeschlagen`)
 }
 async function sendLeds (c) {
@@ -23,8 +25,11 @@ async function sendLeds (c) {
   setTimeout(refreshClients, 12000)
 }
 async function sendAll () {
-  for (const c of clients.list) if (c.online) await applyUniverses(c)
-  await refreshClients()
+  const online = clients.list.filter((c) => c.online)
+  const rb = online.filter(needsReboot)
+  if (rb.length && !window.confirm(`${rb.map((c) => (c.local ? 'Master' : c.host)).join(', ')}: Art-Net-Empfang muss eingeschaltet werden — das wirkt erst nach einem Neustart. Diese Geräte jetzt neu starten?`)) return
+  for (const c of online) await applyUniverses(c, needsReboot(c))
+  setTimeout(refreshClients, rb.length ? 14000 : 300)
 }
 // start universes one after another per client: each port right after the previous one
 // a local node bigger than its output: the extra LEDs are cut off
@@ -79,7 +84,7 @@ function autoUniverses () {
         <div class="field"><span class="lbl">LEDs / Universe</span><input class="in num" type="number" min="1" max="170" v-model.number="nd.perUni"></div>
       </div>
       <datalist id="ln-found"><option value="local">eigene Ausgänge des Masters</option><option v-for="f in clients.found" :key="f.ip" :value="f.ip">{{ f.name }}</option></datalist>
-      <div class="hint">Ein Node ist ein Ausgang (Port) eines Client-Controllers. Mit Client-Port ≥ 1 kann der Master den Client unten einrichten. IP <b>local</b> = ein eigener Ausgang des Masters (kein Art-Net).</div>
+      <div class="hint">Ein Node ist ein Ausgang (Port) eines Client-Controllers. Mit Client-Port ≥ 1 kann der Master den Client unten einrichten. IP <b>local</b> = ein eigener Ausgang des Masters: er bekommt die Show direkt, und bei ausgeschaltetem Art-Net-Ausgang des Masters zeigt er Art-Net von außen auf diesen Universes.</div>
       <div v-if="isLocal(nd)" class="hint">Ausgänge des Masters: <span v-for="(p, i) in ownPorts" :key="i">Port {{ i + 1 }}: {{ p.len }} LEDs{{ p.gpio !== undefined ? ` (GPIO ${p.gpio})` : '' }}{{ i < ownPorts.length - 1 ? ', ' : '' }}</span><span v-if="!ownPorts.length">keine</span></div>
       <div class="row">
         <button class="btn" @click="addNode">NODE HINZUFÜGEN</button>
@@ -105,7 +110,7 @@ function autoUniverses () {
             <td><div v-for="w in c.want" :key="w.port">P{{ w.port }}: U{{ w.start }} · {{ w.leds }} LEDs</div></td>
             <td :class="c.diffs.length ? 'bad' : 'ok'" style="white-space:normal">{{ c.diffs.length ? c.diffs.join(' · ') : 'ok' }}</td>
             <td style="text-align:right">
-              <button v-if="!c.local" class="btn sm" :disabled="!c.online" @click="sendUniverses(c)">Universes</button>
+              <button class="btn sm" :disabled="!c.online" @click="sendUniverses(c)">Universes</button>
               <button class="btn sm" :disabled="!c.online || !c.ledDiff" @click="sendLeds(c)">LED-Zahl</button>
             </td>
           </tr>

@@ -91,6 +91,7 @@ watch(() => m.value?.dim, (d) => { if (d !== undefined && dimDrag.value === null
       <span>Ausgang <b :class="m?.out ? 'ok' : 'bad'">{{ m?.out ? 'an' : 'aus' }}</b></span>
       <span v-if="m"><b>{{ m.fps }}</b> fps · Render {{ (m.render / 1000).toFixed(1) }} ms · Senden {{ (m.send / 1000).toFixed(1) }} ms</span>
       <span v-if="m?.test" class="ok">Test aktiv</span>
+      <span v-if="dev.info?.live && dev.info?.lm" :class="m?.out ? 'bad' : 'ok'">Empfang von außen: {{ dev.info.lm }}{{ dev.info.lip ? ` von ${dev.info.lip}` : '' }}{{ m?.out ? ' — wird ignoriert, solange ART-NET an ist' : '' }}</span>
       <span class="m-spacer" />
       <span v-if="saveState" :class="{ bad: saveErr }">{{ saveState }}</span>
       <span :class="dev.online ? 'ok' : 'bad'">{{ dev.online ? (dev.name || 'verbunden') : 'offline' }}</span>
