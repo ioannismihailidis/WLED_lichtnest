@@ -83,6 +83,38 @@ struct PlStep {
   uint8_t  repeat = 1;         // kind 0: play the effect this many times
 };
 
+// fill wave trains
+static const float WAVE_LF[3] = { 1.0f,  0.61f, 1.53f };   // relative wavelength per train
+static const float WAVE_SF[3] = { 1.0f, -0.72f, 0.45f };   // negative = travels the other way
+static const float WAVE_WT[3] = { 0.62f, 0.27f, 0.11f };   // weight
+
+#define ZV_MAXPULSE 32   // impulse bands per source evaluated per pixel (UI allows up to 20)
+
+// Everything about one effect render that is the same for every pixel of a frame.
+// prepFrame() fills it once per frame, pixelColor() then only does the per-LED part.
+struct FxFrame {
+  uint8_t  fx = 3;
+  float    elapsed = 0;
+  // the frame's colour is the same for every pixel (solid) or for every pixel of a tube (strobe)
+  bool     uniform = false; uint32_t ucol = 0;
+  bool     perTube = false;
+  // gradient band widths
+  uint8_t  gn = 1; float gw[ZV_MAXCOL]; float gtotal = 1;
+  // impulse
+  float    invW = 1; uint8_t nsrc = 0, nk = 0;
+  float    head[ZV_MAXPULSE];                                    // travelled distance of band k (launched ones only)
+  uint8_t  smode[ZV_MAXSRC];                                     // 0 auto plane, 1 radial, 2 plane through a marker
+  float    sx[ZV_MAXSRC], sy[ZV_MAXSRC], sax[ZV_MAXSRC], say[ZV_MAXSRC], su0[ZV_MAXSRC];
+  // strobe
+  long     flash = 0; float env = 1;
+  // noise
+  float    nc = 1, ns = 0, nscale = 1;
+  // fill
+  float    lvl = 0, fc = 1, fs = 0, fspan = 1, flo = 0, wk = 0, wkx[3], wof[3]; uint8_t wn = 0;
+  // schwarm
+  float    swN = 1, swTl = 1, swPos = 0;
+};
+
 class Lichtnest : public Usermod {
 
   private:
@@ -140,6 +172,10 @@ class Lichtnest : public Usermod {
     uint32_t _zufFlash = 0xFFFFFFFF, _zufPrevFlash = 0xFFFFFFFF;
     uint8_t  _zufSel[ZV_MAXPAL], _zufPrev[ZV_MAXPAL]; uint8_t _zufSelN = 0, _zufPrevN = 0;
     float    _cx = 0.5f, _cy = 0.5f;   // radial centre = centroid of the tube geometry
+    FxFrame  _frameA, _frameB;         // per-frame render context of the two decks (current / crossfade target)
+    // render cost of handleOverlayDraw(), reported in /json/info as "rt"
+    uint32_t _rtSumUs = 0, _rtMaxUs = 0, _rtFrames = 0, _rtPx = 0, _rtWindowMs = 0;
+    float    _rtAvgUs = 0, _rtPeakUs = 0, _rtFps = 0;
 
     // recompute the radial centre (average tube midpoint) after geometry changes
     void computeCenter() {
@@ -176,20 +212,17 @@ class Lichtnest : public Usermod {
                     (uint8_t)(cG(a) + (int)(cG(b) - cG(a)) * t),
                     (uint8_t)(cB(a) + (int)(cB(b) - cB(a)) * t), 0);
     }
-    // dynamic N-colour gradient: each colour is a solid band of its own width, with a
-    // smooth blend at each boundary (half the smaller neighbour). Equal widths ⇒ a fully
-    // smooth gradient; a wide colour ⇒ a wide solid band (not a long fade). phase in [0,1)
     // dynamic N-colour gradient: each colour is a solid band of its own width, blended
     // at the boundaries (half the smaller neighbour). NOT cyclic — 0 is the pure first
     // colour and 1 the pure last one, so a leading edge stays hard. Mirrors the web sim.
-    static uint32_t gradN(const FxParams& P, float ph) {
-      uint8_t n = P.fcount; if (n < 1) n = 1; if (n > ZV_MAXCOL) n = ZV_MAXCOL;
+    // The band widths are prepared once per frame (FxFrame::gw / gtotal).
+    static uint32_t gradN(const FxParams& P, const FxFrame& F, float ph) {
+      const uint8_t n = F.gn;
       if (n == 1) return P.fcols[0];
       if (ph <= 0) return P.fcols[0];
       if (ph >= 1) return P.fcols[n - 1];
-      float w[ZV_MAXCOL]; float total = 0;
-      for (uint8_t k = 0; k < n; k++) { w[k] = (P.fcw[k] < 1 ? 1.0f : (float)P.fcw[k]); total += w[k]; }
-      float u = ph * total, acc = 0;
+      const float* w = F.gw;
+      float u = ph * F.gtotal, acc = 0;
       uint8_t i = n - 1;
       for (uint8_t k = 0; k < n; k++) { if (u < acc + w[k]) { i = k; break; } acc += w[k]; }
       float wi = w[i], ls = u - acc;
@@ -275,18 +308,17 @@ class Lichtnest : public Usermod {
       float v = 1.0f - sqrtf(best) * 1.25f;
       return v < 0 ? 0 : v;
     }
-    float noiseVal(const FxParams& P, float x, float y) const {
+    float noiseVal(const FxParams& P, const FxFrame& F, float x, float y) const {
       uint8_t type = P.ntype;
-      float scale = P.nscale < 1 ? 1 : P.nscale;
+      float scale = F.nscale;
       if (type == 4) {                                   // Swirl: rotating spiral arms
         float dx = x - 0.5f, dy = y - 0.5f;
         float r = sqrtf(dx * dx + dy * dy);
         float a = atan2f(dy, dx);
         return 0.5f + 0.5f * sinf(a * 3.0f + r * scale * 1.5f - _nPos * 6.0f);
       }
-      float ang = P.nang * 3.14159265f / 180.0f;
-      float sx = (x - cosf(ang) * _nPos) * scale;        // subtract -> pattern travels TOWARD the angle
-      float sy = (y - sinf(ang) * _nPos) * scale;
+      float sx = (x - F.nc * _nPos) * scale;             // subtract -> pattern travels TOWARD the angle
+      float sy = (y - F.ns * _nPos) * scale;
       if (type == 1) return nworley(sx, sy, false);      // Cellular (F1)
       if (type == 2) return nworley(sx, sy, true);       // Voronoi (flat regions)
       if (type == 3) return nh2((int)floorf(sx), (int)floorf(sy), 0xA11CEu);   // Hash (blocky)
@@ -393,24 +425,27 @@ class Lichtnest : public Usermod {
     // flatter troughs read as water rather than a sine. Dies out as the level reaches 0,
     // so an empty field has no ripples left.
     static float trochoid(float th) { return (sinf(th) + 0.32f * sinf(2 * th)) / 1.32f; }
-    static float waveOffset(const FxParams& P, float elapsed, float perp, float lvl) {
+    // per-frame part of the wave surface: train phases, swell and fade-out near empty
+    static void prepWave(const FxParams& P, float elapsed, float lvl, FxFrame& F) {
       float amp = (P.wamp / 100.0f) * 0.5f;
       float len = (P.wlen / 100.0f); if (len < 0.05f) len = 0.05f;
       float spd = (P.wspd / 100.0f) * 0.9f;
-      uint8_t n = P.wcnt < 1 ? 1 : (P.wcnt > 3 ? 3 : P.wcnt);
-      static const float LF[3] = { 1.0f,  0.61f, 1.53f };   // relative wavelength per train
-      static const float SF[3] = { 1.0f, -0.72f, 0.45f };   // negative = travels the other way
-      static const float WT[3] = { 0.62f, 0.27f, 0.11f };   // weight
-      float w = 0, sum = 0;
-      for (uint8_t i = 0; i < n; i++) {
-        float th = 6.2831853f * (perp / (len * LF[i]) - spd * SF[i] * elapsed) + i * 1.9f;
-        w += WT[i] * trochoid(th);
-        sum += WT[i];
+      F.wn = P.wcnt < 1 ? 1 : (P.wcnt > 3 ? 3 : P.wcnt);
+      float sum = 0;
+      for (uint8_t i = 0; i < F.wn; i++) {
+        F.wkx[i] = 6.2831853f / (len * WAVE_LF[i]);
+        F.wof[i] = -6.2831853f * spd * WAVE_SF[i] * elapsed + i * 1.9f;
+        sum += WAVE_WT[i];
       }
-      if (sum > 0) w /= sum;
       float swell = 0.82f + 0.18f * sinf(6.2831853f * 0.11f * elapsed);   // slow breathing
       float fade = lvl / 0.12f; if (fade > 1) fade = 1; if (fade < 0) fade = 0;
-      return amp * w * swell * fade;
+      F.wk = sum > 0 ? amp * swell * fade / sum : 0;
+    }
+    static float waveOffset(const FxFrame& F, float perp) {
+      if (F.wk == 0) return 0;
+      float w = 0;
+      for (uint8_t i = 0; i < F.wn; i++) w += WAVE_WT[i] * trochoid(perp * F.wkx[i] + F.wof[i]);
+      return F.wk * w;
     }
 
     // fill: level 0..1 from the keyframe curve (values are percent)
@@ -442,101 +477,91 @@ class Lichtnest : public Usermod {
       return 0.0f;
     }
 
-    // render one pixel of effect P at `elapsed` seconds into its step (deterministic; mirrors fxsim)
-    uint32_t computeColor(const FxParams& P, float elapsed, float x, float y, uint16_t chainIdx, uint16_t chainTotal, uint8_t tubeIdx, uint8_t tubeTotal) {
+    // prepare the per-frame part of effect P at `elapsed` seconds into its step.
+    // Deterministic and equivalent to the web fxsim; pixelColor() does the per-LED rest.
+    void prepFrame(const FxParams& P, float elapsed, FxFrame& F) {
+      F.fx = P.fx; F.elapsed = elapsed;
+      F.uniform = false; F.perTube = false; F.ucol = 0;
+      F.gn = P.fcount < 1 ? 1 : (P.fcount > ZV_MAXCOL ? ZV_MAXCOL : P.fcount);
+      F.gtotal = 0;
+      for (uint8_t k = 0; k < F.gn; k++) { F.gw[k] = P.fcw[k] < 1 ? 1.0f : (float)P.fcw[k]; F.gtotal += F.gw[k]; }
       switch (P.fx) {
-        case 0: { // Impuls — `count` colour bands per SOURCE, launched every `interval`s, out of black
-          if (P.speed == 0) return 0;
+        case 0: { // Impuls: band heads + source planes / centres
+          F.nk = 0; F.nsrc = 0;
+          if (P.speed == 0) { F.uniform = true; return; }
           float v = (P.speed / 100.0f) * 0.6f;
           float iv = P.interval * 0.1f; if (iv < 0.05f) iv = 0.05f;
           float w = P.rwidth / 100.0f; if (w < 0.02f) w = 0.02f;
-          uint8_t Nn = P.count < 1 ? 1 : P.count;
-          if (P.smix == 0) {                                     // frontmost band across ALL sources wins
-            float bestg = 2.0f;
-            for (uint8_t si = 0; si < srcNum(P); si++) {
-              float d = srcDist(P, si, x, y);
-              if (d < 0) continue;                               // behind a linear marker plane
-              for (uint8_t k = 0; k < Nn; k++) {
-                float tk = k * iv; if (elapsed < tk) continue;
-                float g = (v * (elapsed - tk) - d) / w;
-                if (g >= 0 && g <= 1.0f && g < bestg) bestg = g;
-              }
-            }
-            if (bestg > 1.0f) return 0;
-            return gradN(P, bestg);                              // gradient across the band (black→colour→black)
+          F.invW = 1.0f / w;
+          uint8_t Nn = P.count < 1 ? 1 : P.count; if (Nn > ZV_MAXPULSE) Nn = ZV_MAXPULSE;
+          for (uint8_t k = 0; k < Nn; k++) {                     // bands not launched yet are skipped
+            float tk = k * iv; if (elapsed < tk) break;
+            F.head[F.nk++] = v * (elapsed - tk);
           }
-          // blended: each source contributes its own frontmost band, colours combined
-          uint32_t acc = 0; bool any = false;
-          for (uint8_t si = 0; si < srcNum(P); si++) {
-            float d = srcDist(P, si, x, y);
-            if (d < 0) continue;
-            float bestg = 2.0f;
-            for (uint8_t k = 0; k < Nn; k++) {
-              float tk = k * iv; if (elapsed < tk) continue;
-              float g = (v * (elapsed - tk) - d) / w;
-              if (g >= 0 && g <= 1.0f && g < bestg) bestg = g;
+          F.nsrc = srcNum(P);
+          for (uint8_t si = 0; si < F.nsrc; si++) {
+            uint8_t mode; uint8_t orig; float angDeg;
+            if (P.srcCount) { mode = P.srcMode[si]; orig = P.srcOrig[si]; angDeg = P.srcAng[si]; }
+            else            { mode = P.pmode;       orig = P.origin;      angDeg = P.angle; }   // legacy single source
+            if (mode == 1) {
+              float ox = _cx, oy = _cy;                          // default: auto centre (tube centroid)
+              if (orig != 255) pointPosition(orig, ox, oy);      // else: named marker, if it still exists
+              F.smode[si] = 1; F.sx[si] = ox; F.sy[si] = oy;
+              continue;
             }
-            if (bestg > 1.0f) continue;
-            uint32_t c = gradN(P, bestg);
-            acc = any ? mixCol(P.smix, acc, c) : c; any = true;
+            float a = angDeg * 3.14159265f / 180.0f;
+            F.sax[si] = cosf(a); F.say[si] = sinf(a);
+            float mx, my;
+            if (orig != 255 && pointPosition(orig, mx, my)) { F.smode[si] = 2; F.sx[si] = mx; F.sy[si] = my; }
+            else { F.smode[si] = 0; F.su0[si] = (F.sax[si] < 0 ? F.sax[si] : 0) + (F.say[si] < 0 ? F.say[si] : 0); }   // near field edge
           }
-          return any ? acc : 0;
+          return;
         }
-        case 1: { // Tube-Strobe — frequency follows the keyframes; cpar colours across the tubes
+        case 1: { // Tube-Strobe: one colour per tube and frame
           KF defk[2]; const KF* K = P.keys; uint8_t n = P.kcount;
           if (!n) { defk[0].t = 0; defk[0].v = 2; defk[1].t = 2; defk[1].v = 10; K = defk; n = 2; }   // = web DEF_HZKEYS
-          if (sampleKV(K, n, elapsed) < 0.05f) return 0;               // 0 Hz = silence, not a frozen flash
+          F.uniform = true;                                            // dark unless a flash is on
+          if (sampleKV(K, n, elapsed) < 0.05f) return;                 // 0 Hz = silence, not a frozen flash
           float phase = curvePhase(K, n, elapsed);
-          long flash = (long)floorf(phase);
-          float inFrac = phase - (float)flash;
+          F.flash = (long)floorf(phase);
+          float inFrac = phase - (float)F.flash;
           float duty = P.duty / 100.0f; if (duty < 0.02f) duty = 0.02f; if (duty > 0.98f) duty = 0.98f;
-          if (inFrac >= duty) return 0;                                // off part of the flash cycle
-          float env = 1.0f;
+          if (inFrac >= duty) return;                                  // off part of the flash cycle
+          F.env = 1.0f;
           if (P.sfade) {                                               // per-flash fade envelope + easing
             float ft = inFrac / duty;
             float e = (P.sfade == 1) ? (1.0f - ft) : (P.sfade == 2) ? ft : (ft < 0.5f ? ft * 2.0f : 2.0f - ft * 2.0f);
-            env = easeV(P.sease, e);
+            F.env = easeV(P.sease, e);
           }
-          uint32_t c = strobeColor(P, tubeIdx, tubeTotal, flash);
-          return env >= 1.0f ? c : scaleCol(c, env);
+          F.uniform = false; F.perTube = true;
+          return;
         }
-        case 4: { // Noise / Drift — hash noise field through the gradient; drift pos accumulates
-          return gradN(P, noiseVal(P, x, y));
+        case 4: { // Noise / Drift
+          float ang = P.nang * 3.14159265f / 180.0f;
+          F.nc = cosf(ang); F.ns = sinf(ang);
+          F.nscale = P.nscale < 1 ? 1 : P.nscale;
+          return;
         }
-        case 5: { // Fuellen — gradient below the surface, dark above; level from keyframes
-          float lvl = fillLevel(P, elapsed);
+        case 5: { // Fuellen
+          F.lvl = fillLevel(P, elapsed);
           float a = P.fang * 3.14159265f / 180.0f;
-          float c = cosf(a), sn = sinf(a);
-          float span = fabsf(c) + fabsf(sn); if (span < 0.001f) span = 1;
-          float lo = (c < 0 ? c : 0) + (sn < 0 ? sn : 0);
-          float u = (x * c + y * sn - lo) / span;          // 0 = bottom, 1 = far end
-          float perp = (x * -sn + y * c + 1.0f) / span;    // along the surface -> wave phase
-          float h = lvl;
-          if (P.fmode == 1) h += waveOffset(P, elapsed, perp, lvl);
-          if (h <= 0) return 0;
-          float k = (h - u) / 0.02f;                       // soft edge right at the surface
-          if (k <= 0) return 0;
-          if (k > 1) k = 1;
-          float g = u / (h > 1e-4f ? h : 1e-4f);           // gradient spans bottom -> surface
-          if (g < 0) g = 0; if (g > 1) g = 1;
-          return scaleCol(gradN(P, g), k);
+          F.fc = cosf(a); F.fs = sinf(a);
+          F.fspan = fabsf(F.fc) + fabsf(F.fs); if (F.fspan < 0.001f) F.fspan = 1;
+          F.flo = (F.fc < 0 ? F.fc : 0) + (F.fs < 0 ? F.fs : 0);
+          F.wk = 0;
+          if (P.fmode == 1) prepWave(P, elapsed, F.lvl, F);
+          return;
         }
-        case 2: { // Schwarm — non-cyclic pass: enters off-field, hard leading edge, tail = gradient
-          float N = chainTotal ? chainTotal : 1;
+        case 2: { // Schwarm
+          float N = strip.getLengthTotal(); if (N < 1) N = 1;
           float tl = (P.tail / 100.0f) * N; if (tl < 1) tl = 1;
           float span = N + 3 * tl + 1.0f;                  // exit margin = full windowed tail
           float phase = (P.speed / 100.0f) * 0.5f * N * elapsed;
           float pos = fmodf(phase, span); if (pos < 0) pos += span;
-          pos -= 1.0f;                                     // start off-field
-          float ci = P.dir ? (N - 1 - chainIdx) : chainIdx;
-          float d = pos - ci;
-          if (d < 0) return 0;                             // nothing ahead of the head
-          float w = 1.0f - d / (3 * tl);                   // window: tail ends cleanly at 3·tl
-          if (w <= 0) return 0;
-          float g = d / tl; if (g > 1) g = 1;
-          return scaleCol(gradN(P, g), expf(-d / tl) * w);
+          F.swN = N; F.swTl = tl; F.swPos = pos - 1.0f;    // start off-field
+          return;
         }
-        default: { // Solid / Atmen — colour and breathe rate follow the keyframes over time
+        default: { // Solid / Atmen: one colour for the whole field
           KF defk[2]; const KF* K = P.keys; uint8_t n = P.kcount;
           if (!n) { defk[0].t = 0; defk[0].v = 0.3f; defk[0].c = 0x27C5FF; defk[1].t = 4; defk[1].v = 0.3f; defk[1].c = 0xFF5A3C; K = defk; n = 2; }   // = web DEF_SOLIDKEYS
           uint32_t col = sampleKC(K, n, elapsed);
@@ -548,8 +573,67 @@ class Lichtnest : public Usermod {
             else { float f = c - floorf(c); float tri = f < 0.5f ? f * 2.0f : 2.0f - f * 2.0f; w = easeV(P.bease - 1, tri); }
             b = 0.25f + 0.75f * w;
           }
-          return b >= 1.0f ? col : scaleCol(col, b);
+          F.uniform = true; F.ucol = b >= 1.0f ? col : scaleCol(col, b);
+          return;
         }
+      }
+    }
+
+    // colour of one tube for a perTube frame (strobe)
+    uint32_t tubeColor(const FxParams& P, const FxFrame& F, uint8_t tubeIdx, uint8_t tubeTotal) {
+      uint32_t c = strobeColor(P, tubeIdx, tubeTotal, F.flash);
+      return F.env >= 1.0f ? c : scaleCol(c, F.env);
+    }
+
+    // per-LED part of a prepared frame (not for uniform / perTube frames)
+    uint32_t pixelColor(const FxParams& P, const FxFrame& F, float x, float y, uint16_t chainIdx) const {
+      switch (F.fx) {
+        case 0: { // Impuls — `count` colour bands per SOURCE, launched every `interval`s, out of black
+          uint32_t acc = 0; bool any = false;
+          float bestAll = 2.0f;
+          for (uint8_t si = 0; si < F.nsrc; si++) {
+            float d;
+            if (F.smode[si] == 1)      { float dx = x - F.sx[si], dy = y - F.sy[si]; d = sqrtf(dx * dx + dy * dy); }
+            else if (F.smode[si] == 2) { d = (x - F.sx[si]) * F.sax[si] + (y - F.sy[si]) * F.say[si]; if (d < 0) continue; }   // behind a marker plane
+            else                       d = x * F.sax[si] + y * F.say[si] - F.su0[si];
+            float bestg = 2.0f;
+            for (uint8_t k = 0; k < F.nk; k++) {
+              float g = (F.head[k] - d) * F.invW;
+              if (g >= 0 && g <= 1.0f && g < bestg) bestg = g;
+            }
+            if (P.smix == 0) { if (bestg < bestAll) bestAll = bestg; continue; }   // frontmost band across ALL sources wins
+            if (bestg > 1.0f) continue;                          // blended: each source adds its own frontmost band
+            uint32_t c = gradN(P, F, bestg);
+            acc = any ? mixCol(P.smix, acc, c) : c; any = true;
+          }
+          if (P.smix == 0) return bestAll > 1.0f ? 0 : gradN(P, F, bestAll);
+          return any ? acc : 0;
+        }
+        case 4: { // Noise / Drift — hash noise field through the gradient; drift pos accumulates
+          return gradN(P, F, noiseVal(P, F, x, y));
+        }
+        case 5: { // Fuellen — gradient below the surface, dark above; level from keyframes
+          float u = (x * F.fc + y * F.fs - F.flo) / F.fspan;          // 0 = bottom, 1 = far end
+          float h = F.lvl;
+          if (F.wk != 0) h += waveOffset(F, (x * -F.fs + y * F.fc + 1.0f) / F.fspan);   // along the surface -> wave phase
+          if (h <= 0) return 0;
+          float k = (h - u) / 0.02f;                       // soft edge right at the surface
+          if (k <= 0) return 0;
+          if (k > 1) k = 1;
+          float g = u / (h > 1e-4f ? h : 1e-4f);           // gradient spans bottom -> surface
+          if (g < 0) g = 0; if (g > 1) g = 1;
+          return scaleCol(gradN(P, F, g), k);
+        }
+        case 2: { // Schwarm — non-cyclic pass: enters off-field, hard leading edge, tail = gradient
+          float ci = P.dir ? (F.swN - 1 - chainIdx) : chainIdx;
+          float d = F.swPos - ci;
+          if (d < 0) return 0;                             // nothing ahead of the head
+          float w = 1.0f - d / (3 * F.swTl);               // window: tail ends cleanly at 3·tl
+          if (w <= 0) return 0;
+          float g = d / F.swTl; if (g > 1) g = 1;
+          return scaleCol(gradN(P, F, g), expf(-d / F.swTl) * w);
+        }
+        default: return F.ucol;
       }
     }
 
@@ -699,25 +783,56 @@ class Lichtnest : public Usermod {
         if (!strip.getSegment(geoId[g]).isActive()) continue;
         vg[vCount++] = g;
       }
+      uint32_t t0 = micros(), px = 0;
+      if (mode == 1) { pA = nullptr; pB = nullptr; }
+      if (mode != 3) pB = nullptr;
+      if (pA) prepFrame(*pA, elA, _frameA);
+      if (pB) prepFrame(*pB, elB, _frameB);
       for (uint8_t k = 0; k < vCount; k++) {
         uint8_t g = vg[k];
         Segment& seg = strip.getSegment(geoId[g]);
         uint16_t start = seg.start, stop = seg.stop;
         uint16_t len = (stop > start) ? (stop - start) : 1;
+        px += stop > start ? stop - start : 0;
+        // decks whose colour is the same for the whole tube are resolved once per tube
+        bool aConst = !pA || _frameA.uniform || _frameA.perTube;
+        bool bConst = !pB || _frameB.uniform || _frameB.perTube;
+        uint32_t ca = !pA ? 0 : _frameA.uniform ? _frameA.ucol : _frameA.perTube ? tubeColor(*pA, _frameA, k, vCount) : 0;
+        uint32_t cb = !pB ? 0 : _frameB.uniform ? _frameB.ucol : _frameB.perTube ? tubeColor(*pB, _frameB, k, vCount) : 0;
+        if (aConst && bConst) {
+          uint32_t c = mixDecks(mode, ca, cb, mixE);
+          for (uint16_t i = start; i < stop; i++) strip.setPixelColor(i, c);
+          continue;
+        }
+        float dx = gx2[g] - gx1[g], dy = gy2[g] - gy1[g];
+        float inv = (len > 1) ? 1.0f / (len - 1) : 0.0f;
         for (uint16_t i = start; i < stop; i++) {
-          float f = (len > 1) ? (float)(i - start) / (len - 1) : 0.0f;
-          float x = lerpf(gx1[g], gx2[g], f), y = lerpf(gy1[g], gy2[g], f);
-          uint32_t c = 0;
-          if (mode == 0)      c = pA ? computeColor(*pA, elA, x, y, i, chainTotal, k, vCount) : 0;
-          else if (mode == 2) c = pA ? scaleCol(computeColor(*pA, elA, x, y, i, chainTotal, k, vCount), 1.0f - mixE) : 0;
-          else if (mode == 3) {
-            uint32_t a = pA ? computeColor(*pA, elA, x, y, i, chainTotal, k, vCount) : 0;
-            uint32_t b = pB ? computeColor(*pB, elB, x, y, i, chainTotal, k, vCount) : 0;
-            c = blendCol(a, b, mixE);
-          }
-          strip.setPixelColor(i, c);
+          float f = (i - start) * inv;
+          float x = gx1[g] + dx * f, y = gy1[g] + dy * f;
+          uint32_t a = aConst ? ca : pixelColor(*pA, _frameA, x, y, i);
+          uint32_t b = bConst ? cb : pixelColor(*pB, _frameB, x, y, i);
+          strip.setPixelColor(i, mixDecks(mode, a, b, mixE));
         }
       }
+      trackRenderTime(micros() - t0, px, nowMs);
+    }
+
+    // mode 0: deck A · 1: black · 2: fade-out of A · 3: crossfade A -> B
+    static inline uint32_t mixDecks(uint8_t mode, uint32_t a, uint32_t b, float mixE) {
+      if (mode == 0) return a;
+      if (mode == 2) return scaleCol(a, 1.0f - mixE);
+      if (mode == 3) return blendCol(a, b, mixE);
+      return 0;
+    }
+
+    // rolling 2 s window: average / peak overlay time per frame and overlay frames per second
+    void trackRenderTime(uint32_t us, uint32_t px, uint32_t nowMs) {
+      _rtSumUs += us; _rtFrames++; _rtPx = px;
+      if (us > _rtMaxUs) _rtMaxUs = us;
+      uint32_t win = nowMs - _rtWindowMs;
+      if (win < 2000) return;
+      _rtAvgUs = (float)_rtSumUs / _rtFrames; _rtPeakUs = _rtMaxUs; _rtFps = _rtFrames * 1000.0f / win;
+      _rtSumUs = 0; _rtMaxUs = 0; _rtFrames = 0; _rtWindowMs = nowMs;
     }
 
     void addToJsonInfo(JsonObject& root) override {
@@ -734,6 +849,9 @@ class Lichtnest : public Usermod {
         uint8_t pins[5] = {255, 255, 255, 255, 255};
         if (bus->getPins(pins) > 0 && pins[0] != 255) p["gpio"] = pins[0];
       }
+      JsonObject rt = root.createNestedObject(F("rt"));   // render timing of our overlay
+      rt["avg"] = (uint32_t)_rtAvgUs; rt["peak"] = (uint32_t)_rtPeakUs; rt["fps"] = (uint32_t)(_rtFps + 0.5f); rt["px"] = _rtPx;
+      rt["usPx"] = _rtPx ? _rtAvgUs / _rtPx : 0;
       // every address the device can be reached at (WiFi and Ethernet may run side by side)
       JsonObject net = root.createNestedObject(F("net"));
       if (WiFi.status() == WL_CONNECTED) net["wifi"] = WiFi.localIP().toString();
