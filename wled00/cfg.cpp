@@ -135,6 +135,22 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
 #ifdef WLED_USE_ETHERNET
   JsonObject ethernet = doc[F("eth")];
   CJSON(ethernetType, ethernet["type"]);
+  CJSON(ethKeepWiFi, ethernet[F("wifi")]);
+  JsonArray ethIP = ethernet["ip"];
+  if (!ethIP.isNull()) {
+    JsonArray ethGW = ethernet["gw"];
+    JsonArray ethSN = ethernet["sn"];
+    for (size_t i = 0; i < 4; i++) {
+      CJSON(ethStaticIP[i], ethIP[i]);
+      CJSON(ethStaticGW[i], ethGW[i]);
+      CJSON(ethStaticSN[i], ethSN[i]);
+    }
+  } else if (fromFS) {
+    // older config without own Ethernet IP: keep the previous behaviour (Ethernet shares the WiFi static IP)
+    ethStaticIP = multiWiFi[0].staticIP;
+    ethStaticGW = multiWiFi[0].staticGW;
+    ethStaticSN = multiWiFi[0].staticSN;
+  }
   // NOTE: Ethernet configuration takes priority over other use of pins
   initEthernet();
 #endif
@@ -605,6 +621,11 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
   CJSON(e131Priority, if_live_dmx[F("e131prio")]);
   if (e131Priority > 200) e131Priority = 200;
   CJSON(DMXMode, if_live_dmx["mode"]);
+  CJSON(e131PerPort, if_live_dmx[F("pport")]);
+  JsonArray portUni = if_live_dmx[F("puni")];
+  if (!portUni.isNull()) {
+    for (size_t i = 0; i < WLED_MAX_BUSSES; i++) e131PortUniverse[i] = portUni[i] | 0;
+  }
 
   tdd = if_live[F("timeout")] | -1;
   if (tdd >= 0) realtimeTimeoutMs = tdd * 100;
@@ -916,6 +937,15 @@ void serializeConfig(JsonObject root) {
 #if defined(ARDUINO_ARCH_ESP32) && defined(WLED_USE_ETHERNET)
   JsonObject ethernet = root.createNestedObject("eth");
   ethernet["type"] = ethernetType;
+  ethernet[F("wifi")] = ethKeepWiFi;
+  JsonArray eth_ip = ethernet.createNestedArray("ip");
+  JsonArray eth_gw = ethernet.createNestedArray("gw");
+  JsonArray eth_sn = ethernet.createNestedArray("sn");
+  for (size_t i = 0; i < 4; i++) {
+    eth_ip.add(ethStaticIP[i]);
+    eth_gw.add(ethStaticGW[i]);
+    eth_sn.add(ethStaticSN[i]);
+  }
   if (ethernetType != WLED_ETH_NONE && ethernetType < WLED_NUM_ETH_TYPES) {
     JsonArray pins = ethernet.createNestedArray("pin");
     for (unsigned p=0; p<WLED_ETH_RSVD_PINS_COUNT; p++) pins.add(esp32_nonconfigurable_ethernet_pins[p].pin);
@@ -1136,6 +1166,11 @@ void serializeConfig(JsonObject root) {
   if_live_dmx[F("addr")] = DMXAddress;
   if_live_dmx[F("dss")] = DMXSegmentSpacing;
   if_live_dmx["mode"] = DMXMode;
+  if_live_dmx[F("pport")] = e131PerPort;
+  JsonArray portUni = if_live_dmx.createNestedArray(F("puni"));
+  size_t portUniLen = BusManager::getNumBusses();
+  for (size_t i = portUniLen; i < WLED_MAX_BUSSES; i++) if (e131PortUniverse[i]) portUniLen = i + 1; // keep values of ports not (yet) created
+  for (size_t i = 0; i < portUniLen && i < WLED_MAX_BUSSES; i++) portUni.add(e131PortUniverse[i]);
   #ifdef WLED_ENABLE_DMX_INPUT
     if_live_dmx[F("inputRxPin")] = dmxInputTransmitPin;
     if_live_dmx[F("inputTxPin")] = dmxInputReceivePin;

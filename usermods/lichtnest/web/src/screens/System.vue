@@ -7,6 +7,7 @@ import {
   DEFAULT_PORT_MAX,
 } from '../wled.js'
 import NumStepper from '../components/NumStepper.vue'
+import IpInput from '../components/IpInput.vue'
 import { confirmDialog } from '../confirm.js'
 
 // WLED groups protocol-identical chips under one type id (e.g. WS2812B/13/15 = 22,
@@ -51,6 +52,8 @@ onMounted(async () => {
   if (budgetSum) lastMax = budgetSum
   else if (cfg.data?.hw?.led?.maxpwr) lastMax = cfg.data.hw.led.maxpwr
   busStructureSnapshot = busStructureKey(cfg.data?.hw?.led?.ins)
+  rebootSnapshot = rebootKey()
+  savedEthType.value = cfg.data?.eth?.type | 0
 })
 
 const c = computed(() => cfg.data)
@@ -178,6 +181,7 @@ function addPort () {
   // empty bus keeps len 1; capacity guard lives in plan.portMax
   arr.push({ start, len: 1, pin: [gpio], order: DEF_ORDER, type: DEF_TYPE, skip: 0, ledma: DEF_LEDMA, maxpwr: ablOn.value ? Math.round(lastMax / (arr.length + 1)) : 0, rev: false, ref: false })
   setPortMax(i, DEFAULT_PORT_MAX)
+  if (i > 0) setPortUni(i, portUni(i - 1) + uniSpan(arr[i - 1]))   // Art-Net: continue after the previous port
 }
 async function removePort (i) {
   const arr = c.value.hw.led.ins
@@ -191,6 +195,11 @@ async function removePort (i) {
   msg.value = 'Port wird entfernt …'
   // Avoid FS uploads during bus re-init — concurrent LittleFS writes hang the ESP.
   cancelSavePlan()
+  // Art-Net universes are indexed by port too — store the shifted list before the reboot
+  if (Array.isArray(dmx.value.puni) && dmx.value.puni.length > i) {
+    dmx.value.puni.splice(i, 1)
+    await saveCfg({ if: { live: { dmx: { puni: dmx.value.puni } } } })
+  }
   arr.splice(i, 1)
   reindexPortMaxAfterRemove(i)
   const lens = applyTubeLensToIns(arr)
@@ -223,12 +232,125 @@ async function removePort (i) {
   }
 }
 
+// --- IP helpers (WiFi + Ethernet) ------------------------------------------
+const isZeroIp = (a) => !a || a.every((n) => !n)
+const parseIp = (s) => { const p = String(s || '').split('.').map((n) => parseInt(n, 10) || 0).slice(0, 4); while (p.length < 4) p.push(0); return p }
+// switching DHCP off pre-fills the address the interface has right now, so the fields are never 0.0.0.0
+function prefillStatic (o, liveIp) {
+  const p = parseIp(liveIp)
+  o.ip = p[0] ? p : [192, 168, 1, 50]
+  if (isZeroIp(o.gw)) o.gw = [o.ip[0], o.ip[1], o.ip[2], 1]
+  if (isZeroIp(o.sn)) o.sn = [255, 255, 255, 0]
+}
+const sameSubnet = (a, b, sn) => a.every((n, k) => (n & sn[k]) === (b[k] & sn[k]))
+const netWifi = computed(() => wled.info?.net?.wifi || '')
+const netEth = computed(() => wled.info?.net?.eth || '')
+
 const wifiDhcp = computed({
-  get: () => { const ip = c.value?.nw?.ins?.[0]?.ip; return !ip || (ip[0] === 0 && ip[1] === 0 && ip[2] === 0 && ip[3] === 0) },
-  set: (v) => { if (v) c.value.nw.ins[0].ip = [0, 0, 0, 0] },
+  get: () => isZeroIp(c.value?.nw?.ins?.[0]?.ip),
+  set: (v) => { const w = c.value.nw.ins[0]; if (v) w.ip = [0, 0, 0, 0]; else prefillStatic(w, netWifi.value) },
 })
-const ipStr = (a) => (a || [0, 0, 0, 0]).join('.')
-function setIp (key, val) { const p = val.split('.').map((n) => parseInt(n, 10) || 0).slice(0, 4); while (p.length < 4) p.push(0); c.value.nw.ins[0][key] = p }
+
+// --- Ethernet: own static IP, optionally WiFi kept up alongside ---------------
+// cfg.eth only exists on Ethernet builds
+const eth = computed(() => c.value?.eth || null)
+// board/PHY presets as in WLED's settings_wifi.htm (value = ethernetType)
+const ETH_TYPES = [
+  { v: 0, l: 'Kein Ethernet' },
+  { v: 13, l: 'Gledopto' },
+  { v: 2, l: 'ESP32-POE (Olimex)' },
+  { v: 11, l: 'ESP32-POE-WROVER' },
+  { v: 1, l: 'WT32-ETH01' },
+  { v: 6, l: 'IoTorero/ESP32Deux/RGB2Go' },
+  { v: 9, l: 'ABC! WLED V43 & kompatibel' },
+  { v: 7, l: 'KIT-VE' },
+  { v: 12, l: 'LILYGO T-POE Pro' },
+  { v: 4, l: 'QuinLED Uno/Quad' },
+  { v: 8, l: 'QuinLED Octa & T-ETH-POE' },
+  { v: 14, l: 'QuinLED v4 Uno/Quad' },
+  { v: 15, l: 'QuinLED v4 Octa' },
+  { v: 10, l: 'Serg74-ETH32' },
+  { v: 5, l: 'TwilightLord-ESP32' },
+  { v: 3, l: 'WESP32' },
+]
+const ethOn = computed(() => !!eth.value?.type)
+const savedEthType = ref(0)   // type stored on the device -> warn only when it is being changed
+const ethDhcp = computed({
+  get: () => isZeroIp(eth.value?.ip),
+  set: (v) => { if (v) eth.value.ip = [0, 0, 0, 0]; else prefillStatic(eth.value, netEth.value) },
+})
+// both interfaces in one subnet -> the ESP can't tell which way to answer
+const subnetClash = computed(() => {
+  if (!eth.value?.wifi) return false
+  const sn = isZeroIp(eth.value.sn) ? [255, 255, 255, 0] : eth.value.sn
+  const w = netWifi.value ? parseIp(netWifi.value) : (!wifiDhcp.value ? c.value.nw.ins[0].ip : null)
+  const e = netEth.value ? parseIp(netEth.value) : (!ethDhcp.value ? eth.value.ip : null)
+  return !!(w && e) && sameSubnet(w, e, sn)
+})
+
+// --- Art-Net input ------------------------------------------------------------
+// WLED listens on one port for E1.31 or Art-Net (6454) and detects the protocol per
+// packet. Per-port mode: every output starts at its own universe, 170 RGB / 128 RGBW
+// LEDs per universe, each universe starting at channel 1.
+const ARTNET_PORT = 6454
+const DMX_RGB = 4
+const DMX_RGBW = 6
+const live = computed(() => {
+  if (!c.value.if) c.value.if = {}
+  if (!c.value.if.live) c.value.if.live = {}
+  if (!c.value.if.live.dmx) c.value.if.live.dmx = {}
+  return c.value.if.live
+})
+const dmx = computed(() => live.value.dmx)
+const artOn = computed({
+  get: () => live.value.port === ARTNET_PORT && [DMX_RGB, DMX_RGBW].includes(dmx.value.mode),
+  set: (v) => {
+    if (!v) { dmx.value.mode = 0; return }
+    live.value.port = ARTNET_PORT
+    live.value.mc = false              // unicast: multicast would only listen on the group address
+    if (dmx.value.mode !== DMX_RGBW) dmx.value.mode = DMX_RGB
+    if (perPort.value && !(dmx.value.puni || []).some((u) => u > 0)) autoUniverses()
+  },
+})
+const artRgbw = computed({ get: () => dmx.value.mode === DMX_RGBW, set: (v) => { dmx.value.mode = v ? DMX_RGBW : DMX_RGB } })
+const ledsPerUni = computed(() => (artRgbw.value ? 128 : 170))
+const perPort = computed({
+  get: () => !!dmx.value.pport,
+  set: (v) => { dmx.value.pport = v; if (v && !(dmx.value.puni || []).some((u) => u > 0)) autoUniverses() },
+})
+const artTimeout = computed({ get: () => Math.round((live.value.timeout ?? 25) / 10), set: (v) => { live.value.timeout = v * 10 } })
+const startUni = computed({ get: () => dmx.value.uni ?? 1, set: (v) => { dmx.value.uni = v } })
+function portUni (i) { return dmx.value.puni?.[i] ?? 0 }
+function setPortUni (i, v) {
+  const a = [...(dmx.value.puni || [])]
+  while (a.length <= i) a.push(0)
+  a[i] = v
+  dmx.value.puni = a
+}
+const uniSpan = (b) => Math.max(1, Math.ceil((b.len || 0) / ledsPerUni.value))
+const uniRange = (b, i) => { const s = portUni(i), n = uniSpan(b); return n > 1 ? `${s}–${s + n - 1}` : `${s}` }
+// consecutive universes: each port starts right after the previous one
+function autoUniverses () {
+  let u = portUni(0)
+  ins.value.forEach((b, i) => { setPortUni(i, u); u += uniSpan(b) })
+}
+const uniOverlaps = computed(() => {
+  const r = ins.value.map((b, i) => ({ i, s: portUni(i), e: portUni(i) + uniSpan(b) }))
+  const out = []
+  for (let a = 0; a < r.length; a++) for (let b = a + 1; b < r.length; b++) {
+    if (r[a].s < r[b].e && r[b].s < r[a].e) out.push(`${r[a].i + 1} & ${r[b].i + 1}`)
+  }
+  return out
+})
+// universes a single start universe spans over all ports
+const totalUniSpan = computed(() => Math.max(1, Math.ceil(totalLen.value / ledsPerUni.value)))
+
+// settings that only take effect after a reboot (listener port, IP config, WiFi-with-Ethernet)
+const rebootKey = () => JSON.stringify([
+  c.value?.eth?.type, c.value?.eth?.ip, c.value?.eth?.gw, c.value?.eth?.sn, c.value?.eth?.wifi,
+  c.value?.if?.live?.port, c.value?.if?.live?.mc,
+])
+let rebootSnapshot = ''
 
 async function save () {
   if (!c.value) return
@@ -276,10 +398,15 @@ async function save () {
         en: !!ntp.value.en, host: ntp.value.host || '0.wled.pool.ntp.org',
         tz: ntp.value.tz | 0, offset: ntp.value.offset | 0, ampm: !!ntp.value.ampm,
       },
+      live: {
+        port: live.value.port, mc: !!live.value.mc, timeout: live.value.timeout ?? 25,
+        dmx: { mode: dmx.value.mode ?? DMX_RGB, uni: startUni.value, pport: !!dmx.value.pport, puni: ins.value.map((_, i) => portUni(i)) },
+      },
     },
     // note: def.ps (boot preset) is left untouched here — it points at the
     // Lichtnest tube-layout preset so the tubes survive a reboot.
   }
+  if (eth.value) partial.eth = { type: eth.value.type | 0, wifi:!!eth.value.wifi, ip: eth.value.ip, gw: eth.value.gw, sn: eth.value.sn }
   if (wifiPass.value) partial.nw.ins[0].psk = wifiPass.value
   if (apPass.value) partial.ap.psk = apPass.value
   const ok = await saveCfg(partial)
@@ -287,6 +414,10 @@ async function save () {
   busy.value = false
   msg.value = ok ? 'Gespeichert ✓' : 'Fehler beim Speichern'
   if (ok) { wifiPass.value = ''; apPass.value = ''; setTimeout(() => { msg.value = '' }, 2500) }
+  if (ok && rebootKey() !== rebootSnapshot) {
+    rebootSnapshot = rebootKey()
+    if (await confirmDialog({ title: 'Jetzt neu starten?', body: 'Netzwerk- und Art-Net-Port-Einstellungen wirken erst nach einem Neustart. Die neue Adresse steht dann unter „Netzwerk".', confirmLabel: 'Neu starten', danger: false })) await saveCfg({ rb: true })
+  }
 }
 async function reboot () { if (await confirmDialog({ title: 'Controller neu starten?', body: 'Die LEDs gehen für ein paar Sekunden aus.', confirmLabel: 'Neu starten', danger: false })) await saveCfg({ rb: true }) }
 </script>
@@ -402,9 +533,67 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
         Port hinzufügen
       </button>
 
+      <!-- ART-NET -->
+      <div class="seclbl mono">ART-NET · EMPFANG</div>
+      <div class="panel pad">
+        <div class="row" :class="{ brd: artOn }"><span class="lbl">Art-Net empfangen<small>Unicast an Port {{ ARTNET_PORT }}</small></span>
+          <button class="sw" :class="{ on: artOn }" @click="artOn = !artOn"><span /></button></div>
+        <template v-if="artOn">
+          <div class="row brd"><span class="lbl">Senden an<small>IP-Adresse(n) dieses Controllers</small></span>
+            <span class="mono ips"><span v-if="netEth">{{ netEth }} <span class="muted">ETH</span></span><span v-if="netWifi">{{ netWifi }} <span class="muted">WLAN</span></span><span v-if="!netEth && !netWifi">{{ wled.info.ip || '–' }}</span></span></div>
+          <div class="row brd"><span class="lbl">Kanäle pro LED<small>{{ ledsPerUni }} LEDs je Universe</small></span>
+            <div class="seg"><button :class="{ on: !artRgbw }" @click="artRgbw = false">RGB</button><button :class="{ on: artRgbw }" @click="artRgbw = true">RGBW</button></div></div>
+          <div class="row brd"><span class="lbl">Timeout<small>danach laufen wieder die eigenen Effekte</small></span>
+            <NumStepper v-model="artTimeout" :min="1" :max="600" unit="s" /></div>
+          <div class="row" :class="{ brd: !perPort }"><span class="lbl">Start-Universe pro Port<small>jeder Port beginnt bei Kanal 1</small></span>
+            <button class="sw" :class="{ on: perPort }" @click="perPort = !perPort"><span /></button></div>
+          <template v-if="perPort">
+            <div v-for="(b, i) in ins" :key="'u' + i" class="row brd">
+              <span class="lbl">Port {{ i + 1 }}<small>{{ b.len || 0 }} LEDs · Universe {{ uniRange(b, i) }}</small></span>
+              <NumStepper :modelValue="portUni(i)" @update:modelValue="(v) => setPortUni(i, v)" :min="0" :max="32767" />
+            </div>
+            <button class="tbtn" @click="autoUniverses()">Fortlaufend ab Port 1 verteilen</button>
+            <div v-if="uniOverlaps.length" class="alert">Universes überschneiden sich (Port {{ uniOverlaps.join(', Port ') }}): diese Ports zeigen dieselben Daten.</div>
+          </template>
+          <template v-else>
+            <div class="row"><span class="lbl">Start-Universe<small>alle {{ totalLen }} LEDs fortlaufend · {{ totalUniSpan }} Universes</small></span>
+              <NumStepper v-model="startUni" :min="0" :max="32767" /></div>
+          </template>
+          <div class="hint mono">Solange Art-Net-Daten ankommen, übernimmt der Sender die LEDs. Universe-Werte wirken sofort nach „Speichern", Port-Wechsel nach Neustart. Nicht gleichzeitig über WLAN <b>und</b> Ethernet senden.</div>
+        </template>
+      </div>
+
+      <!-- ETHERNET -->
+      <template v-if="eth">
+        <div class="seclbl mono">ETHERNET</div>
+        <div class="panel pad">
+          <label class="flbl">Board / Ethernet-Chip</label>
+          <select class="sel" v-model.number="eth.type"><option v-for="t in ETH_TYPES" :key="t.v" :value="t.v">{{ t.l }}</option></select>
+          <div v-if="!ethOn" class="hint mono">Ethernet ist aus. Board wählen, speichern und neu starten, damit das Kabel erkannt wird.</div>
+          <div v-else-if="eth.type !== savedEthType" class="alert soft">Ein falscher Board-Typ kann den Controller beim Start hängen lassen — dann hilft nur noch USB. Nur das tatsächlich verbaute Board wählen.</div>
+          <template v-if="ethOn">
+            <div class="row brd"><span class="lbl">Aktuelle Adresse</span><span class="mono" :class="{ muted: !netEth }">{{ netEth || 'nicht verbunden' }}</span></div>
+            <div class="row brd"><span class="lbl">DHCP (automatisch)</span><button class="sw" :class="{ on: ethDhcp }" @click="ethDhcp = !ethDhcp"><span /></button></div>
+            <template v-if="!ethDhcp">
+              <div class="two">
+                <span><label class="flbl">IP</label><IpInput v-model="eth.ip" /></span>
+                <span><label class="flbl">Gateway</label><IpInput v-model="eth.gw" /></span>
+              </div>
+              <label class="flbl">Subnetz</label><IpInput v-model="eth.sn" />
+              <div v-if="isZeroIp(eth.gw)" class="alert soft">Ohne Gateway bleibt DHCP aktiv. Ohne Router einfach eine Adresse aus dem Subnetz eintragen (z. B. x.x.x.1).</div>
+            </template>
+            <div class="row"><span class="lbl">WLAN parallel halten<small>per WLAN und Ethernet erreichbar</small></span>
+              <button class="sw" :class="{ on: eth.wifi }" @click="eth.wifi = !eth.wifi"><span /></button></div>
+            <div v-if="subnetClash" class="alert">WLAN und Ethernet liegen im selben Subnetz — Antworten gehen dann über die falsche Schnittstelle. Verschiedene Netze verwenden (z. B. 192.168.1.x und 10.0.0.x).</div>
+            <div class="hint mono">Ohne „parallel" schaltet der Controller das WLAN ab, sobald das Kabel steckt. Wirkt nach Neustart.</div>
+          </template>
+        </div>
+      </template>
+
       <!-- WLAN -->
       <div class="seclbl mono">WLAN · VERBINDUNG</div>
       <div class="panel pad">
+        <div v-if="netWifi" class="row brd"><span class="lbl">Aktuelle Adresse</span><span class="mono">{{ netWifi }}</span></div>
         <label class="flbl">Netzwerk (SSID)</label>
         <input class="in mono" v-model="c.nw.ins[0].ssid" placeholder="WLAN-Name">
         <label class="flbl">Passwort</label>
@@ -412,10 +601,10 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
         <div class="row brd"><span class="lbl">DHCP (automatisch)</span><button class="sw" :class="{ on: wifiDhcp }" @click="wifiDhcp = !wifiDhcp"><span /></button></div>
         <template v-if="!wifiDhcp">
           <div class="two">
-            <span><label class="flbl">IP</label><input class="in mono" :value="ipStr(c.nw.ins[0].ip)" @change="setIp('ip', $event.target.value)"></span>
-            <span><label class="flbl">Gateway</label><input class="in mono" :value="ipStr(c.nw.ins[0].gw)" @change="setIp('gw', $event.target.value)"></span>
+            <span><label class="flbl">IP</label><IpInput v-model="c.nw.ins[0].ip" /></span>
+            <span><label class="flbl">Gateway</label><IpInput v-model="c.nw.ins[0].gw" /></span>
           </div>
-          <label class="flbl">Subnetz</label><input class="in mono" :value="ipStr(c.nw.ins[0].sn)" @change="setIp('sn', $event.target.value)">
+          <label class="flbl">Subnetz</label><IpInput v-model="c.nw.ins[0].sn" />
         </template>
       </div>
 
@@ -489,6 +678,11 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
 .stepper > span { flex: 1; min-width: 56px; display: flex; align-items: center; justify-content: center; font-size: 13px; color: var(--text); padding: 0 8px; }
 .apply { display: flex; align-items: center; gap: 8px; }
 .apply .mono { font-size: 14px; color: var(--text); }
+.ips { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 13px; color: var(--text); }
+.ips .muted { color: var(--muted); font-size: 11px; }
+.seg { display: flex; border-radius: 10px; overflow: hidden; border: 1px solid var(--line2); }
+.seg button { background: var(--inset); border: none; color: var(--muted2); font-size: 12px; font-weight: 700; padding: 8px 14px; cursor: pointer; }
+.seg button.on { background: var(--accent); color: #1a1206; }
 .mini { font-size: 11px; font-weight: 700; color: var(--accent); background: rgba(240,162,60,.14); border: 1px solid rgba(240,162,60,.4); border-radius: 8px; padding: 4px 8px; cursor: pointer; }
 
 .sw { width: 48px; height: 28px; flex: none; border-radius: 999px; background: #2a2e35; border: none; cursor: pointer; padding: 3px; display: flex; }

@@ -980,6 +980,16 @@ void WLED::handleConnection()
       DEBUG_PRINTLN(F("Access point disabled (connected)."));
     }
   }
+
+  #if defined(ARDUINO_ARCH_ESP32) && defined(WLED_USE_ETHERNET)
+  // WiFi alongside Ethernet: the reconnect logic above only runs while no interface is up, so retry the WiFi client here
+  static unsigned long lastWiFiRetry = 0;
+  if (ethKeepWiFi && wifiConfigured && Network.isEthernet() && (WiFi.getMode() & WIFI_MODE_STA) && WiFi.status() != WL_CONNECTED && now - lastWiFiRetry > 60000) {
+    lastWiFiRetry = now;
+    DEBUG_PRINTLN(F("WiFi alongside Ethernet not connected, retrying."));
+    WiFi.reconnect();
+  }
+  #endif
 }
 
 // If status LED pin is allocated for other uses, does nothing

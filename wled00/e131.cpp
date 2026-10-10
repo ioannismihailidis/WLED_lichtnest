@@ -7,7 +7,8 @@
 // forward declarations
 static void handleDDPPacket(e131_packet_t* p, size_t packetLen);
 static void handleArtnetPollReply(IPAddress ipAddress);
-static void prepareArtnetPollReply(ArtPollReply *reply);
+static void prepareArtnetPollReply(ArtPollReply *reply, IPAddress ipAddress);
+static void handleDMXDataPerPort(uint16_t uni, uint16_t dmxChannels, const uint8_t* e131_data, uint8_t mde);
 static void sendArtnetPollReply(ArtPollReply *reply, IPAddress ipAddress, uint16_t portAddress);
 
 
@@ -140,6 +141,12 @@ void handleE131Packet(e131_packet_t* p, IPAddress clientIP, byte protocol, size_
     dmx.update();
   }
   #endif
+
+  if (e131PerPort) {
+    realtimeIP = clientIP;
+    handleDMXDataPerPort(uni, dmxChannels, e131_data, mde);
+    return;
+  }
 
   // only listen for universes we're handling & allocated memory
   if (uni < e131Universe || uni >= (e131Universe + E131_MAX_UNIVERSE_COUNT)) return;
@@ -368,9 +375,70 @@ void handleDMXData(uint16_t uni, uint16_t dmxChannels, uint8_t* e131_data, uint8
   e131NewData = true;
 }
 
+// per-port mode: every LED output (bus) starts at its own universe and spans as many
+// consecutive universes as it needs (170 RGB / 128 RGBW LEDs each, starting at channel 1)
+static void handleDMXDataPerPort(uint16_t uni, uint16_t dmxChannels, const uint8_t* e131_data, uint8_t mde) {
+  if (DMXMode != DMX_MODE_MULTIPLE_RGB && DMXMode != DMX_MODE_MULTIPLE_RGBW) return;
+  const bool is4Chan = (DMXMode == DMX_MODE_MULTIPLE_RGBW);
+  const unsigned dmxChannelsPerLed = is4Chan ? 4 : 3;
+  const unsigned ledsPerUniverse = is4Chan ? MAX_4_CH_LEDS_PER_UNIVERSE : MAX_3_CH_LEDS_PER_UNIVERSE;
+  const unsigned ledsInPacket = min((unsigned)dmxChannels / dmxChannelsPerLed, ledsPerUniverse);
+  const uint8_t* data = e131_data + ((mde == REALTIME_MODE_ARTNET) ? 0 : 1); // E1.31 data starts after the start code
+  bool locked = false;
+
+  for (size_t b = 0; b < BusManager::getNumBusses() && b < WLED_MAX_BUSSES; b++) {
+    const Bus* bus = BusManager::getBus(b);
+    if (!bus || !bus->isOk() || uni < e131PortUniverse[b]) continue;
+    const unsigned len = bus->getLength();
+    const unsigned ledOffset = (uni - e131PortUniverse[b]) * ledsPerUniverse;
+    if (ledOffset >= len) continue;
+    if (!locked) {
+      realtimeLock(realtimeTimeoutMs, mde);
+      if (realtimeOverride) return;
+      locked = true;
+    }
+    const unsigned first = bus->getStart() + ledOffset;
+    const unsigned count = min(ledsInPacket, len - ledOffset);
+    const uint8_t* d = data;
+    for (unsigned i = 0; i < count; i++) {
+      strip.setRealtimePixelColor(first + i, RGBW32(d[0], d[1], d[2], is4Chan ? d[3] : 0));
+      d += dmxChannelsPerLed;
+    }
+  }
+  if (locked) e131NewData = true;
+}
+
+// universes the per-port mode listens on, as a sorted list without duplicates (for ArtPollReply)
+static size_t collectPortUniverses(uint16_t* list, size_t maxCount) {
+  const unsigned ledsPerUniverse = (DMXMode == DMX_MODE_MULTIPLE_RGBW) ? MAX_4_CH_LEDS_PER_UNIVERSE : MAX_3_CH_LEDS_PER_UNIVERSE;
+  size_t n = 0;
+  for (size_t b = 0; b < BusManager::getNumBusses() && b < WLED_MAX_BUSSES; b++) {
+    const Bus* bus = BusManager::getBus(b);
+    if (!bus || !bus->isOk()) continue;
+    const unsigned span = (bus->getLength() + ledsPerUniverse - 1) / ledsPerUniverse;
+    for (unsigned u = e131PortUniverse[b]; u < e131PortUniverse[b] + span && n < maxCount; u++) {
+      size_t pos = 0;
+      while (pos < n && list[pos] < u) pos++;
+      if (pos < n && list[pos] == u) continue;
+      for (size_t k = n; k > pos; k--) list[k] = list[k-1];
+      list[pos] = u;
+      n++;
+    }
+  }
+  return n;
+}
+
 static void handleArtnetPollReply(IPAddress ipAddress) {
   ArtPollReply artnetPollReply;
-  prepareArtnetPollReply(&artnetPollReply);
+  prepareArtnetPollReply(&artnetPollReply, ipAddress);
+
+  if (e131PerPort) {
+    if (DMXMode != DMX_MODE_MULTIPLE_RGB && DMXMode != DMX_MODE_MULTIPLE_RGBW) return;
+    uint16_t universes[E131_MAX_UNIVERSE_COUNT];
+    const size_t n = collectPortUniverses(universes, E131_MAX_UNIVERSE_COUNT);
+    for (size_t i = 0; i < n; i++) sendArtnetPollReply(&artnetPollReply, ipAddress, universes[i]);
+    return;
+  }
 
   unsigned startUniverse = e131Universe;
   unsigned endUniverse = e131Universe;
@@ -434,7 +502,7 @@ static void handleArtnetPollReply(IPAddress ipAddress) {
   #endif
 }
 
-static void prepareArtnetPollReply(ArtPollReply *reply) {
+static void prepareArtnetPollReply(ArtPollReply *reply, IPAddress ipAddress) {
   // Art-Net
   reply->reply_id[0] = 0x41;
   reply->reply_id[1] = 0x72;
@@ -448,6 +516,13 @@ static void prepareArtnetPollReply(ArtPollReply *reply) {
   reply->reply_opcode = ARTNET_OPCODE_OPPOLLREPLY;
 
   IPAddress localIP = Network.localIP();
+  #if defined(ARDUINO_ARCH_ESP32) && defined(WLED_USE_ETHERNET)
+  // WiFi running alongside Ethernet: report the address of the interface the poll came in on
+  if (Network.isEthernet() && WiFi.status() == WL_CONNECTED) {
+    const uint32_t mask = WiFi.subnetMask();
+    if (((uint32_t)WiFi.localIP() & mask) == ((uint32_t)ipAddress & mask)) localIP = WiFi.localIP();
+  }
+  #endif
   for (unsigned i = 0; i < 4; i++) {
     reply->reply_ip[i] = localIP[i];
   }

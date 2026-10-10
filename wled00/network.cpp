@@ -268,8 +268,8 @@ bool initEthernet()
   }
 
   // https://github.com/wled/WLED/issues/5247
-  if (multiWiFi[0].staticIP != (uint32_t)0x00000000 && multiWiFi[0].staticGW != (uint32_t)0x00000000) {
-    ETH.config(multiWiFi[0].staticIP, multiWiFi[0].staticGW, multiWiFi[0].staticSN, dnsAddress);
+  if (ethStaticIP != (uint32_t)0x00000000 && ethStaticGW != (uint32_t)0x00000000) {
+    ETH.config(ethStaticIP, ethStaticGW, ethStaticSN, dnsAddress);
   } else {
     ETH.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
   }
@@ -432,6 +432,10 @@ void WiFiEvent(WiFiEvent_t event)
       wasConnected = true;
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      #if defined(ARDUINO_ARCH_ESP32) && defined(WLED_USE_ETHERNET)
+      // WiFi running alongside Ethernet: interfaces stay up on Ethernet, the WiFi driver reconnects on its own
+      if (ethKeepWiFi && Network.isEthernet()) break;
+      #endif
       if (wasConnected && interfacesInited) {
         DEBUG_PRINTF_P(PSTR("WiFi-E: Disconnected! @ %lus\n"), millis()/1000);
         if (interfacesInited && multiWiFi.size() > 1 && WiFi.scanComplete() >= 0) {
@@ -459,7 +463,7 @@ void WiFiEvent(WiFiEvent_t event)
     case ARDUINO_EVENT_ETH_CONNECTED:
       {
       DEBUG_PRINTLN(F("ETH-E: Connected"));
-      if (!apActive) {
+      if (!apActive && !ethKeepWiFi) {
         WiFi.disconnect(true); // disable WiFi entirely
       }
       char hostname[64] = {'\0'}; // any "hostname" within a Fully Qualified Domain Name (FQDN) must not exceed 63 characters

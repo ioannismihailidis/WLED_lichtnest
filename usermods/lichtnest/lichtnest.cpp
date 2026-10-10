@@ -631,6 +631,7 @@ class Lichtnest : public Usermod {
     // render our effect over all placed tubes, overriding the stock FX
     void handleOverlayDraw() override {
       if (!enabled) return;
+      if (realtimeMode && !realtimeOverride) return;   // Art-Net/E1.31/DDP input owns the pixels
       if (_wipeOnce) {                       // tube removed/shortened: clear orphaned pixels
         _wipeOnce = false;
         for (uint16_t i = 0; i < strip.getLengthTotal(); i++) strip.setPixelColor(i, 0);
@@ -733,6 +734,12 @@ class Lichtnest : public Usermod {
         uint8_t pins[5] = {255, 255, 255, 255, 255};
         if (bus->getPins(pins) > 0 && pins[0] != 255) p["gpio"] = pins[0];
       }
+      // every address the device can be reached at (WiFi and Ethernet may run side by side)
+      JsonObject net = root.createNestedObject(F("net"));
+      if (WiFi.status() == WL_CONNECTED) net["wifi"] = WiFi.localIP().toString();
+      #if defined(ARDUINO_ARCH_ESP32) && defined(WLED_USE_ETHERNET)
+      if (Network.isEthernet()) net["eth"] = ETH.localIP().toString();
+      #endif
     }
 
     void addToJsonState(JsonObject& root) override {

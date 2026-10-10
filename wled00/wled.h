@@ -390,6 +390,10 @@ WLED_GLOBAL uint8_t txPower _INIT(WIFI_POWER_19_5dBm);
   #else
     WLED_GLOBAL int ethernetType _INIT(WLED_ETH_NONE);             // use none for ethernet board type if default not defined
   #endif
+  WLED_GLOBAL IPAddress ethStaticIP _INIT_N(((  0,   0,   0,   0))); // own static IP for Ethernet (0.0.0.0 = DHCP), independent of WiFi
+  WLED_GLOBAL IPAddress ethStaticGW _INIT_N(((  0,   0,   0,   0)));
+  WLED_GLOBAL IPAddress ethStaticSN _INIT_N(((255, 255, 255,   0)));
+  WLED_GLOBAL bool ethKeepWiFi _INIT(false);                       // keep the WiFi client connection up while Ethernet is connected
 #endif
 
 // LED CONFIG
@@ -487,6 +491,8 @@ WLED_GLOBAL byte e131LastSequenceNumber[E131_MAX_UNIVERSE_COUNT]; // to detect p
 WLED_GLOBAL bool e131Multicast _INIT(false);                      // multicast or unicast
 WLED_GLOBAL bool e131SkipOutOfSequence _INIT(false);              // freeze instead of flickering
 WLED_GLOBAL uint16_t pollReplyCount _INIT(0);                     // count number of replies for ArtPoll node report
+WLED_GLOBAL bool e131PerPort _INIT(false);                        // every LED output (bus) listens on its own start universe (DMX_MODE_MULTIPLE_RGB/RGBW only)
+WLED_GLOBAL uint16_t e131PortUniverse[WLED_MAX_BUSSES] _INIT_N(({0})); // start universe per bus (index = bus number), used when e131PerPort is set
 
 // mqtt
 WLED_GLOBAL unsigned long lastMqttReconnectAttempt _INIT(0);  // used for other periodic tasks too
