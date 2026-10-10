@@ -89,8 +89,8 @@ static const float WAVE_LF[3] = { 1.0f,  0.61f, 1.53f };   // relative wavelengt
 static const float WAVE_SF[3] = { 1.0f, -0.72f, 0.45f };   // negative = travels the other way
 static const float WAVE_WT[3] = { 0.62f, 0.27f, 0.11f };   // weight
 
-#define ZV_MAXPULSE 32
-#define LN_MAX_LAYERS 4   // master: layers, each crossfading between two decks   // impulse bands per source evaluated per pixel (UI allows up to 20)
+#define ZV_MAXPULSE 32    // impulse bands per source evaluated per pixel (UI allows up to 20)
+#define LN_MAX_LAYERS 3   // master: layers, each crossfading between two decks (user decision: max 3)
 
 // State an effect keeps from frame to frame: the noise drift position and the strobe
 // "Zufall" picks (current + previous flash, so a crossfade between two strobes with
@@ -196,7 +196,7 @@ class Lichtnest : public Usermod {
     FxFrame  _frameA, _frameB;         // per-frame render context of the two decks (current / crossfade target)
 
     // --- master role (cfg "master", takes effect at boot) ---
-    struct MDeck  { FxParams p; FxFrame f; uint32_t startMs = 0; bool on = false; };
+    struct MDeck  { FxParams p; FxFrame f; uint32_t startMs = 0; bool on = false; char tag[16] = ""; };   // tag: which show cell plays (set by the UI)
     struct MLayer { uint8_t blend = 0; float opacity = 1; MDeck d[2]; uint8_t cur = 0; bool fading = false; uint32_t fadeStart = 0, fadeMs = 0; DeckState st; };
     // rolling 2 s window of master frame timing
     struct MStat {
@@ -212,6 +212,8 @@ class Lichtnest : public Usermod {
     bool      _masterCfg = false;      // configured role
     bool      _master = false;         // running as master (allocations done)
     char      _msetup[40] = "/lichtnest.setup.json";
+    char      _mshow[40]  = "/lichtnest.show.json";   // current show file (the UI loads it)
+    char      _mActive[16] = "";                       // active cue ("page.cue"), shared by all UIs
     LnSetup*  _ms = nullptr;
     LnArtnet* _art = nullptr;
     uint8_t*  _fb = nullptr;           // frame: RGB per setup LED, data order
@@ -1088,7 +1090,7 @@ class Lichtnest : public Usermod {
     }
 
     // start an effect clip on a layer: the free deck takes it, crossfade over fadeMs
-    void launchClip(uint8_t L, JsonObject p, uint8_t fx, uint32_t fadeMs) {
+    void launchClip(uint8_t L, JsonObject p, uint8_t fx, uint32_t fadeMs, const char* tag) {
       MLayer& ly = _layers[L];
       if (ly.fading) { ly.d[1 - ly.cur].on = false; ly.fading = false; }   // a running fade snaps to its target
       uint8_t nd = 1 - ly.cur;
@@ -1096,6 +1098,7 @@ class Lichtnest : public Usermod {
       d.p = FxParams(); d.p.fx = fx;
       parseParams(p, d.p);
       d.startMs = millis(); d.on = true;
+      strlcpy(d.tag, tag ? tag : "", sizeof(d.tag));
       startFade(ly, nd, fadeMs);
     }
     // fade a layer to black
@@ -1134,7 +1137,7 @@ class Lichtnest : public Usermod {
             if (bi >= 0 && bi < 8) _layers[L].blend = bi;
           }
           if (m.containsKey("op")) { float o = m["op"] | 1.0f; _layers[L].opacity = o < 0 ? 0 : (o > 1 ? 1 : o); }
-          if (m.containsKey("fx")) launchClip(L, m["p"], m["fx"] | 3, fadeMs);
+          if (m.containsKey("fx")) launchClip(L, m["p"], m["fx"] | 3, fadeMs, m["tag"] | "");
           else if (m["off"] | false) layerOff(L, fadeMs);
           else if (m.containsKey("p")) { MDeck& d = _layers[L].d[_layers[L].cur]; if (d.on) parseParams(m["p"], d.p); }
         }
@@ -1146,6 +1149,10 @@ class Lichtnest : public Usermod {
       if (m.containsKey("layers")) { int n = m["layers"] | LN_MAX_LAYERS; _nLayers = n < 1 ? 1 : (n > LN_MAX_LAYERS ? LN_MAX_LAYERS : n); }
       if (m.containsKey("dfade")) { float f = m["dfade"] | 2.0f; _mFadeS = f < 0 ? 0 : f; }
       if (m["reload"] | false) loadMasterSetup();
+      JsonArray batch = m["batch"];                     // several commands at once (a cue: all layers in one go)
+      if (!batch.isNull()) for (JsonObject b : batch) masterCommand(b);
+      if (m["act"].is<const char*>()) strlcpy(_mActive, m["act"].as<const char*>(), sizeof(_mActive));
+      if (m["showfile"].is<const char*>()) { strlcpy(_mshow, m["showfile"].as<const char*>(), sizeof(_mshow)); configNeedsWrite = true; }
       if (m["open"].is<const char*>()) {                // switch the current setup file (kept in cfg)
         strlcpy(_msetup, m["open"].as<const char*>(), sizeof(_msetup));
         loadMasterSetup();
@@ -1263,14 +1270,23 @@ class Lichtnest : public Usermod {
     }
     void addMasterState(JsonObject& o) {
       JsonObject m = o.createNestedObject("m");
-      m["dfade"] = _mFadeS;
+      m["dfade"] = _mFadeS; m["act"] = _mActive; m["show"] = _mshow;
+      uint32_t now = millis();
       JsonArray ls = m.createNestedArray("layers");
       for (uint8_t L = 0; L < _nLayers; L++) {
         const MLayer& ly = _layers[L];
         JsonObject l = ls.createNestedObject();
         l["blend"] = ly.blend; l["op"] = ly.opacity; l["fading"] = ly.fading;
         const MDeck& d = ly.d[ly.cur];
-        l["on"] = d.on; if (d.on) l["fx"] = d.p.fx;
+        l["on"] = d.on;
+        if (d.on) { l["fx"] = d.p.fx; l["tag"] = d.tag; l["el"] = (now - d.startMs) / 1000.0f; }
+        if (ly.fading) {                                  // progress + the outgoing deck, for the UI previews
+          l["e"] = ly.fadeMs ? (float)(now - ly.fadeStart) / ly.fadeMs : 1.0f;
+          l["fms"] = ly.fadeMs;
+          const MDeck& f = ly.d[1 - ly.cur];
+          if (f.on) { l["ffx"] = f.p.fx; l["ftag"] = f.tag; l["fel"] = (now - f.startMs) / 1000.0f; }
+        }
+        l["np"] = ly.st.nPos;
       }
     }
 
@@ -1423,7 +1439,7 @@ class Lichtnest : public Usermod {
     void addToConfig(JsonObject& root) override {
       JsonObject top = root.createNestedObject(FPSTR(_name));
       top[FPSTR(_enabled)] = enabled;
-      top["master"] = _masterCfg; top["msetup"] = _msetup; top["mfps"] = _mFps;
+      top["master"] = _masterCfg; top["msetup"] = _msetup; top["mshow"] = _mshow; top["mfps"] = _mFps;
       top["fx"] = _manual.fx;
       top["speed"] = _manual.speed; top["width"] = _manual.width; top["angle"] = _manual.angle; top["pmode"] = _manual.pmode; top["origin"] = _manual.origin;
       top["hz"] = _manual.hz; top["duty"] = _manual.duty; top["mode"] = _manual.mode;
@@ -1444,6 +1460,7 @@ class Lichtnest : public Usermod {
       getJsonValue(top["master"], _masterCfg, false);
       getJsonValue(top["mfps"], _mFps, (uint8_t)40);
       if (top["msetup"].is<const char*>()) strlcpy(_msetup, top["msetup"].as<const char*>(), sizeof(_msetup));
+      if (top["mshow"].is<const char*>()) strlcpy(_mshow, top["mshow"].as<const char*>(), sizeof(_mshow));
       getJsonValue(top["fx"], _manual.fx, _manual.fx);
       getJsonValue(top["speed"], _manual.speed, _manual.speed); getJsonValue(top["width"], _manual.width, _manual.width); getJsonValue(top["angle"], _manual.angle, _manual.angle);
       getJsonValue(top["pmode"], _manual.pmode, _manual.pmode); getJsonValue(top["origin"], _manual.origin, _manual.origin);

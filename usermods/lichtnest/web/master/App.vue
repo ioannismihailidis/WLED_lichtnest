@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { dev, masterCmd, url } from './api.js'
 import { save, saveNow, compute } from './setup.js'
+import { show, view, showSave, saveShowNow, showName, newShow, openShow, saveShowAs, showFiles } from './show.js'
 import SetupPage from './SetupPage.vue'
 import ShowPage from './ShowPage.vue'
 
@@ -26,7 +27,19 @@ const toggleOut = () => masterCmd({ out: !(m.value?.out) })
 async function enableMaster () {
   await fetch(url('/json/cfg'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ um: { Lichtnest: { master: true } }, rb: true }) })
 }
-const saveState = computed(() => save.busy ? 'speichert …' : save.pending ? 'ungespeichert' : save.error ? save.error : save.at ? 'gespeichert' : '')
+const busy = computed(() => save.busy || showSave.busy)
+const pending = computed(() => save.pending || showSave.pending)
+const saveErr = computed(() => save.error || showSave.error)
+const saveState = computed(() => busy.value ? 'speichert …' : pending.value ? 'ungespeichert' : saveErr.value ? saveErr.value : (save.at || showSave.at) ? 'gespeichert' : '')
+async function saveAll () { await Promise.all([saveNow(), saveShowNow()]) }
+// show file
+const showList = ref(null)
+async function toggleShowList () { showList.value = showList.value ? null : await showFiles() }
+async function pickShow (f) { showList.value = null; await openShow('/' + f) }
+async function doNewShow () { const n = window.prompt('Neue Show — Name (die Ebenen bleiben):', ''); if (n) await newShow(n) }
+async function doSaveShowAs () { const n = window.prompt('Show speichern unter (Name):', showName()); if (n) await saveShowAs(n) }
+// the master dimmer is part of the show file (settings.Dimmer)
+watch(() => m.value?.dim, (d) => { if (d !== undefined && dimDrag.value === null) show.dimmer = Math.round(d / 255 * 100) / 100 })
 </script>
 
 <template>
@@ -37,6 +50,17 @@ const saveState = computed(() => save.busy ? 'speichert …' : save.pending ? 'u
         <button class="m-tab" :class="{ on: page === 'show' }" @click="page = 'show'">SHOW</button>
         <button class="m-tab" :class="{ on: page === 'setup' }" @click="page = 'setup'">SETUP</button>
       </nav>
+      <label v-if="page === 'show'" class="tog" :class="{ on: view.edit }" @click="view.edit = !view.edit"><span class="dot" />EDIT</label>
+      <div class="row" style="align-items:center;gap:6px;position:relative">
+        <span class="lbl">Show</span><span class="mono" style="color:var(--text)">{{ showName() }}</span>
+        <button class="btn sm" @click="doNewShow">NEU</button>
+        <button class="btn sm" @click="toggleShowList">ÖFFNEN</button>
+        <button class="btn sm" @click="doSaveShowAs">SPEICHERN UNTER</button>
+        <div v-if="showList" class="card" style="position:absolute;top:34px;left:0;z-index:20;min-width:220px;max-height:300px;overflow:auto">
+          <div v-if="!showList.length" class="hint">Keine Shows auf dem Controller.</div>
+          <button v-for="f in showList" :key="f" class="btn sm" style="display:block;width:100%;text-align:left;margin:2px 0" @click="pickShow(f)">{{ f.replace('.show.json', '') }}</button>
+        </div>
+      </div>
       <div class="m-spacer" />
       <label class="tog" :class="{ on: m?.out }" @click="toggleOut"><span class="dot" />ART-NET</label>
       <div class="row" style="align-items:center;gap:8px">
@@ -44,7 +68,7 @@ const saveState = computed(() => save.busy ? 'speichert …' : save.pending ? 'u
         <input type="range" min="0" max="1" step="0.01" :value="dim" style="width:140px" @input="setDim(+$event.target.value)">
         <span class="mono" style="width:34px;text-align:right">{{ Math.round(dim * 100) }}%</span>
       </div>
-      <button class="btn acc" :disabled="save.busy" @click="saveNow">SAVE</button>
+      <button class="btn acc" :disabled="busy" @click="saveAll">SAVE</button>
     </header>
 
     <main class="m-body">
@@ -67,7 +91,7 @@ const saveState = computed(() => save.busy ? 'speichert …' : save.pending ? 'u
       <span v-if="m"><b>{{ m.fps }}</b> fps · Render {{ (m.render / 1000).toFixed(1) }} ms · Senden {{ (m.send / 1000).toFixed(1) }} ms</span>
       <span v-if="m?.test" class="ok">Test aktiv</span>
       <span class="m-spacer" />
-      <span v-if="saveState" :class="{ bad: save.error }">{{ saveState }}</span>
+      <span v-if="saveState" :class="{ bad: saveErr }">{{ saveState }}</span>
       <span :class="dev.online ? 'ok' : 'bad'">{{ dev.online ? (dev.name || 'verbunden') : 'offline' }}</span>
     </footer>
   </div>

@@ -30,6 +30,8 @@ export const dev = reactive({
   info: null,          // /json/info
   master: null,        // info.master (null: device is not in master role)
   layers: [],          // state.lichtnest.m.layers
+  state: null,         // state.lichtnest.m (active cue "act", show file "show", default fade)
+  polledAt: 0,         // performance.now() when `layers` arrived (previews advance from there)
   dfade: 2,
   name: '',
 })
@@ -51,7 +53,7 @@ export async function refresh () {
     dev.master = info.master || null
     dev.name = info.name || ''
     const m = state?.lichtnest?.m
-    if (m) { dev.layers = m.layers || []; dev.dfade = m.dfade ?? dev.dfade }
+    if (m) { dev.state = m; dev.layers = m.layers || []; dev.dfade = m.dfade ?? dev.dfade; dev.polledAt = performance.now() }
     dev.online = true
   } catch (e) {
     dev.online = false
