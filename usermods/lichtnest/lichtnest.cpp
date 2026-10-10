@@ -1,4 +1,5 @@
 #include "wled.h"
+#include "master.h"
 
 /*
  * Zugvögel "Lichtnest" usermod.
@@ -24,7 +25,7 @@
  * and reads state (incl. live playback progress) back from /json/state.
  */
 
-#define ZV_MAXGEO   32
+#define ZV_MAXGEO   64
 #define ZV_MAXPTS   16
 #define ZV_MAXSTEPS 32
 
@@ -88,18 +89,41 @@ static const float WAVE_LF[3] = { 1.0f,  0.61f, 1.53f };   // relative wavelengt
 static const float WAVE_SF[3] = { 1.0f, -0.72f, 0.45f };   // negative = travels the other way
 static const float WAVE_WT[3] = { 0.62f, 0.27f, 0.11f };   // weight
 
-#define ZV_MAXPULSE 32   // impulse bands per source evaluated per pixel (UI allows up to 20)
+#define ZV_MAXPULSE 32
+#define LN_MAX_LAYERS 4   // master: layers, each crossfading between two decks   // impulse bands per source evaluated per pixel (UI allows up to 20)
+
+// State an effect keeps from frame to frame: the noise drift position and the strobe
+// "Zufall" picks (current + previous flash, so a crossfade between two strobes with
+// different clocks does not re-roll per pixel). One per layer.
+struct DeckState {
+  float    nPos = 0;                 // noise drift position: nPos += dt * speed
+  uint32_t nPosMs = 0;
+  uint32_t zufFlash = 0xFFFFFFFF, zufPrevFlash = 0xFFFFFFFF;
+  uint8_t  zufSel[ZV_MAXPAL], zufPrev[ZV_MAXPAL]; uint8_t zufSelN = 0, zufPrevN = 0;
+  void reset() { nPos = 0; nPosMs = 0; zufFlash = zufPrevFlash = 0xFFFFFFFF; zufSelN = zufPrevN = 0; }
+  // advance the drift with the speed of the noise deck that renders this frame (nullptr: none)
+  void advanceNoise(const FxParams* np, uint32_t nowMs) {
+    float dt = (nPosMs && nowMs > nPosMs) ? (nowMs - nPosMs) / 1000.0f : 0;
+    nPosMs = nowMs;
+    if (dt > 0.5f) dt = 0;   // resume after a stall: no jump
+    if (np) nPos += dt * (np->speed / 100.0f) * 0.4f;
+  }
+};
 
 // Everything about one effect render that is the same for every pixel of a frame.
 // prepFrame() fills it once per frame, pixelColor() then only does the per-LED part.
 struct FxFrame {
+  DeckState* st = nullptr;           // the layer's frame-to-frame state
   uint8_t  fx = 3;
   float    elapsed = 0;
   // the frame's colour is the same for every pixel (solid) or for every pixel of a tube (strobe)
   bool     uniform = false; uint32_t ucol = 0;
   bool     perTube = false;
-  // gradient band widths
+  // gradient band widths + the gradient sampled at 256 steps (built once per frame)
   uint8_t  gn = 1; float gw[ZV_MAXCOL]; float gtotal = 1;
+  uint32_t glut[256];
+  // schwarm: tail brightness over the window, exp(-3u) * (1 - u) for u = d / (3 tail)
+  uint8_t  swk[256];
   // impulse
   float    invW = 1; uint8_t nsrc = 0, nk = 0;
   float    head[ZV_MAXPULSE];                                    // travelled distance of band k (launched ones only)
@@ -167,12 +191,39 @@ class Lichtnest : public Usermod {
     // strobe "Zufall" state: current + previous flash's tube pick (no immediate repeats).
     // The previous pick stays addressable by its flash no., so transition crossfades that
     // render two strobes with different clocks don't re-roll per pixel.
-    float    _nPos = 0;                // noise drift position: noisepos += dt * speed
-    uint32_t _nPosMs = 0;
-    uint32_t _zufFlash = 0xFFFFFFFF, _zufPrevFlash = 0xFFFFFFFF;
-    uint8_t  _zufSel[ZV_MAXPAL], _zufPrev[ZV_MAXPAL]; uint8_t _zufSelN = 0, _zufPrevN = 0;
+    DeckState _st;                     // noise drift + strobe picks of the local effect / playlist
     float    _cx = 0.5f, _cy = 0.5f;   // radial centre = centroid of the tube geometry
     FxFrame  _frameA, _frameB;         // per-frame render context of the two decks (current / crossfade target)
+
+    // --- master role (cfg "master", takes effect at boot) ---
+    struct MDeck  { FxParams p; FxFrame f; uint32_t startMs = 0; bool on = false; };
+    struct MLayer { uint8_t blend = 0; float opacity = 1; MDeck d[2]; uint8_t cur = 0; bool fading = false; uint32_t fadeStart = 0, fadeMs = 0; DeckState st; };
+    // rolling 2 s window of master frame timing
+    struct MStat {
+      uint32_t sumR = 0, sumS = 0, peakR = 0, frames = 0, winMs = 0;
+      uint32_t renderAvg = 0, renderPeak = 0, sendAvg = 0, fps = 0;
+      void add(uint32_t r, uint32_t s, uint32_t now) {
+        sumR += r; sumS += s; frames++; if (r > peakR) peakR = r;
+        uint32_t win = now - winMs; if (win < 2000) return;
+        renderAvg = sumR / frames; sendAvg = sumS / frames; renderPeak = peakR; fps = (frames * 1000 + win / 2) / win;
+        sumR = sumS = peakR = frames = 0; winMs = now;
+      }
+    };
+    bool      _masterCfg = false;      // configured role
+    bool      _master = false;         // running as master (allocations done)
+    char      _msetup[40] = "/lichtnest.setup.json";
+    LnSetup*  _ms = nullptr;
+    LnArtnet* _art = nullptr;
+    uint8_t*  _fb = nullptr;           // frame: RGB per setup LED, data order
+    MLayer*   _layers = nullptr;
+    uint8_t   _nLayers = LN_MAX_LAYERS;
+    uint8_t   _mValid[LN_MAX_TUBES]; uint8_t _mValidN = 0;   // tubes with LEDs, in table order
+    bool      _mOut = true;            // send Art-Net
+    uint8_t   _mDim = 255;             // master dimmer (output only)
+    uint8_t   _mFps = 40;
+    float     _mFadeS = 2.0f;          // default fade
+    uint32_t  _mLastFrame = 0, _mResolveMs = 0;
+    MStat     _mStat;
     // render cost of handleOverlayDraw(), reported in /json/info as "rt"
     uint32_t _rtSumUs = 0, _rtMaxUs = 0, _rtFrames = 0, _rtPx = 0, _rtWindowMs = 0;
     float    _rtAvgUs = 0, _rtPeakUs = 0, _rtFps = 0;
@@ -216,7 +267,7 @@ class Lichtnest : public Usermod {
     // at the boundaries (half the smaller neighbour). NOT cyclic — 0 is the pure first
     // colour and 1 the pure last one, so a leading edge stays hard. Mirrors the web sim.
     // The band widths are prepared once per frame (FxFrame::gw / gtotal).
-    static uint32_t gradN(const FxParams& P, const FxFrame& F, float ph) {
+    WLED_O2_ATTR static uint32_t gradN(const FxParams& P, const FxFrame& F, float ph) {
       const uint8_t n = F.gn;
       if (n == 1) return P.fcols[0];
       if (ph <= 0) return P.fcols[0];
@@ -233,6 +284,13 @@ class Lichtnest : public Usermod {
       else if (zN > 0 && ls > wi - zN) { a = P.fcols[i];     b = P.fcols[i + 1]; t = (ls - (wi - zN)) / (2.0f * zN); }
       else                             return P.fcols[i];   // solid band
       return RGBW32((uint8_t)lerpf(cR(a), cR(b), t), (uint8_t)lerpf(cG(a), cG(b), t), (uint8_t)lerpf(cB(a), cB(b), t), 0);
+    }
+
+    // gradient via the frame's lookup table (8-bit phase, exact at both ends)
+    static inline uint32_t gradL(const FxFrame& F, float ph) {
+      if (ph <= 0) return F.glut[0];
+      if (ph >= 1) return F.glut[255];
+      return F.glut[(uint8_t)(ph * 255.0f + 0.5f)];
     }
 
     // --- keyframe curves (t, v[, c]) — mirror the web fxsim ------------------
@@ -284,7 +342,7 @@ class Lichtnest : public Usermod {
       x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
       return (float)x / 4294967295.0f;
     }
-    static float nvalue(float x, float y, uint32_t seed) {
+    WLED_O2_ATTR static float nvalue(float x, float y, uint32_t seed) {
       int ix = (int)floorf(x), iy = (int)floorf(y);
       float fx = x - ix, fy = y - iy;
       float sx = fx * fx * (3.0f - 2.0f * fx), sy = fy * fy * (3.0f - 2.0f * fy);
@@ -292,7 +350,7 @@ class Lichtnest : public Usermod {
       float c = nh2(ix, iy + 1, seed), d = nh2(ix + 1, iy + 1, seed);
       return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
     }
-    static float nworley(float x, float y, bool wantOwner) {
+    WLED_O2_ATTR static float nworley(float x, float y, bool wantOwner) {
       int ix = (int)floorf(x), iy = (int)floorf(y);
       float best = 9; int ox = 0, oy = 0;
       for (int dy = -1; dy <= 1; dy++) {
@@ -308,17 +366,17 @@ class Lichtnest : public Usermod {
       float v = 1.0f - sqrtf(best) * 1.25f;
       return v < 0 ? 0 : v;
     }
-    float noiseVal(const FxParams& P, const FxFrame& F, float x, float y) const {
+    WLED_O2_ATTR float noiseVal(const FxParams& P, const FxFrame& F, float x, float y) const {
       uint8_t type = P.ntype;
       float scale = F.nscale;
       if (type == 4) {                                   // Swirl: rotating spiral arms
         float dx = x - 0.5f, dy = y - 0.5f;
         float r = sqrtf(dx * dx + dy * dy);
         float a = atan2f(dy, dx);
-        return 0.5f + 0.5f * sinf(a * 3.0f + r * scale * 1.5f - _nPos * 6.0f);
+        return 0.5f + 0.5f * sinf(a * 3.0f + r * scale * 1.5f - F.st->nPos * 6.0f);
       }
-      float sx = (x - F.nc * _nPos) * scale;             // subtract -> pattern travels TOWARD the angle
-      float sy = (y - F.ns * _nPos) * scale;
+      float sx = (x - F.nc * F.st->nPos) * scale;        // subtract -> pattern travels TOWARD the angle
+      float sy = (y - F.ns * F.st->nPos) * scale;
       if (type == 1) return nworley(sx, sy, false);      // Cellular (F1)
       if (type == 2) return nworley(sx, sy, true);       // Voronoi (flat regions)
       if (type == 3) return nh2((int)floorf(sx), (int)floorf(sy), 0xA11CEu);   // Hash (blocky)
@@ -362,25 +420,25 @@ class Lichtnest : public Usermod {
     // "Zufall" mode: truly random tube pick per flash, remembered so a tube can NEVER
     // flash twice in a row (as far as the tube count allows). The web preview uses its
     // own seeded randomness — device and preview diverge by design here.
-    void zufRoll(uint8_t N, uint8_t Pn, uint32_t f) {
-      _zufPrevFlash = _zufFlash; _zufPrevN = _zufSelN;
-      for (uint8_t i = 0; i < _zufSelN; i++) _zufPrev[i] = _zufSel[i];
+    static void zufRoll(DeckState& S, uint8_t N, uint8_t Pn, uint32_t f) {
+      S.zufPrevFlash = S.zufFlash; S.zufPrevN = S.zufSelN;
+      for (uint8_t i = 0; i < S.zufSelN; i++) S.zufPrev[i] = S.zufSel[i];
       uint8_t fresh[ZV_MAXGEO], used[ZV_MAXPAL]; uint8_t nf = 0, nu = 0;
       for (uint8_t t = 0; t < N; t++) {                       // split tubes: not-lit-last-flash vs lit
         bool prev = false;
-        for (uint8_t j = 0; j < _zufPrevN; j++) if (_zufPrev[j] == t) { prev = true; break; }
+        for (uint8_t j = 0; j < S.zufPrevN; j++) if (S.zufPrev[j] == t) { prev = true; break; }
         if (prev) { if (nu < ZV_MAXPAL) used[nu++] = t; }
         else fresh[nf++] = t;
       }
-      _zufSelN = 0;
+      S.zufSelN = 0;
       for (uint8_t k = 0; k < Pn; k++) {                      // prefer fresh tubes; only reuse if we must
-        if (nf > 0)      { uint8_t p = esp_random() % nf; _zufSel[_zufSelN++] = fresh[p]; fresh[p] = fresh[--nf]; }
-        else if (nu > 0) { uint8_t p = esp_random() % nu; _zufSel[_zufSelN++] = used[p];  used[p]  = used[--nu]; }
+        if (nf > 0)      { uint8_t p = esp_random() % nf; S.zufSel[S.zufSelN++] = fresh[p]; fresh[p] = fresh[--nf]; }
+        else if (nu > 0) { uint8_t p = esp_random() % nu; S.zufSel[S.zufSelN++] = used[p];  used[p]  = used[--nu]; }
       }
-      _zufFlash = f;
+      S.zufFlash = f;
     }
     // cpar colours/tubes in parallel: Alle lights all tubes, Wechsel/Reihum/Zufall light cpar tubes.
-    uint32_t strobeColor(const FxParams& P, uint8_t tubeIdx, uint8_t tubeTotal, long flash) {
+    static uint32_t strobeColor(const FxParams& P, DeckState& S, uint8_t tubeIdx, uint8_t tubeTotal, long flash) {
       static const uint32_t DEF[2] = { 0xFFFFFF, 0x27C5FF };   // fallback palette = web DEF_SCOLS (white, blue)
       uint8_t M = P.scount ? P.scount : 2;
       uint8_t N = tubeTotal < 1 ? 1 : tubeTotal; if (N > ZV_MAXGEO) N = ZV_MAXGEO;
@@ -390,9 +448,9 @@ class Lichtnest : public Usermod {
       else if (P.mode == 3) {                                                                  // Zufall: Pn random tubes per flash
         const uint8_t* sel; uint8_t selN;
         uint32_t f = (uint32_t)flash;
-        if (f == _zufFlash)          { sel = _zufSel;  selN = _zufSelN; }
-        else if (f == _zufPrevFlash) { sel = _zufPrev; selN = _zufPrevN; }   // outgoing strobe during a crossfade
-        else { zufRoll(N, Pn, f); sel = _zufSel; selN = _zufSelN; }          // roll once per flash (per-pixel calls reuse)
+        if (f == S.zufFlash)          { sel = S.zufSel;  selN = S.zufSelN; }
+        else if (f == S.zufPrevFlash) { sel = S.zufPrev; selN = S.zufPrevN; }   // outgoing strobe during a crossfade
+        else { zufRoll(S, N, Pn, f); sel = S.zufSel; selN = S.zufSelN; }        // roll once per flash (per-tube calls reuse)
         bool lit = false; long rank = 0;
         for (uint8_t k = 0; k < selN; k++) if (sel[k] == tubeIdx) { lit = true; rank = k; }
         if (!lit) return 0;
@@ -424,7 +482,17 @@ class Lichtnest : public Usermod {
     // crests rise and fall in place instead of just sliding past, and sharper crests over
     // flatter troughs read as water rather than a sine. Dies out as the level reaches 0,
     // so an empty field has no ripples left.
-    static float trochoid(float th) { return (sinf(th) + 0.32f * sinf(2 * th)) / 1.32f; }
+    static float trochoidExact(float th) { return (sinf(th) + 0.32f * sinf(2 * th)) / 1.32f; }
+    // trochoid over one period from a 512-step table, linearly interpolated (filled on first use)
+    static float trochoid(float th) {
+      static float lut[513]; static bool ready = false;
+      if (!ready) { for (uint16_t i = 0; i <= 512; i++) lut[i] = trochoidExact(i * (6.2831853f / 512.0f)); ready = true; }
+      float u = th * (512.0f / 6.2831853f);
+      u -= floorf(u / 512.0f) * 512.0f;                   // wrap into [0, 512)
+      uint16_t i = (uint16_t)u; if (i > 511) i = 511;
+      float f = u - i;
+      return lut[i] + (lut[i + 1] - lut[i]) * f;
+    }
     // per-frame part of the wave surface: train phases, swell and fade-out near empty
     static void prepWave(const FxParams& P, float elapsed, float lvl, FxFrame& F) {
       float amp = (P.wamp / 100.0f) * 0.5f;
@@ -441,7 +509,7 @@ class Lichtnest : public Usermod {
       float fade = lvl / 0.12f; if (fade > 1) fade = 1; if (fade < 0) fade = 0;
       F.wk = sum > 0 ? amp * swell * fade / sum : 0;
     }
-    static float waveOffset(const FxFrame& F, float perp) {
+    WLED_O2_ATTR static float waveOffset(const FxFrame& F, float perp) {
       if (F.wk == 0) return 0;
       float w = 0;
       for (uint8_t i = 0; i < F.wn; i++) w += WAVE_WT[i] * trochoid(perp * F.wkx[i] + F.wof[i]);
@@ -469,7 +537,7 @@ class Lichtnest : public Usermod {
         if (P.swmode == 1) return (float)P.swdur;
         if (P.swmode == 2) {
           float sp = P.speed < 1 ? 1 : P.speed;
-          float N = (float)strip.getLengthTotal(); if (N < 1) N = 1;
+          float N = (float)chainLen(); if (N < 1) N = 1;
           float tl = (P.tail / 100.0f) * N; if (tl < 1) tl = 1;
           return P.swcnt * ((N + 3 * tl + 1.0f) / (0.5f * N * sp / 100.0f));
         }
@@ -479,12 +547,14 @@ class Lichtnest : public Usermod {
 
     // prepare the per-frame part of effect P at `elapsed` seconds into its step.
     // Deterministic and equivalent to the web fxsim; pixelColor() does the per-LED rest.
-    void prepFrame(const FxParams& P, float elapsed, FxFrame& F) {
-      F.fx = P.fx; F.elapsed = elapsed;
+    void prepFrame(const FxParams& P, float elapsed, DeckState& st, FxFrame& F) {
+      F.st = &st; F.fx = P.fx; F.elapsed = elapsed;
       F.uniform = false; F.perTube = false; F.ucol = 0;
       F.gn = P.fcount < 1 ? 1 : (P.fcount > ZV_MAXCOL ? ZV_MAXCOL : P.fcount);
       F.gtotal = 0;
       for (uint8_t k = 0; k < F.gn; k++) { F.gw[k] = P.fcw[k] < 1 ? 1.0f : (float)P.fcw[k]; F.gtotal += F.gw[k]; }
+      if (P.fx == 0 || P.fx == 2 || P.fx == 4 || P.fx == 5)
+        for (uint16_t i = 0; i < 256; i++) F.glut[i] = gradN(P, F, i / 255.0f);
       switch (P.fx) {
         case 0: { // Impuls: band heads + source planes / centres
           F.nk = 0; F.nsrc = 0;
@@ -553,12 +623,13 @@ class Lichtnest : public Usermod {
           return;
         }
         case 2: { // Schwarm
-          float N = strip.getLengthTotal(); if (N < 1) N = 1;
+          float N = chainLen(); if (N < 1) N = 1;
           float tl = (P.tail / 100.0f) * N; if (tl < 1) tl = 1;
           float span = N + 3 * tl + 1.0f;                  // exit margin = full windowed tail
           float phase = (P.speed / 100.0f) * 0.5f * N * elapsed;
           float pos = fmodf(phase, span); if (pos < 0) pos += span;
           F.swN = N; F.swTl = tl; F.swPos = pos - 1.0f;    // start off-field
+          for (uint16_t i = 0; i < 256; i++) { float u = i / 255.0f; F.swk[i] = (uint8_t)(expf(-3.0f * u) * (1.0f - u) * 255.0f + 0.5f); }
           return;
         }
         default: { // Solid / Atmen: one colour for the whole field
@@ -581,12 +652,12 @@ class Lichtnest : public Usermod {
 
     // colour of one tube for a perTube frame (strobe)
     uint32_t tubeColor(const FxParams& P, const FxFrame& F, uint8_t tubeIdx, uint8_t tubeTotal) {
-      uint32_t c = strobeColor(P, tubeIdx, tubeTotal, F.flash);
+      uint32_t c = strobeColor(P, *F.st, tubeIdx, tubeTotal, F.flash);
       return F.env >= 1.0f ? c : scaleCol(c, F.env);
     }
 
     // per-LED part of a prepared frame (not for uniform / perTube frames)
-    uint32_t pixelColor(const FxParams& P, const FxFrame& F, float x, float y, uint16_t chainIdx) const {
+    WLED_O2_ATTR uint32_t pixelColor(const FxParams& P, const FxFrame& F, float x, float y, uint16_t chainIdx) const {
       switch (F.fx) {
         case 0: { // Impuls — `count` colour bands per SOURCE, launched every `interval`s, out of black
           uint32_t acc = 0; bool any = false;
@@ -603,14 +674,14 @@ class Lichtnest : public Usermod {
             }
             if (P.smix == 0) { if (bestg < bestAll) bestAll = bestg; continue; }   // frontmost band across ALL sources wins
             if (bestg > 1.0f) continue;                          // blended: each source adds its own frontmost band
-            uint32_t c = gradN(P, F, bestg);
+            uint32_t c = gradL(F, bestg);
             acc = any ? mixCol(P.smix, acc, c) : c; any = true;
           }
-          if (P.smix == 0) return bestAll > 1.0f ? 0 : gradN(P, F, bestAll);
+          if (P.smix == 0) return bestAll > 1.0f ? 0 : gradL(F, bestAll);
           return any ? acc : 0;
         }
         case 4: { // Noise / Drift — hash noise field through the gradient; drift pos accumulates
-          return gradN(P, F, noiseVal(P, F, x, y));
+          return gradL(F, noiseVal(P, F, x, y));
         }
         case 5: { // Fuellen — gradient below the surface, dark above; level from keyframes
           float u = (x * F.fc + y * F.fs - F.flo) / F.fspan;          // 0 = bottom, 1 = far end
@@ -622,16 +693,18 @@ class Lichtnest : public Usermod {
           if (k > 1) k = 1;
           float g = u / (h > 1e-4f ? h : 1e-4f);           // gradient spans bottom -> surface
           if (g < 0) g = 0; if (g > 1) g = 1;
-          return scaleCol(gradN(P, F, g), k);
+          return scaleCol(gradL(F, g), k);
         }
         case 2: { // Schwarm — non-cyclic pass: enters off-field, hard leading edge, tail = gradient
           float ci = P.dir ? (F.swN - 1 - chainIdx) : chainIdx;
           float d = F.swPos - ci;
           if (d < 0) return 0;                             // nothing ahead of the head
-          float w = 1.0f - d / (3 * F.swTl);               // window: tail ends cleanly at 3·tl
-          if (w <= 0) return 0;
+          float u = d / (3 * F.swTl);                      // window: tail ends cleanly at 3·tl
+          if (u >= 1.0f) return 0;
           float g = d / F.swTl; if (g > 1) g = 1;
-          return scaleCol(gradN(P, F, g), expf(-d / F.swTl) * w);
+          uint8_t k = F.swk[(uint8_t)(u * 255.0f + 0.5f)];   // exp(-d/tl) * (1 - d/3tl)
+          uint32_t c = gradL(F, g);
+          return RGBW32(cR(c) * k / 255, cG(c) * k / 255, cB(c) * k / 255, 0);
         }
         default: return F.ucol;
       }
@@ -649,6 +722,7 @@ class Lichtnest : public Usermod {
       // black until then so the manual effect never flashes up first.
       if (WLED_FS.exists("/lichtnest_playlists.json")) _blackout = true;
       loadSchedule();
+      if (_masterCfg) initMaster();
       initDone = true;
     }
     void connected() override {}
@@ -683,6 +757,7 @@ class Lichtnest : public Usermod {
     }
 
     void loop() override {
+      if (_master) { masterLoop(); return; }
       // autostart the default playlist a few seconds after boot (FS + segments ready)
       if (!_autostartTried && millis() > 4000) {
         _autostartTried = true;
@@ -713,8 +788,12 @@ class Lichtnest : public Usermod {
     }
 
     // render our effect over all placed tubes, overriding the stock FX
-    void handleOverlayDraw() override {
+    WLED_O2_ATTR void handleOverlayDraw() override {
       if (!enabled) return;
+      if (_master) {                                     // the master's own strip stays dark; the show goes out over Art-Net
+        for (uint16_t i = 0; i < strip.getLengthTotal(); i++) strip.setPixelColor(i, 0);
+        return;
+      }
       if (realtimeMode && !realtimeOverride) return;   // Art-Net/E1.31/DDP input owns the pixels
       if (_wipeOnce) {                       // tube removed/shortened: clear orphaned pixels
         _wipeOnce = false;
@@ -766,13 +845,7 @@ class Lichtnest : public Usermod {
       }
 
       // advance the noise drift position for whichever noise params render this frame
-      {
-        float dt = (_nPosMs && nowMs > _nPosMs) ? (nowMs - _nPosMs) / 1000.0f : 0;
-        _nPosMs = nowMs;
-        if (dt > 0.5f) dt = 0;   // resume after a stall: no jump
-        const FxParams* np = (pA && pA->fx == 4) ? pA : ((pB && pB->fx == 4) ? pB : nullptr);
-        if (np) _nPos += dt * (np->speed / 100.0f) * 0.4f;
-      }
+      _st.advanceNoise((pA && pA->fx == 4) ? pA : ((pB && pB->fx == 4) ? pB : nullptr), nowMs);
 
       // Only tubes that really exist may take part. The geometry can still list deleted
       // ones (it is loaded from the plan file on boot, and that file may be stale), and a
@@ -786,8 +859,8 @@ class Lichtnest : public Usermod {
       uint32_t t0 = micros(), px = 0;
       if (mode == 1) { pA = nullptr; pB = nullptr; }
       if (mode != 3) pB = nullptr;
-      if (pA) prepFrame(*pA, elA, _frameA);
-      if (pB) prepFrame(*pB, elB, _frameB);
+      if (pA) prepFrame(*pA, elA, _st, _frameA);
+      if (pB) prepFrame(*pB, elB, _st, _frameB);
       for (uint8_t k = 0; k < vCount; k++) {
         uint8_t g = vg[k];
         Segment& seg = strip.getSegment(geoId[g]);
@@ -825,6 +898,271 @@ class Lichtnest : public Usermod {
       return 0;
     }
 
+    // ===================================================================== master role
+    // The master renders the setup's tubes (not WLED segments) into _fb, layer by layer,
+    // and streams the frame over Art-Net. Layers blend like the TouchDesigner mixer:
+    // result = mix(below, blend(below, layer, mode), opacity).
+
+    uint16_t chainLen() const { return (_master && _ms) ? _ms->total : strip.getLengthTotal(); }
+
+    void initMaster() {
+      if (!_ms) { _ms = (LnSetup*)d_malloc(sizeof(LnSetup)); if (_ms) new (_ms) LnSetup(); }
+      if (!_art) { _art = (LnArtnet*)d_malloc(sizeof(LnArtnet)); if (_art) new (_art) LnArtnet(); }
+      if (!_layers) { _layers = (MLayer*)d_malloc(sizeof(MLayer) * LN_MAX_LAYERS); if (_layers) for (uint8_t i = 0; i < LN_MAX_LAYERS; i++) new (&_layers[i]) MLayer(); }
+      if (!_ms || !_art || !_layers) { DEBUG_PRINTLN(F("Lichtnest master: out of memory")); return; }
+      _master = true;
+      loadMasterSetup();
+    }
+
+    void loadMasterSetup() {
+      if (!_ms->load(_msetup)) _ms->fromJson(JsonObject());   // missing file: empty setup, one default node
+      if (_fb) { free(_fb); _fb = nullptr; }
+      if (_ms->total) {
+        _fb = (uint8_t*)d_malloc((size_t)_ms->total * 3);
+        if (_fb) memset(_fb, 0, (size_t)_ms->total * 3);
+      }
+      // the effect engine reads tube geometry from geo*: fill it with the setup's tubes
+      geoCount = 0; _mValidN = 0;
+      for (uint8_t ti = 0; ti < _ms->nTubes && geoCount < ZV_MAXGEO; ti++) {
+        if (!_ms->tubes[ti].leds) continue;
+        _ms->tubeEnds(ti, gx1[geoCount], gy1[geoCount], gx2[geoCount], gy2[geoCount]);
+        geoId[geoCount] = ti;
+        _mValid[_mValidN++] = ti;
+        geoCount++;
+      }
+      pointCount = 0;
+      computeCenter();
+    }
+
+    void masterLoop() {
+      uint32_t now = millis();
+      if (now - _mResolveMs > 1000) { _mResolveMs = now; _art->resolve(*_ms, IPAddress(255, 255, 255, 255)); }
+      uint32_t interval = 1000 / (_mFps ? _mFps : 40);
+      if (!_fb || now - _mLastFrame < interval) return;
+      _mLastFrame = now;
+      uint32_t t0 = micros();
+      masterRender(now);
+      uint32_t tr = micros() - t0;
+      if (_mOut) _art->send(*_ms, _fb, _mDim);
+      _mStat.add(tr, _mOut ? _art->sendUs : 0, now);
+    }
+
+    // A layer shows its current deck (`to`). During a fade it also shows the outgoing one
+    // (`from`): clip -> clip crossfades the colours, while fading in from / out to nothing
+    // changes the layer's presence like an opacity (an empty layer is transparent).
+    struct LayerFrame { uint8_t L; MDeck* from; MDeck* to; float e; uint16_t op; uint8_t blend; };
+
+    WLED_O2_ATTR void masterRender(uint32_t now) {
+      LayerFrame lf[LN_MAX_LAYERS];
+      uint8_t na = 0;                                      // layers that contribute this frame
+      for (uint8_t L = 0; L < _nLayers; L++) {
+        MLayer& ly = _layers[L];
+        MDeck* to = &ly.d[ly.cur];
+        MDeck* from = nullptr;
+        float e = 1;
+        if (ly.fading) {
+          e = ly.fadeMs ? (float)(now - ly.fadeStart) / ly.fadeMs : 1.0f;
+          if (e >= 1.0f) { ly.fading = false; ly.d[1 - ly.cur].on = false; e = 1; }
+          else from = &ly.d[1 - ly.cur];
+        }
+        if (from && !from->on) from = nullptr;
+        if (!to->on) to = nullptr;
+        MDeck* noise = (to && to->p.fx == 4) ? to : ((from && from->p.fx == 4) ? from : nullptr);
+        ly.st.advanceNoise(noise ? &noise->p : nullptr, now);
+        if (!to && !from) continue;
+        float presence = (to && from) ? 1.0f : (to ? e : 1.0f - e);
+        uint16_t op = (uint16_t)(ly.opacity * presence * 256.0f + 0.5f);
+        if (op == 0) continue;
+        if (to)   prepDeck(*to, ly.st, now);
+        if (from) prepDeck(*from, ly.st, now);
+        lf[na++] = { L, from, to, e, op, ly.blend };
+      }
+
+      const float W = _ms->canvasW, H = _ms->canvasH;
+      uint8_t tubeTotal = _mValidN;
+      for (uint8_t k = 0; k < _mValidN; k++) {
+        const LnTube& tu = _ms->tubes[_mValid[k]];
+        uint16_t n = tu.leds;
+        float len = _ms->types[tu.type].length;
+        float x = tu.x / W, yb = 1.0f - tu.y / H;
+        float stepN = n > 1 ? len / ((n - 1) * H) : 0;       // plan units per LED (upwards = smaller y)
+        // layer colours that are constant over the tube are resolved once
+        bool allConst = true;
+        uint32_t cc[LN_MAX_LAYERS]; bool kc[LN_MAX_LAYERS];
+        uint32_t cf[LN_MAX_LAYERS], ct[LN_MAX_LAYERS]; bool kf[LN_MAX_LAYERS], kt[LN_MAX_LAYERS];
+        for (uint8_t i = 0; i < na; i++) {
+          kf[i] = deckConst(lf[i].from, k, tubeTotal, cf[i]);
+          kt[i] = deckConst(lf[i].to,   k, tubeTotal, ct[i]);
+          kc[i] = kf[i] && kt[i];
+          if (kc[i]) cc[i] = layerColor(lf[i], cf[i], ct[i]);
+          else allConst = false;
+        }
+        uint8_t* out = _fb + (size_t)tu.first * 3;
+        if (allConst) {
+          uint32_t c = composite(lf, na, cc);
+          for (uint16_t j = 0; j < n; j++, out += 3) { out[0] = cR(c); out[1] = cG(c); out[2] = cB(c); }
+          continue;
+        }
+        uint32_t pc[LN_MAX_LAYERS];
+        float y = tu.flip ? yb - (n - 1) * stepN : yb;
+        float dy = tu.flip ? stepN : -stepN;
+        for (uint16_t j = 0; j < n; j++, out += 3, y += dy) {
+          uint16_t ci = tu.first + j;
+          for (uint8_t i = 0; i < na; i++) {
+            if (kc[i]) { pc[i] = cc[i]; continue; }
+            uint32_t a = kf[i] ? cf[i] : pixelColor(lf[i].from->p, lf[i].from->f, x, y, ci);
+            uint32_t b = kt[i] ? ct[i] : pixelColor(lf[i].to->p,   lf[i].to->f,   x, y, ci);
+            pc[i] = layerColor(lf[i], a, b);
+          }
+          uint32_t c = composite(lf, na, pc);
+          out[0] = cR(c); out[1] = cG(c); out[2] = cB(c);
+        }
+      }
+    }
+
+    // colour of a layer from its two decks: crossfade when both play, else the one that does
+    static inline uint32_t layerColor(const LayerFrame& l, uint32_t from, uint32_t to) {
+      if (l.from && l.to) return blendCol(from, to, l.e);
+      return l.to ? to : from;
+    }
+    void prepDeck(MDeck& d, DeckState& st, uint32_t now) {
+      float el = (now - d.startMs) / 1000.0f;
+      float D = stepSeconds(d.p); if (D > 0.05f) el = fmodf(el, D);   // clips loop
+      prepFrame(d.p, el, st, d.f);
+    }
+    // colour of a deck if it is the same for the whole tube (absent deck = black)
+    bool deckConst(MDeck* d, uint8_t tubeIdx, uint8_t tubeTotal, uint32_t& c) {
+      if (!d) { c = 0; return true; }
+      if (d->f.uniform) { c = d->f.ucol; return true; }
+      if (d->f.perTube) { c = tubeColor(d->p, d->f, tubeIdx, tubeTotal); return true; }
+      return false;
+    }
+    // bottom-up blend of the contributing layers (base = black)
+    WLED_O2_ATTR static uint32_t composite(const LayerFrame* lf, uint8_t na, const uint32_t* pc) {
+      uint8_t r = 0, g = 0, b = 0;
+      for (uint8_t i = 0; i < na; i++) {
+        uint32_t c = pc[i];
+        uint8_t m = lf[i].blend; uint16_t op = lf[i].op;
+        if (c == 0 && blackIsIdentity(m)) continue;
+        r = mixCh(r, blendCh(r, cR(c), m), op);
+        g = mixCh(g, blendCh(g, cG(c), m), op);
+        b = mixCh(b, blendCh(b, cB(c), m), op);
+      }
+      return RGBW32(r, g, b, 0);
+    }
+    static bool blackIsIdentity(uint8_t mode) { return mode == 1 || mode == 2 || mode == 4 || mode == 6 || mode == 7; }
+    static inline uint8_t mixCh(uint8_t a, uint8_t s, uint16_t op) { return op >= 256 ? s : (uint8_t)(a + (((int)s - (int)a) * op >> 8)); }
+    static inline uint8_t blendCh(uint8_t a, uint8_t s, uint8_t mode) {
+      switch (mode) {
+        case 1: { uint16_t v = a + s; return v > 255 ? 255 : v; }               // add
+        case 2: return 255 - (uint16_t)(255 - a) * (255 - s) / 255;           // screen
+        case 3: return (uint16_t)a * s / 255;                                 // multiply
+        case 4: return a > s ? a : s;                                         // lighten
+        case 5: return a < s ? a : s;                                         // darken
+        case 6: return a > s ? a - s : s - a;                                 // difference
+        case 7: return a > s ? a - s : 0;                                     // subtract
+        default: return s;                                                    // normal
+      }
+    }
+
+    static int8_t blendIndex(const char* name) {
+      static const char* const names[] = { "normal", "add", "screen", "multiply", "lighten", "darken", "difference", "subtract" };
+      for (uint8_t i = 0; i < 8; i++) if (strcmp(name, names[i]) == 0) return i;
+      return -1;
+    }
+
+    // start an effect clip on a layer: the free deck takes it, crossfade over fadeMs
+    void launchClip(uint8_t L, JsonObject p, uint8_t fx, uint32_t fadeMs) {
+      MLayer& ly = _layers[L];
+      if (ly.fading) { ly.d[1 - ly.cur].on = false; ly.fading = false; }   // a running fade snaps to its target
+      uint8_t nd = 1 - ly.cur;
+      MDeck& d = ly.d[nd];
+      d.p = FxParams(); d.p.fx = fx;
+      parseParams(p, d.p);
+      d.startMs = millis(); d.on = true;
+      startFade(ly, nd, fadeMs);
+    }
+    // fade a layer to black
+    void layerOff(uint8_t L, uint32_t fadeMs) {
+      MLayer& ly = _layers[L];
+      if (ly.fading) { ly.d[1 - ly.cur].on = false; ly.fading = false; }
+      if (!ly.d[ly.cur].on) return;
+      uint8_t nd = 1 - ly.cur;
+      ly.d[nd].on = false;
+      startFade(ly, nd, fadeMs);
+    }
+    void startFade(MLayer& ly, uint8_t nd, uint32_t fadeMs) {
+      uint8_t old = ly.cur;
+      ly.cur = nd;
+      if (fadeMs == 0 || !ly.d[old].on) {                  // nothing to fade from: cut (fade in from black below)
+        ly.d[old].on = false;
+        ly.fading = fadeMs > 0 && ly.d[nd].on;
+        if (ly.fading) { ly.fadeStart = millis(); ly.fadeMs = fadeMs; }
+        return;
+      }
+      ly.fading = true; ly.fadeStart = millis(); ly.fadeMs = fadeMs;
+    }
+
+    // POST /json/state {"lichtnest":{"m":{...}}}
+    //   {"L":i,"fx":n,"p":{..},"fade":s}  launch clip   ·  {"L":i,"p":{..}} live tweak (no restart)
+    //   {"L":i,"off":true,"fade":s}       layer to black ·  {"L":i,"blend":"add","op":0.8}
+    //   {"black":true,"fade":s}  all layers to black     ·  {"dim":0..1,"out":bool,"fps":n,"reload":true}
+    void masterCommand(JsonObject m) {
+      float fadeS = m["fade"] | _mFadeS;
+      uint32_t fadeMs = fadeS > 0 ? (uint32_t)(fadeS * 1000.0f) : 0;
+      if (m.containsKey("L")) {
+        uint8_t L = m["L"] | 0;
+        if (L < _nLayers) {
+          if (m.containsKey("blend")) {
+            int8_t bi = m["blend"].is<const char*>() ? blendIndex(m["blend"].as<const char*>()) : (int8_t)(m["blend"] | 0);
+            if (bi >= 0 && bi < 8) _layers[L].blend = bi;
+          }
+          if (m.containsKey("op")) { float o = m["op"] | 1.0f; _layers[L].opacity = o < 0 ? 0 : (o > 1 ? 1 : o); }
+          if (m.containsKey("fx")) launchClip(L, m["p"], m["fx"] | 3, fadeMs);
+          else if (m["off"] | false) layerOff(L, fadeMs);
+          else if (m.containsKey("p")) { MDeck& d = _layers[L].d[_layers[L].cur]; if (d.on) parseParams(m["p"], d.p); }
+        }
+      }
+      if (m["black"] | false) for (uint8_t L = 0; L < _nLayers; L++) layerOff(L, fadeMs);
+      if (m.containsKey("dim")) { float d = m["dim"] | 1.0f; _mDim = (uint8_t)((d < 0 ? 0 : (d > 1 ? 1 : d)) * 255.0f + 0.5f); }
+      if (m.containsKey("out")) _mOut = m["out"] | true;
+      if (m.containsKey("fps")) { int f = m["fps"] | 40; _mFps = f < 1 ? 1 : (f > 100 ? 100 : f); }
+      if (m.containsKey("layers")) { int n = m["layers"] | LN_MAX_LAYERS; _nLayers = n < 1 ? 1 : (n > LN_MAX_LAYERS ? LN_MAX_LAYERS : n); }
+      if (m.containsKey("dfade")) { float f = m["dfade"] | 2.0f; _mFadeS = f < 0 ? 0 : f; }
+      if (m["reload"] | false) loadMasterSetup();
+    }
+
+    void addMasterInfo(JsonObject& root) {
+      JsonObject m = root.createNestedObject(F("master"));
+      m["setup"] = _msetup;
+      m["leds"] = _ms->total; m["tubes"] = _ms->nTubes; m["chunks"] = _ms->nChunks;
+      m["fbOk"] = _fb != nullptr;
+      m["out"] = _mOut; m["dim"] = _mDim; m["fpsSet"] = _mFps;
+      m["fps"] = _mStat.fps; m["render"] = _mStat.renderAvg; m["renderPeak"] = _mStat.renderPeak;
+      m["send"] = _mStat.sendAvg; m["packets"] = _art->packets;
+      JsonArray nodes = m.createNestedArray("nodes");
+      for (uint8_t k = 0; k < _ms->nNodes; k++) {
+        const LnNode& nd = _ms->nodes[k];
+        JsonObject o = nodes.createNestedObject();
+        o["name"] = nd.name; o["host"] = nd.host;
+        o["ip"] = nd.resolved ? nd.ip.toString() : String();
+        o["start"] = nd.start; o["unis"] = nd.unis; o["used"] = _ms->usedUniverses(k);
+        o["tubes"] = nd.tubes; o["leds"] = nd.leds;
+      }
+    }
+    void addMasterState(JsonObject& o) {
+      JsonObject m = o.createNestedObject("m");
+      m["dfade"] = _mFadeS;
+      JsonArray ls = m.createNestedArray("layers");
+      for (uint8_t L = 0; L < _nLayers; L++) {
+        const MLayer& ly = _layers[L];
+        JsonObject l = ls.createNestedObject();
+        l["blend"] = ly.blend; l["op"] = ly.opacity; l["fading"] = ly.fading;
+        const MDeck& d = ly.d[ly.cur];
+        l["on"] = d.on; if (d.on) l["fx"] = d.p.fx;
+      }
+    }
+
     // rolling 2 s window: average / peak overlay time per frame and overlay frames per second
     void trackRenderTime(uint32_t us, uint32_t px, uint32_t nowMs) {
       _rtSumUs += us; _rtFrames++; _rtPx = px;
@@ -849,6 +1187,7 @@ class Lichtnest : public Usermod {
         uint8_t pins[5] = {255, 255, 255, 255, 255};
         if (bus->getPins(pins) > 0 && pins[0] != 255) p["gpio"] = pins[0];
       }
+      if (_master) addMasterInfo(root);
       JsonObject rt = root.createNestedObject(F("rt"));   // render timing of our overlay
       rt["avg"] = (uint32_t)_rtAvgUs; rt["peak"] = (uint32_t)_rtPeakUs; rt["fps"] = (uint32_t)(_rtFps + 0.5f); rt["px"] = _rtPx;
       rt["usPx"] = _rtPx ? _rtAvgUs / _rtPx : 0;
@@ -871,6 +1210,7 @@ class Lichtnest : public Usermod {
       o["idle"] = _blackout;               // stopped-black state (UI mirrors it in previews)            // seconds into the current step (effects render from elapsed)
       JsonObject p = o.createNestedObject("p");
       writeParams(p, A);
+      if (_master) addMasterState(o);
       // live playback state for the UI's player
       JsonObject sc = o.createNestedObject("sched");
       sc["en"]  = _schedOn;                // time-window scheduling active?
@@ -897,6 +1237,7 @@ class Lichtnest : public Usermod {
       if (!initDone) return;
       JsonObject o = root[F("lichtnest")];
       if (o.isNull()) return;
+      if (_master) { JsonObject m = o["m"]; if (!m.isNull()) masterCommand(m); }
 
       // --- playback commands ---
       if (o.containsKey("loop"))   _plLoop = o["loop"] | _plLoop;
@@ -923,8 +1264,7 @@ class Lichtnest : public Usermod {
         parseParams(o["p"], _manual);
         _blackout = false;                  // an applied effect ends the stop-blackout
         _manualStart = millis();            // restart the manual effect's timeline
-        _nPos = 0; _nPosMs = 0;             // fresh noise drift
-        _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;   // fresh Zufall-strobe state
+        _st.reset();                        // fresh noise drift + Zufall-strobe state
       } else if (o.containsKey("p")) {
         parseParams(o["p"], activeParams());
       }
@@ -972,6 +1312,7 @@ class Lichtnest : public Usermod {
     void addToConfig(JsonObject& root) override {
       JsonObject top = root.createNestedObject(FPSTR(_name));
       top[FPSTR(_enabled)] = enabled;
+      top["master"] = _masterCfg; top["msetup"] = _msetup; top["mfps"] = _mFps;
       top["fx"] = _manual.fx;
       top["speed"] = _manual.speed; top["width"] = _manual.width; top["angle"] = _manual.angle; top["pmode"] = _manual.pmode; top["origin"] = _manual.origin;
       top["hz"] = _manual.hz; top["duty"] = _manual.duty; top["mode"] = _manual.mode;
@@ -989,6 +1330,9 @@ class Lichtnest : public Usermod {
       JsonObject top = root[FPSTR(_name)];
       bool ok = !top.isNull();
       ok &= getJsonValue(top[FPSTR(_enabled)], enabled, true);
+      getJsonValue(top["master"], _masterCfg, false);
+      getJsonValue(top["mfps"], _mFps, (uint8_t)40);
+      if (top["msetup"].is<const char*>()) strlcpy(_msetup, top["msetup"].as<const char*>(), sizeof(_msetup));
       getJsonValue(top["fx"], _manual.fx, _manual.fx);
       getJsonValue(top["speed"], _manual.speed, _manual.speed); getJsonValue(top["width"], _manual.width, _manual.width); getJsonValue(top["angle"], _manual.angle, _manual.angle);
       getJsonValue(top["pmode"], _manual.pmode, _manual.pmode); getJsonValue(top["origin"], _manual.origin, _manual.origin);
@@ -1116,8 +1460,7 @@ class Lichtnest : public Usermod {
       if (_stepCount == 0) return;
       idx = ((idx % _stepCount) + _stepCount) % _stepCount;
       _plIdx = (uint8_t)idx; _plStepStart = millis();   // elapsed = 0 → effects start from black
-      _nPos = 0; _nPosMs = 0;                            // fresh noise drift per step
-      _zufFlash = _zufPrevFlash = 0xFFFFFFFF; _zufSelN = _zufPrevN = 0;   // fresh Zufall-strobe state per step
+      _st.reset();                                       // fresh noise drift + Zufall-strobe state per step
     }
 
     // --- schedule -----------------------------------------------------------
