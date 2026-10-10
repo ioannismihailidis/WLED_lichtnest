@@ -30,8 +30,10 @@
 
 #define LN_MAX_TYPES  16
 #define LN_MAX_NODES  16
-#define LN_MAX_TUBES  64
-#define LN_MAX_CHUNKS 192
+#define LN_MAX_TUBES  64     // = ZV_MAXGEO: the effect geometry holds this many tubes
+#define LN_MAX_CHUNKS 512    // one per tube and universe; few LEDs per universe need many
+#define LN_MAX_LEDS   8192   // frame buffer: 3 bytes per LED; tubes beyond are not rendered
+#define LN_MAX_TYPE_LEDS 2048
 #define LN_ARTNET_PORT 6454
 
 struct LnType  { char id[8]; char name[24]; uint16_t leds = 0; float length = 0; };
@@ -57,11 +59,14 @@ class LnSetup {
     float    canvasW = 1, canvasH = 1;
     uint8_t  nTypes = 0, nNodes = 0, nTubes = 0;
     uint16_t nChunks = 0, total = 0;
+    uint16_t tubesInFile = 0;              // tube rows in the file (more than LN_MAX_TUBES are dropped)
+    bool     chunksFull = false;           // chunk table full: the LEDs beyond it are not sent
+    bool     ledsFull = false;             // more than LN_MAX_LEDS: the tubes beyond are left out
     LnType   types[LN_MAX_TYPES];
     LnNode   nodes[LN_MAX_NODES];
     LnTube   tubes[LN_MAX_TUBES];
     LnChunk  chunks[LN_MAX_CHUNKS];
-    uint8_t  order[LN_MAX_CHUNKS];         // chunk indices sorted by node (stable): send order
+    uint16_t order[LN_MAX_CHUNKS];         // chunk indices sorted by node (stable): send order
 
     // parse a setup file; false if it is missing or not a lichtnest setup
     bool load(const char* path) {
@@ -92,7 +97,8 @@ class LnSetup {
           if (!ty.id[0]) snprintf(ty.id, sizeof(ty.id), "%u", (unsigned)(r - 1));
           cell(row, cN, ty.name, sizeof(ty.name), nullptr);
           if (!ty.name[0]) snprintf(ty.name, sizeof(ty.name), "Type%u", (unsigned)r);
-          ty.leds = (uint16_t)toNum(at(row, cL), 0);
+          float nl = toNum(at(row, cL), 0);          // garbage / negative / huge counts must not wrap
+          ty.leds = (nl > 0 && nl < LN_MAX_TYPE_LEDS) ? (uint16_t)nl : (nl >= LN_MAX_TYPE_LEDS ? LN_MAX_TYPE_LEDS : 0);
           ty.length = toNum(at(row, cLen), 0);
           nTypes++;
         }
@@ -124,10 +130,11 @@ class LnSetup {
         nNodes = 1;
       }
 
-      nTubes = 0;
+      nTubes = 0; tubesInFile = 0;
       JsonArray tb = root["tubes"];
       if (!tb.isNull() && tb.size() > 1) {
         JsonArray h = tb[0];
+        tubesInFile = tb.size() - 1;
         int cNr = col(h, "Nr"), cT = col(h, "Type"), cN = col(h, "Node"), cX = col(h, "PosX"), cY = col(h, "PosY"), cF = col(h, "Flip");
         for (size_t r = 1; r < tb.size() && nTubes < LN_MAX_TUBES; r++) {
           JsonArray row = tb[r]; LnTube& tu = tubes[nTubes];
@@ -150,11 +157,12 @@ class LnSetup {
       uint16_t curUni[LN_MAX_NODES], curCh[LN_MAX_NODES], curCnt[LN_MAX_NODES];
       bool started[LN_MAX_NODES] = { false };
       for (uint8_t i = 0; i < nNodes; i++) { nodes[i].tubes = 0; nodes[i].leds = 0; nodes[i].last = -1; }
-      nChunks = 0; total = 0;
+      nChunks = 0; total = 0; chunksFull = false; ledsFull = false;
       for (uint8_t ti = 0; ti < nTubes; ti++) {
         LnTube& tu = tubes[ti];
         tu.first = total; tu.leds = 0;
         if (tu.type < 0 || types[tu.type].leds == 0) continue;
+        if ((uint32_t)total + types[tu.type].leds > LN_MAX_LEDS) { ledsFull = true; continue; }
         LnNode& nd = nodes[tu.node];
         uint8_t k = tu.node;
         if (!started[k]) { curUni[k] = nd.start; curCh[k] = 1; curCnt[k] = 0; started[k] = true; }
@@ -164,7 +172,7 @@ class LnSetup {
         for (uint16_t led = 0; led < numLeds; led++) {
           if (curCnt[k] >= nd.perUni || curCh[k] + 2 > 512) { curUni[k]++; curCh[k] = 1; curCnt[k] = 0; }
           if (!ch || ch->uni != curUni[k]) {
-            if (nChunks >= LN_MAX_CHUNKS) { ch = nullptr; break; }
+            if (nChunks >= LN_MAX_CHUNKS) { ch = nullptr; chunksFull = true; break; }
             ch = &chunks[nChunks++];
             ch->tube = ti; ch->node = k; ch->uni = curUni[k]; ch->ch = curCh[k];
             ch->first = total + led; ch->count = 0; ch->over = curUni[k] > lastUni;
@@ -242,9 +250,27 @@ class LnArtnet {
     uint32_t packets = 0;                   // packets of the last frame
     uint32_t sendUs = 0;                    // time of the last frame's send
 
-    // resolve node hosts: dotted IPs at once, mDNS names lazily (one try per node every 10 s)
+    // resolve node hosts: dotted IPs at once, mDNS names asynchronously (one query in flight,
+    // a node is retried every 10 s) - a blocking lookup would stall the frames for ~300 ms
     void resolve(LnSetup& s, IPAddress broadcast) {
       uint32_t now = millis();
+      #ifdef ARDUINO_ARCH_ESP32
+      if (_q) {                                            // a query is running: collect without waiting
+        mdns_result_t* res = nullptr;
+        if (!mdns_query_async_get_results(_q, 0, &res, nullptr)) return;
+        for (uint8_t k = 0; k < s.nNodes; k++) {         // the node may have moved after a reload: match by name
+          LnNode& nd = s.nodes[k];
+          if (nd.resolved || strcmp(nd.host, _qHost) != 0) continue;
+          for (mdns_result_t* r = res; r; r = r->next)
+            for (mdns_ip_addr_t* a = r->addr; a; a = a->next)
+              if (a->addr.type == ESP_IPADDR_TYPE_V4 && !nd.resolved) { nd.ip = IPAddress(a->addr.u_addr.ip4.addr); nd.resolved = true; }
+        }
+        if (res) mdns_query_results_free(res);
+        mdns_query_async_delete(_q);
+        _q = nullptr;
+        return;
+      }
+      #endif
       for (uint8_t k = 0; k < s.nNodes; k++) {
         LnNode& nd = s.nodes[k];
         if (nd.resolved) continue;
@@ -255,10 +281,10 @@ class LnArtnet {
         if (nd.lastTry && now - nd.lastTry < 10000) continue;
         nd.lastTry = now;
         #ifdef ARDUINO_ARCH_ESP32
-        ip = MDNS.queryHost(nd.host, 300);
-        if (ip != IPAddress((uint32_t)0)) { nd.ip = ip; nd.resolved = true; }
+        _q = mdns_query_async_new(nd.host, nullptr, nullptr, MDNS_TYPE_A, 1500, 1, nullptr);
+        if (_q) strlcpy(_qHost, nd.host, sizeof(_qHost));
         #endif
-        return;                             // at most one blocking lookup per call
+        return;                                            // at most one query at a time
       }
     }
 
@@ -295,6 +321,10 @@ class LnArtnet {
     }
 
   private:
+    #ifdef ARDUINO_ARCH_ESP32
+    mdns_search_once_t* _q = nullptr;     // running mDNS host query
+    char _qHost[40] = "";
+    #endif
     WiFiUDP  _udp;
     uint8_t  _seq = 1;
     uint8_t  _dmx[512];

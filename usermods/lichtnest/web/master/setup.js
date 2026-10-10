@@ -68,6 +68,8 @@ export function nodeIndex (name) {
   for (let i = setup.nodes.length - 1; i >= 0; i--) if (setup.nodes[i].name === name) return i   // last one wins
   return 0
 }
+// firmware limits (master.h): more tubes are dropped, more chunks are not sent
+export const MAX_TUBES = 64, MAX_CHUNKS = 512, MAX_LEDS = 8192
 export const isLocal = (n) => (n?.ip || '').toLowerCase() === 'local'
 export function nodesOrDefault () {
   return setup.nodes.length ? setup.nodes : [{ name: 'Default', ip: '', start: 0, unis: 64, perUni: 170, port: 0 }]

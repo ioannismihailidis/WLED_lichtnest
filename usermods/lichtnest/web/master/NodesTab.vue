@@ -1,8 +1,8 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { setup, ui, compute, addNode, deleteNode, nodeInUse, renameNode, isLocal } from './setup.js'
+import { ref, computed, watch, onMounted } from 'vue'
+import { setup, ui, compute, addNode, deleteNode, nodeInUse, renameNode, isLocal, MAX_CHUNKS } from './setup.js'
 import { dev } from './api.js'
-import { clients, refreshClients, applyUniverses, applyLedCounts, discover, needsReboot } from './clients.js'
+import { clients, refreshClients, applyUniverses, applyLedCounts, discover, needsReboot, recheck } from './clients.js'
 import ClientNet from './ClientNet.vue'
 
 const addr = computed(() => compute())
@@ -13,6 +13,8 @@ const ownPorts = computed(() => dev.info?.ports || [])     // the master's physi
 const patch = computed(() => addr.value.chunks.map((c) => ({ ...c, nr: c.tube + 1, nodeName: (setup.nodes[c.node] || { name: 'Default' }).name })))
 
 onMounted(() => { refreshClients(); discover() })
+// node / tube edits change what the clients should get: update targets + status at once
+watch(() => [setup.nodes, setup.tubes, setup.types], recheck, { deep: true })
 const netOf = ref('')                 // host whose network form is open
 const netClient = computed(() => clients.list.find((c) => c.host === netOf.value) || null)
 function netSaved () { netOf.value = ''; setTimeout(refreshClients, 15000) }
@@ -126,6 +128,7 @@ function autoUniverses () {
     </div>
 
     <div class="sec">PATCH</div>
+    <div v-if="patch.length > MAX_CHUNKS" class="card bad" style="margin-bottom:8px">{{ patch.length }} Patch-Zeilen — der Master sendet nur die ersten {{ MAX_CHUNKS }}. Mehr LEDs pro Universe einstellen.</div>
     <div class="scrollbox" style="max-height:320px">
       <table class="t">
         <thead><tr><th>Tube</th><th>Node</th><th>LEDs</th><th>Universe</th><th>Kanal</th><th>IP</th><th>Status</th></tr></thead>

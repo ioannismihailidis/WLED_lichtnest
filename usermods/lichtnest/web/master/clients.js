@@ -62,6 +62,17 @@ export async function refreshClients () {
   clients.busy = false
 }
 
+// the targets follow the setup: recompute them (and the differences against the client's
+// last read config) whenever nodes / tubes change and right before sending - no network
+export function recheck () {
+  const want = desired()
+  for (const c of clients.list) {
+    const w = want.find((x) => x.host === c.host)
+    c.want = w ? w.ports : []
+    if (c.online) check(c)
+  }
+}
+
 function check (c) {
   const live = c.cfg?.if?.live || {}
   const dmx = live.dmx || {}
@@ -89,6 +100,7 @@ export const needsReboot = (c) => { const live = c.cfg?.if?.live || {}; return !
 
 // Art-Net receive + universes per output; universes take effect at once
 export async function applyUniverses (c, reboot = false) {
+  recheck()
   const dmx = c.cfg?.if?.live?.dmx || {}
   const n = Math.max((dmx.puni || []).length, (c.cfg?.hw?.led?.ins || []).length, ...c.want.map((w) => w.port))
   const puni = Array.from({ length: n }, (_, i) => (dmx.puni || [])[i] ?? 0)
@@ -101,6 +113,7 @@ export async function applyUniverses (c, reboot = false) {
 // LED count per output (outputs are chained: start = sum of the previous lengths); the
 // client reboots, its LEDs go dark for a few seconds
 export async function applyLedCounts (c) {
+  recheck()
   const ins = JSON.parse(JSON.stringify(c.cfg?.hw?.led?.ins || []))
   for (const w of c.want) if (ins[w.port - 1]) ins[w.port - 1].len = w.leds
   let start = 0

@@ -28,7 +28,9 @@ function load () {
   f.wIp = (w.ip || zero()).slice(); f.wGw = (w.gw || zero()).slice(); f.wSn = (w.sn || [255, 255, 255, 0]).slice()
   f.wDhcp = isZero(w.ip)
 }
-watch(() => props.client, load, { immediate: true })
+// reload the form only for another client - a background refresh of the client list must
+// not wipe what is being typed
+watch(() => props.client.host, load, { immediate: true })
 
 // live addresses (lichtnest usermod reports both interfaces)
 const net = computed(() => props.client.info?.net || {})

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue'
-import { setup, ui, findType, addTube, deleteTube, moveTube, nudge, distribute } from './setup.js'
+import { setup, ui, findType, addTube, deleteTube, moveTube, nudge, distribute, MAX_TUBES } from './setup.js'
 import BgPanel from './BgPanel.vue'
 
 const t = computed(() => setup.tubes[ui.tube] || null)
@@ -16,6 +16,7 @@ const typeOk = (tb) => { const ty = findType(tb.type); return !!ty && ty.leds > 
 <template>
   <div>
     <div class="sec">TUBES · {{ setup.tubes.length }}</div>
+    <div v-if="setup.tubes.length > MAX_TUBES" class="card bad" style="margin-bottom:8px">Mehr als {{ MAX_TUBES }} Tubes — der Master gibt nur die ersten {{ MAX_TUBES }} aus.</div>
     <div ref="listEl" class="scrollbox">
       <table class="t">
         <thead><tr><th>Nr</th><th>Typ</th><th>Node</th><th>X</th><th>Y</th><th>Richtung</th></tr></thead>

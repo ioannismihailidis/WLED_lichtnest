@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { dev, masterCmd, url } from './api.js'
-import { save, saveNow, compute, isLocal } from './setup.js'
+import { save, saveNow, compute, isLocal, setup, MAX_TUBES, MAX_CHUNKS, MAX_LEDS } from './setup.js'
 import { show, view, showSave, saveShowNow, showName, newShow, openShow, saveShowAs, showFiles } from './show.js'
 import SetupPage from './SetupPage.vue'
 import ShowPage from './ShowPage.vue'
@@ -13,6 +13,13 @@ const artUsage = computed(() => addr.value.usage.filter((u) => !isLocal(u.node))
 const nodesUsed = computed(() => artUsage.value.filter((u) => u.used > 0).length)
 const unisUsed = computed(() => artUsage.value.reduce((a, u) => a + u.used, 0))
 const overflow = computed(() => artUsage.value.some((u) => u.over))
+// setups beyond the firmware's limits: the device drops tubes / stops sending
+const limitWarn = computed(() => {
+  if (setup.tubes.length > MAX_TUBES) return `${setup.tubes.length} Tubes — der Master gibt nur die ersten ${MAX_TUBES} aus`
+  if (addr.value.total > MAX_LEDS) return `${addr.value.total} LEDs — der Master rendert höchstens ${MAX_LEDS}, die Tubes darüber bleiben dunkel`
+  if (addr.value.chunks.length > MAX_CHUNKS) return `${addr.value.chunks.length} Patch-Zeilen — der Master sendet nur ${MAX_CHUNKS} (mehr LEDs pro Universe einstellen)`
+  return ''
+})
 
 // dimmer: local value while dragging, the device value otherwise
 const dimDrag = ref(null)
@@ -21,7 +28,11 @@ let dimT = null
 function setDim (v) {
   dimDrag.value = v
   clearTimeout(dimT)
-  dimT = setTimeout(async () => { await masterCmd({ dim: v }); dimDrag.value = null }, 120)
+  dimT = setTimeout(async () => {
+    await masterCmd({ dim: v })
+    if (dev.master) dev.master.dim = Math.round(v * 255)   // show the sent value until the next poll confirms it
+    dimDrag.value = null
+  }, 120)
 }
 const toggleOut = () => masterCmd({ out: !(m.value?.out) })
 
@@ -45,7 +56,8 @@ async function pickShow (f) { showList.value = null; await openShow('/' + f) }
 async function doNewShow () { const n = window.prompt('Neue Show — Name (die Ebenen bleiben):', ''); if (n) await newShow(n) }
 async function doSaveShowAs () { const n = window.prompt('Show speichern unter (Name):', showName()); if (n) await saveShowAs(n) }
 // the master dimmer is part of the show file (settings.Dimmer)
-watch(() => m.value?.dim, (d) => { if (d !== undefined && dimDrag.value === null) show.dimmer = Math.round(d / 255 * 100) / 100 })
+// the dimmer is stored with the show (settings.Dimmer) when the show is saved next - it does
+// not trigger a save itself: every flash write pauses the master for up to ~0.4 s
 </script>
 
 <template>
@@ -95,6 +107,7 @@ watch(() => m.value?.dim, (d) => { if (d !== undefined && dimDrag.value === null
       <span><b>{{ unisUsed }}</b> Universes auf <b>{{ nodesUsed }}</b> Nodes<span v-if="overflow" class="bad"> · Überlauf</span></span>
       <span>Ausgang <b :class="m?.out ? 'ok' : 'bad'">{{ m?.out ? 'an' : 'aus' }}</b></span>
       <span v-if="m"><b>{{ m.fps }}</b> fps · Render {{ (m.render / 1000).toFixed(1) }} ms · Senden {{ (m.send / 1000).toFixed(1) }} ms</span>
+      <span v-if="limitWarn" class="bad">⚠ {{ limitWarn }}</span>
       <span v-if="m?.test" class="ok">Test aktiv</span>
       <span v-if="dev.info?.live && dev.info?.lm" :class="m?.out ? 'bad' : 'ok'">Empfang von außen: {{ dev.info.lm }}{{ dev.info.lip ? ` von ${dev.info.lip}` : '' }}{{ m?.out ? ' — wird ignoriert, solange ART-NET an ist' : '' }}</span>
       <span class="m-spacer" />

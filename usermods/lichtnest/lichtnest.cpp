@@ -226,6 +226,16 @@ class Lichtnest : public Usermod {
     float     _mFadeS = 2.0f;          // default fade
     uint32_t  _mLastFrame = 0, _mResolveMs = 0;
     MStat     _mStat;
+    // Master state is touched from two tasks: the frame loop (loopTask) and JSON commands /
+    // status requests (async_tcp, another core). One mutex serialises them: a command or
+    // status request waits for the running frame at most, and a setup reload can never free
+    // the frame buffer under the renderer.
+    SemaphoreHandle_t _mMutex = nullptr;
+    struct MLock {
+      SemaphoreHandle_t m; bool ok;
+      explicit MLock(SemaphoreHandle_t mx) : m(mx), ok(mx && xSemaphoreTake(mx, pdMS_TO_TICKS(1000)) == pdTRUE) {}
+      ~MLock() { if (ok) xSemaphoreGive(m); }
+    };
     // setup test stage (see applyTest)
     uint8_t   _tPat = 0, _tHl = 0; int _tHi = -1;
     float     _tLvl = 0.4f, _tGs = 100, _tGw = 8;
@@ -926,6 +936,7 @@ class Lichtnest : public Usermod {
     uint16_t chainLen() const { return (_master && _ms) ? _ms->total : strip.getLengthTotal(); }
 
     void initMaster() {
+      if (!_mMutex) _mMutex = xSemaphoreCreateMutex();
       if (!_ms) { _ms = (LnSetup*)d_malloc(sizeof(LnSetup)); if (_ms) new (_ms) LnSetup(); }
       if (!_art) { _art = (LnArtnet*)d_malloc(sizeof(LnArtnet)); if (_art) new (_art) LnArtnet(); }
       if (!_layers) { _layers = (MLayer*)d_malloc(sizeof(MLayer) * LN_MAX_LAYERS); if (_layers) for (uint8_t i = 0; i < LN_MAX_LAYERS; i++) new (&_layers[i]) MLayer(); }
@@ -955,6 +966,8 @@ class Lichtnest : public Usermod {
     }
 
     void masterLoop() {
+      MLock lock(_mMutex);
+      if (!lock.ok) return;
       uint32_t now = millis();
       if (now - _mResolveMs > 1000) { _mResolveMs = now; _art->resolve(*_ms, IPAddress(255, 255, 255, 255)); }
       uint32_t interval = 1000 / (_mFps ? _mFps : 40);
@@ -1108,6 +1121,8 @@ class Lichtnest : public Usermod {
     // the master's own outputs: tubes on a "local" node, copied from the frame buffer onto
     // the strip at the node's output (Port = n-th physical output, 0 = the strip from LED 0)
     void outputLocal() {
+      MLock lock(_mMutex);
+      if (!lock.ok) return;
       const uint8_t dim = testActive(millis()) ? 255 : _mDim;   // the dimmer does not apply to tests
       for (uint8_t ti = 0; ti < _ms->nTubes; ti++) {
         const LnTube& tu = _ms->tubes[ti];
@@ -1167,7 +1182,7 @@ class Lichtnest : public Usermod {
     //   {"L":i,"fx":n,"p":{..},"fade":s}  launch clip   ·  {"L":i,"p":{..}} live tweak (no restart)
     //   {"L":i,"off":true,"fade":s}       layer to black ·  {"L":i,"blend":"add","op":0.8}
     //   {"black":true,"fade":s}  all layers to black     ·  {"dim":0..1,"out":bool,"fps":n,"reload":true}
-    void masterCommand(JsonObject m) {
+    void masterCommand(JsonObject m, bool nested = false) {
       float fadeS = m["fade"] | _mFadeS;
       uint32_t fadeMs = fadeS > 0 ? (uint32_t)(fadeS * 1000.0f) : 0;
       if (m.containsKey("L")) {
@@ -1200,10 +1215,10 @@ class Lichtnest : public Usermod {
       if (m.containsKey("dfade")) { float f = m["dfade"] | 2.0f; _mFadeS = f < 0 ? 0 : f; }
       if (m["reload"] | false) loadMasterSetup();
       JsonArray batch = m["batch"];                     // several commands at once (a cue: all layers in one go)
-      if (!batch.isNull()) for (JsonObject b : batch) masterCommand(b);
+      if (!batch.isNull() && !nested) for (JsonObject b : batch) masterCommand(b, true);   // one level only
       if (m["act"].is<const char*>()) strlcpy(_mActive, m["act"].as<const char*>(), sizeof(_mActive));
-      if (m["showfile"].is<const char*>()) { strlcpy(_mshow, m["showfile"].as<const char*>(), sizeof(_mshow)); configNeedsWrite = true; }
-      if (m["open"].is<const char*>()) {                // switch the current setup file (kept in cfg)
+      if (m["showfile"].is<const char*>() && validFile(m["showfile"].as<const char*>(), ".show.json", sizeof(_mshow))) { strlcpy(_mshow, m["showfile"].as<const char*>(), sizeof(_mshow)); configNeedsWrite = true; }
+      if (m["open"].is<const char*>() && validFile(m["open"].as<const char*>(), ".setup.json", sizeof(_msetup))) {   // switch the current setup file (kept in cfg)
         strlcpy(_msetup, m["open"].as<const char*>(), sizeof(_msetup));
         loadMasterSetup();
         configNeedsWrite = true;
@@ -1299,10 +1314,18 @@ class Lichtnest : public Usermod {
       }
     }
 
+    // a device file name the master accepts: "/<name><suffix>", short enough for the cfg field
+    static bool validFile(const char* p, const char* suffix, size_t cap) {
+      size_t n = strlen(p), s = strlen(suffix);
+      return n > s + 1 && n < cap && p[0] == '/' && strchr(p + 1, '/') == nullptr && strcmp(p + n - s, suffix) == 0;
+    }
+
     void addMasterInfo(JsonObject& root) {
       JsonObject m = root.createNestedObject(F("master"));
       m["setup"] = _msetup;
       m["leds"] = _ms->total; m["tubes"] = _ms->nTubes; m["chunks"] = _ms->nChunks;
+      m["tubesFile"] = _ms->tubesInFile; m["chunksFull"] = _ms->chunksFull; m["ledsFull"] = _ms->ledsFull;
+      m["maxTubes"] = LN_MAX_TUBES; m["maxChunks"] = LN_MAX_CHUNKS;
       m["fbOk"] = _fb != nullptr;
       m["out"] = _mOut; m["dim"] = _mDim; m["fpsSet"] = _mFps;
       m["fps"] = _mStat.fps; m["render"] = _mStat.renderAvg; m["renderPeak"] = _mStat.renderPeak;
@@ -1365,7 +1388,7 @@ class Lichtnest : public Usermod {
         uint8_t pins[5] = {255, 255, 255, 255, 255};
         if (bus->getPins(pins) > 0 && pins[0] != 255) p["gpio"] = pins[0];
       }
-      if (_master) addMasterInfo(root);
+      if (_master) { MLock lock(_mMutex); if (lock.ok) addMasterInfo(root); }
       JsonObject rt = root.createNestedObject(F("rt"));   // render timing of our overlay
       rt["avg"] = (uint32_t)_rtAvgUs; rt["peak"] = (uint32_t)_rtPeakUs; rt["fps"] = (uint32_t)(_rtFps + 0.5f); rt["px"] = _rtPx;
       rt["usPx"] = _rtPx ? _rtAvgUs / _rtPx : 0;
@@ -1388,7 +1411,7 @@ class Lichtnest : public Usermod {
       o["idle"] = _blackout;               // stopped-black state (UI mirrors it in previews)            // seconds into the current step (effects render from elapsed)
       JsonObject p = o.createNestedObject("p");
       writeParams(p, A);
-      if (_master) addMasterState(o);
+      if (_master) { MLock lock(_mMutex); if (lock.ok) addMasterState(o); }
       // live playback state for the UI's player
       JsonObject sc = o.createNestedObject("sched");
       sc["en"]  = _schedOn;                // time-window scheduling active?
@@ -1415,7 +1438,7 @@ class Lichtnest : public Usermod {
       if (!initDone) return;
       JsonObject o = root[F("lichtnest")];
       if (o.isNull()) return;
-      if (_master) { JsonObject m = o["m"]; if (!m.isNull()) masterCommand(m); }
+      if (_master) { JsonObject m = o["m"]; if (!m.isNull()) { MLock lock(_mMutex); if (lock.ok) masterCommand(m); } }
 
       // --- playback commands ---
       if (o.containsKey("loop"))   _plLoop = o["loop"] | _plLoop;

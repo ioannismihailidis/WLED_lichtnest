@@ -8,6 +8,9 @@
 // The UI drives playback: launching sends the clips to the device's layers.
 import { reactive, watch } from 'vue'
 import { dev, uploadFile, readFile, masterCmd, listFiles, refresh } from './api.js'
+// writing a file pauses the master's frames (flash writes stop both CPU cores for up to
+// ~0.4 s): the show autosaves only after a few quiet seconds, the dimmer never triggers it
+const SHOW_AUTOSAVE_MS = 5000
 import { EFFECTS } from '../src/effects.js'
 import { FADE_COLS } from '../src/fxsim.js'
 import { fxDefault } from './mfx.js'
@@ -100,7 +103,7 @@ export function toFile () {
   return {
     format: 'lichtnest-show',
     version: 1,
-    settings: { Fadetime: show.fadetime, Dimmer: show.dimmer },
+    settings: { Fadetime: show.fadetime, Dimmer: dev.master ? Math.round(dev.master.dim / 255 * 100) / 100 : show.dimmer },
     pages: [['Page', 'Name'], ...show.pages.map((p, i) => [String(i + 1), p.name])],
     layers: [['Layer', 'Name', 'Blend', 'Opacity'], ...show.layers.map((l, i) => [String(i + 1), l.name, l.blend, String(l.opacity)])],
     columns,
@@ -133,11 +136,11 @@ function blankShow () {
   show.pages = [{ name: 'Main', cues: [{ name: 'Cue 1', fade: show.fadetime, clips: emptyClips() }] }]
 }
 let timer = null
-watch(() => [show.fadetime, show.dimmer, show.layers, show.pages], () => {
+watch(() => [show.fadetime, show.layers, show.pages], () => {
   if (quiet || !show.loaded) return
   showSave.pending = true
   clearTimeout(timer)
-  timer = setTimeout(saveShowNow, 1000)
+  timer = setTimeout(saveShowNow, SHOW_AUTOSAVE_MS)
 }, { deep: true })
 export async function saveShowNow () {
   clearTimeout(timer)
