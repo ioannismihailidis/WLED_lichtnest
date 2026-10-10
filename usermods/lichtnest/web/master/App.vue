@@ -25,6 +25,11 @@ function setDim (v) {
 }
 const toggleOut = () => masterCmd({ out: !(m.value?.out) })
 
+async function leaveMaster () {
+  if (!window.confirm('Diesen Controller wieder zu einem normalen Lichtnest-Controller machen? Er sendet dann keine Show mehr an die anderen Controller und startet neu.')) return
+  await fetch(url('/json/cfg'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ um: { Lichtnest: { master: false } }, rb: true }) }).catch(() => {})
+  setTimeout(() => { location.href = url('/') }, 15000)
+}
 async function enableMaster () {
   await fetch(url('/json/cfg'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ um: { Lichtnest: { master: true } }, rb: true }) })
 }
@@ -95,6 +100,8 @@ watch(() => m.value?.dim, (d) => { if (d !== undefined && dimDrag.value === null
       <span class="m-spacer" />
       <span v-if="saveState" :class="{ bad: saveErr }">{{ saveState }}</span>
       <span :class="dev.online ? 'ok' : 'bad'">{{ dev.online ? (dev.name || 'verbunden') : 'offline' }}</span>
+      <a v-if="m" class="lnk" :href="url('/lichtnest')">Lichtnest-UI</a>
+      <a v-if="m" class="lnk" href="#" @click.prevent="leaveMaster">Rolle: zurück zu Normal</a>
     </footer>
   </div>
 </template>

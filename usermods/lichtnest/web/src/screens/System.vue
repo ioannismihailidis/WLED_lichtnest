@@ -4,7 +4,7 @@ import {
   wled, cfg, plan, loadCfg, saveCfg, saveLedBuses, postState, persistTubes, syncDeviceTime, deviceTimeMs,
   portMaxLeds, setPortMax, reindexPortMaxAfterRemove,
   applyTubeLensToIns, savePlan, cancelSavePlan, loadPlan,
-  DEFAULT_PORT_MAX,
+  DEFAULT_PORT_MAX, getHost,
 } from '../wled.js'
 import NumStepper from '../components/NumStepper.vue'
 import IpInput from '../components/IpInput.vue'
@@ -47,6 +47,7 @@ const apPass = ref('')
 let lastMax = DEF_BUDGET
 
 onMounted(async () => {
+  if (cfg.loaded) savedEthType.value = cfg.data?.eth?.type | 0   // cached config: known right away
   await Promise.all([loadCfg(), loadPlan()])   // plan carries the per-port LED guard limits
   const budgetSum = (cfg.data?.hw?.led?.ins || []).reduce((a, b) => a + (b.maxpwr || 0), 0)
   if (budgetSum) lastMax = budgetSum
@@ -274,7 +275,7 @@ const ETH_TYPES = [
   { v: 3, l: 'WESP32' },
 ]
 const ethOn = computed(() => !!eth.value?.type)
-const savedEthType = ref(0)   // type stored on the device -> warn only when it is being changed
+const savedEthType = ref(null)   // type stored on the device (null = not loaded yet) -> warn only when it is being changed
 const ethDhcp = computed({
   get: () => isZeroIp(eth.value?.ip),
   set: (v) => { if (v) eth.value.ip = [0, 0, 0, 0]; else prefillStatic(eth.value, netEth.value) },
@@ -410,6 +411,7 @@ async function save () {
   if (wifiPass.value) partial.nw.ins[0].psk = wifiPass.value
   if (apPass.value) partial.ap.psk = apPass.value
   const ok = await saveCfg(partial)
+  if (ok && eth.value) savedEthType.value = eth.value.type | 0
   if (ok && lens.segPatch?.length) { await postState({ seg: lens.segPatch }); persistTubes() }
   busy.value = false
   msg.value = ok ? 'Gespeichert ✓' : 'Fehler beim Speichern'
@@ -418,6 +420,22 @@ async function save () {
     rebootSnapshot = rebootKey()
     if (await confirmDialog({ title: 'Jetzt neu starten?', body: 'Netzwerk- und Art-Net-Port-Einstellungen wirken erst nach einem Neustart. Die neue Adresse steht dann unter „Netzwerk".', confirmLabel: 'Neu starten', danger: false })) await saveCfg({ rb: true })
   }
+}
+// --- role: normal controller or master (renders the show for all controllers) ---------
+const isMaster = computed(() => !!c.value?.um?.Lichtnest?.master)
+const masterUi = ref(null)            // master.htm.gz on the device? (null = unknown)
+onMounted(async () => {
+  try { const l = await (await fetch(getHost() + '/edit?list=/')).json(); masterUi.value = l.some((f) => /master\.htm(\.gz)?$/.test(f.name)) } catch (e) { masterUi.value = null }
+})
+async function setRole (master) {
+  const body = master
+    ? 'Der Controller wird Master: er rendert die Show selbst und schickt sie per Art-Net an die anderen Controller. Unter „/“ erscheint danach die Master-Oberfläche, diese Oberfläche bleibt unter /lichtnest erreichbar. Der Controller startet neu.'
+    : 'Der Controller wird wieder ein normaler Lichtnest-Controller. Der Controller startet neu.'
+  if (!(await confirmDialog({ title: master ? 'Als Master einrichten?' : 'Zurück zu Normal?', body, confirmLabel: 'Umschalten & Neustart', danger: false }))) return
+  busy.value = true
+  await saveCfg({ um: { Lichtnest: { master } }, rb: true }, { timeoutOk: true })
+  msg.value = 'Neustart … die Seite lädt gleich neu'
+  setTimeout(() => { location.href = (getHost() || '') + '/' }, 15000)
 }
 async function reboot () { if (await confirmDialog({ title: 'Controller neu starten?', body: 'Die LEDs gehen für ein paar Sekunden aus.', confirmLabel: 'Neu starten', danger: false })) await saveCfg({ rb: true }) }
 </script>
@@ -570,7 +588,7 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
           <label class="flbl">Board / Ethernet-Chip</label>
           <select class="sel" v-model.number="eth.type"><option v-for="t in ETH_TYPES" :key="t.v" :value="t.v">{{ t.l }}</option></select>
           <div v-if="!ethOn" class="hint mono">Ethernet ist aus. Board wählen, speichern und neu starten, damit das Kabel erkannt wird.</div>
-          <div v-else-if="eth.type !== savedEthType" class="alert soft">Ein falscher Board-Typ kann den Controller beim Start hängen lassen — dann hilft nur noch USB. Nur das tatsächlich verbaute Board wählen.</div>
+          <div v-else-if="savedEthType !== null && eth.type !== savedEthType" class="alert soft">Ein falscher Board-Typ kann den Controller beim Start hängen lassen — dann hilft nur noch USB. Nur das tatsächlich verbaute Board wählen.</div>
           <template v-if="ethOn">
             <div class="row brd"><span class="lbl">Aktuelle Adresse</span><span class="mono" :class="{ muted: !netEth }">{{ netEth || 'nicht verbunden' }}</span></div>
             <div class="row brd"><span class="lbl">DHCP (automatisch)</span><button class="sw" :class="{ on: ethDhcp }" @click="ethDhcp = !ethDhcp"><span /></button></div>
@@ -631,6 +649,15 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
       <div class="panel pad">
         <div class="row brd"><span class="lbl">Sync senden</span><button class="sw" :class="{ on: c.if?.sync?.send?.en }" @click="c.if.sync.send.en = !c.if.sync.send.en"><span /></button></div>
         <div class="row"><span class="lbl">Firmware</span><span class="mono muted">WLED {{ wled.info.ver }}</span></div>
+      </div>
+
+      <!-- ROLLE -->
+      <div class="seclbl mono">ROLLE</div>
+      <div class="panel pad">
+        <div class="row brd"><span class="lbl">Rolle<small>{{ isMaster ? 'rendert die Show und beliefert die anderen Controller' : 'eigene Effekte, Art-Net-Empfang möglich' }}</small></span>
+          <div class="seg"><button :class="{ on: !isMaster }" @click="isMaster && setRole(false)">Normal</button><button :class="{ on: isMaster }" @click="!isMaster && setRole(true)">Master</button></div></div>
+        <div v-if="masterUi === false" class="alert soft">Die Master-Oberfläche (master.htm.gz) fehlt auf diesem Controller — vorher mit <b>npm run deploy</b> hochladen, sonst zeigt der Master nur diese Oberfläche.</div>
+        <div v-if="isMaster" class="hint mono">Master-Oberfläche: <a :href="(getHost() || '') + '/'">/</a> · diese Oberfläche: /lichtnest</div>
       </div>
 
       <div class="actions">

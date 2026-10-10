@@ -12,6 +12,8 @@ body { font-size: 13px; }
 .m-status b { color: var(--text2); font-weight: 600; }
 .m-status .bad { color: var(--accent2); }
 .m-status .ok { color: var(--green); }
+.m-status .lnk { color: var(--muted2); text-decoration: underline; cursor: pointer; }
+.m-status .lnk:hover { color: var(--text); }
 
 .btn { background: #1a1d22; border: 1px solid var(--line2); color: var(--text2); border-radius: 9px; padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
 .btn:hover:not(:disabled) { color: var(--text); border-color: rgba(255,255,255,.25); }
