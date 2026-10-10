@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { dev, masterCmd, url } from './api.js'
-import { save, saveNow, compute } from './setup.js'
+import { save, saveNow, compute, isLocal } from './setup.js'
 import { show, view, showSave, saveShowNow, showName, newShow, openShow, saveShowAs, showFiles } from './show.js'
 import SetupPage from './SetupPage.vue'
 import ShowPage from './ShowPage.vue'
@@ -9,9 +9,10 @@ import ShowPage from './ShowPage.vue'
 const page = ref('setup')
 const m = computed(() => dev.master)
 const addr = computed(() => compute())
-const nodesUsed = computed(() => addr.value.usage.filter((u) => u.used > 0).length)
-const unisUsed = computed(() => addr.value.usage.reduce((a, u) => a + u.used, 0))
-const overflow = computed(() => addr.value.usage.some((u) => u.over))
+const artUsage = computed(() => addr.value.usage.filter((u) => !isLocal(u.node)))   // local nodes send no Art-Net
+const nodesUsed = computed(() => artUsage.value.filter((u) => u.used > 0).length)
+const unisUsed = computed(() => artUsage.value.reduce((a, u) => a + u.used, 0))
+const overflow = computed(() => artUsage.value.some((u) => u.over))
 
 // dimmer: local value while dragging, the device value otherwise
 const dimDrag = ref(null)

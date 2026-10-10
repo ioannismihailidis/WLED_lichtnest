@@ -19,6 +19,8 @@
  *     LEDs (never past channel 512), then the next universe starts at channel 1.
  *   - A tube whose node is unknown falls back to the first node. Chunks past
  *     StartUniverse + Universes - 1 are flagged "over" and not sent.
+ *   - A node with IP "local" is one of the master's own outputs (Port = output 1, 2, ...):
+ *     its LEDs go straight to the master's strip instead of out over Art-Net.
  */
 
 #include "wled.h"
@@ -39,11 +41,14 @@ struct LnNode  {
   IPAddress ip; bool resolved = false;    // resolved destination of host
   uint32_t lastTry = 0;                   // last mDNS attempt (ms)
   uint16_t tubes = 0, leds = 0; int32_t last = -1;   // usage: tubes, LEDs, last universe used
+  uint8_t port = 0;                       // client / own output this node stands for (1-based, 0 = none)
+  bool local = false;                     // IP "local": the master's own output
 };
 struct LnTube  {
   char nr[8]; int8_t type = -1; uint8_t node = 0;
   float x = 0, y = 0; bool flip = false;
   uint16_t first = 0, leds = 0;           // first LED in the frame buffer, LED count (0 = unknown type)
+  uint16_t nodeOff = 0;                   // position of LED 1 in its node's chain (local output index)
 };
 struct LnChunk { uint8_t tube, node; uint16_t uni, ch, first, count; bool over; };   // ch is 1-based
 
@@ -97,7 +102,7 @@ class LnSetup {
       JsonArray n = root["nodes"];
       if (!n.isNull() && n.size() > 1) {
         JsonArray h = n[0];
-        int cN = col(h, "Name"), cI = col(h, "IP"), cS = col(h, "StartUniverse"), cU = col(h, "Universes"), cP = col(h, "LedsPerUniverse");
+        int cN = col(h, "Name"), cI = col(h, "IP"), cS = col(h, "StartUniverse"), cU = col(h, "Universes"), cP = col(h, "LedsPerUniverse"), cO = col(h, "Port");
         for (size_t r = 1; r < n.size() && nNodes < LN_MAX_NODES; r++) {
           JsonArray row = n[r]; LnNode& nd = nodes[nNodes];
           cell(row, cN, nd.name, sizeof(nd.name), nullptr);
@@ -107,13 +112,15 @@ class LnSetup {
           int u = (int)toNum(at(row, cU), 1); nd.unis = u < 1 ? 1 : u;
           int p = (int)toNum(at(row, cP), 170); nd.perUni = p < 1 ? 1 : (p > 170 ? 170 : p);
           nd.resolved = false; nd.lastTry = 0;
+          int po = (int)toNum(at(row, cO), 0); nd.port = po < 0 ? 0 : (po > 255 ? 255 : po);
+          nd.local = strcasecmp(nd.host, "local") == 0;
           nNodes++;
         }
       }
       if (nNodes == 0) {                                   // as layout_logic.Nodes(): one default node
         LnNode& nd = nodes[0];
         strlcpy(nd.name, "Default", sizeof(nd.name)); nd.host[0] = 0;
-        nd.start = 0; nd.unis = 64; nd.perUni = 170; nd.resolved = false; nd.lastTry = 0;
+        nd.start = 0; nd.unis = 64; nd.perUni = 170; nd.resolved = false; nd.lastTry = 0; nd.port = 0; nd.local = false;
         nNodes = 1;
       }
 
@@ -165,6 +172,7 @@ class LnSetup {
           ch->count++;
           curCh[k] += 3; curCnt[k]++;
         }
+        tu.nodeOff = nd.leds;
         tu.leds = numLeds; total += numLeds;
         nd.tubes++; nd.leds += numLeds; nd.last = curUni[k];
       }
@@ -240,6 +248,7 @@ class LnArtnet {
       for (uint8_t k = 0; k < s.nNodes; k++) {
         LnNode& nd = s.nodes[k];
         if (nd.resolved) continue;
+        if (nd.local) { nd.resolved = true; continue; }   // own output: nothing to send
         if (!nd.host[0]) { nd.ip = broadcast; nd.resolved = true; continue; }
         IPAddress ip;
         if (ip.fromString(nd.host)) { nd.ip = ip; nd.resolved = true; continue; }
@@ -278,7 +287,7 @@ class LnArtnet {
         }
         if (!any) continue;
         const LnNode& nd = s.nodes[node];
-        if (!nd.resolved) continue;
+        if (!nd.resolved || nd.local) continue;
         sendPacket(nd.ip, uni, len);
       }
       _seq = _seq == 255 ? 1 : _seq + 1;

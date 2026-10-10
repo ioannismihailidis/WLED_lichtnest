@@ -4,14 +4,15 @@
 // one start universe per output (if.live.dmx.pport / puni), 170 RGB LEDs per universe.
 import { reactive } from 'vue'
 import { dev, url } from './api.js'
-import { setup, compute } from './setup.js'
+import { setup, compute, isLocal } from './setup.js'
 
 const ARTNET_PORT = 6454
 const DMX_RGB = 4
 
 export const clients = reactive({ list: [], found: [], busy: false })
 
-const clientUrl = (ip, p) => `http://${ip}${p}`
+// the master's own outputs ("local" nodes) are configured on the master itself
+const clientUrl = (c, p) => (c.local ? url(p) : `http://${c.ip}${p}`)
 async function getJson (u, ms = 3000) {
   const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms)
   try { const r = await fetch(u, { signal: ac.signal, cache: 'no-store' }); if (!r.ok) throw new Error(r.status); return await r.json() } finally { clearTimeout(t) }
@@ -35,7 +36,7 @@ export function desired () {
   const map = new Map()
   setup.nodes.forEach((n, k) => {
     if (!n.ip || !n.port) return
-    const c = map.get(n.ip) || { host: n.ip, ports: [] }
+    const c = map.get(n.ip) || { host: n.ip, local: isLocal(n), ports: [] }
     c.ports.push({ port: n.port, node: n.name, start: n.start, leds: usage[k]?.leds || 0, perUni: n.perUni })
     map.set(n.ip, c)
   })
@@ -47,10 +48,10 @@ export async function refreshClients () {
   const want = desired()
   const out = []
   await Promise.all(want.map(async (w) => {
-    const ip = reachable(w.host)
-    const c = { host: w.host, ip, want: w.ports, online: false, name: '', info: null, cfg: null, diffs: [], ledDiff: false }
+    const ip = w.local ? (dev.info?.ip || 'Master') : reachable(w.host)
+    const c = { host: w.host, local: w.local, ip, want: w.ports, online: false, name: '', info: null, cfg: null, diffs: [], ledDiff: false }
     try {
-      const [info, cfg] = await Promise.all([getJson(clientUrl(ip, '/json/info')), getJson(clientUrl(ip, '/json/cfg'))])
+      const [info, cfg] = await Promise.all([getJson(clientUrl(c, '/json/info')), getJson(clientUrl(c, '/json/cfg'))])
       c.online = true; c.name = info.name || ''; c.info = info; c.cfg = cfg
       check(c)
     } catch (e) { c.diffs = ['nicht erreichbar'] }
@@ -66,28 +67,31 @@ function check (c) {
   const dmx = live.dmx || {}
   const ins = c.cfg?.hw?.led?.ins || []
   const d = []
-  if (!live.en) d.push('Empfang aus')
-  if (live.port !== ARTNET_PORT) d.push(`Port ${live.port} statt ${ARTNET_PORT}`)
-  if (dmx.mode !== DMX_RGB) d.push('Modus nicht RGB')
-  if (!dmx.pport) d.push('kein Universe pro Port')
+  if (!c.local) {                                   // own outputs need no Art-Net reception
+    if (!live.en) d.push('Empfang aus')
+    if (live.port !== ARTNET_PORT) d.push(`Port ${live.port} statt ${ARTNET_PORT}`)
+    if (dmx.mode !== DMX_RGB) d.push('Modus nicht RGB')
+    if (!dmx.pport) d.push('kein Universe pro Port')
+  }
   c.ledDiff = false
   for (const w of c.want) {
     const i = w.port - 1
-    if ((dmx.puni || [])[i] !== w.start) d.push(`Port ${w.port}: Universe ${(dmx.puni || [])[i] ?? '–'} statt ${w.start}`)
+    if (!c.local && (dmx.puni || [])[i] !== w.start) d.push(`Port ${w.port}: Universe ${(dmx.puni || [])[i] ?? '–'} statt ${w.start}`)
     if (!ins[i]) { d.push(`Port ${w.port} fehlt am Client`); continue }
     if (ins[i].len !== w.leds) { d.push(`Port ${w.port}: ${ins[i].len} statt ${w.leds} LEDs`); c.ledDiff = true }
-    if (w.perUni !== 170) d.push(`${w.node}: LEDs/Universe muss 170 sein`)
+    if (!c.local && w.perUni !== 170) d.push(`${w.node}: LEDs/Universe muss 170 sein`)
   }
   c.diffs = d
 }
 
 // Art-Net receive + universes per output; takes effect at once
 export async function applyUniverses (c) {
+  if (c.local) return true
   const dmx = c.cfg?.if?.live?.dmx || {}
   const n = Math.max((dmx.puni || []).length, (c.cfg?.hw?.led?.ins || []).length, ...c.want.map((w) => w.port))
   const puni = Array.from({ length: n }, (_, i) => (dmx.puni || [])[i] ?? 0)
   for (const w of c.want) puni[w.port - 1] = w.start
-  return postJson(clientUrl(c.ip, '/json/cfg'), { if: { live: { en: true, port: ARTNET_PORT, mc: false, dmx: { mode: DMX_RGB, pport: true, puni } } } })
+  return postJson(clientUrl(c, '/json/cfg'), { if: { live: { en: true, port: ARTNET_PORT, mc: false, dmx: { mode: DMX_RGB, pport: true, puni } } } })
 }
 
 // LED count per output (outputs are chained: start = sum of the previous lengths); the
@@ -97,7 +101,7 @@ export async function applyLedCounts (c) {
   for (const w of c.want) if (ins[w.port - 1]) ins[w.port - 1].len = w.leds
   let start = 0
   for (const b of ins) { b.start = start; start += b.len || 0 }
-  return postJson(clientUrl(c.ip, '/json/cfg'), { hw: { led: { ins } }, rb: true }, 8000)
+  return postJson(clientUrl(c, '/json/cfg'), { hw: { led: { ins } }, rb: true }, 8000)
 }
 
 // WLED devices the master has seen on the network (needs "node broadcast" on the clients)

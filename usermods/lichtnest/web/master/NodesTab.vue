@@ -1,12 +1,13 @@
 <script setup>
 import { computed, onMounted } from 'vue'
-import { setup, ui, compute, addNode, deleteNode, nodeInUse, renameNode } from './setup.js'
+import { setup, ui, compute, addNode, deleteNode, nodeInUse, renameNode, isLocal } from './setup.js'
 import { dev } from './api.js'
 import { clients, refreshClients, applyUniverses, applyLedCounts, discover } from './clients.js'
 
 const addr = computed(() => compute())
 const nd = computed(() => setup.nodes[ui.node] || null)
 const resolvedIp = (k) => dev.master?.nodes?.[k]?.ip || ''
+const ownPorts = computed(() => dev.info?.ports || [])     // the master's physical outputs
 // patch table: one row per tube and universe
 const patch = computed(() => addr.value.chunks.map((c) => ({ ...c, nr: c.tube + 1, nodeName: (setup.nodes[c.node] || { name: 'Default' }).name })))
 
@@ -26,6 +27,12 @@ async function sendAll () {
   await refreshClients()
 }
 // start universes one after another per client: each port right after the previous one
+// a local node bigger than its output: the extra LEDs are cut off
+function localOver (u) {
+  const p = u.node.port ? ownPorts.value[u.node.port - 1] : null
+  const cap = p ? p.len : ownPorts.value.reduce((a, x) => a + x.len, 0)
+  return u.leds > cap
+}
 function autoUniverses () {
   const byHost = new Map()
   setup.nodes.forEach((n, k) => { if (n.ip) { const l = byHost.get(n.ip) || []; l.push(k); byHost.set(n.ip, l) } })
@@ -46,11 +53,13 @@ function autoUniverses () {
         <tbody>
           <tr v-for="(u, k) in addr.usage" :key="k" class="click" :class="{ selr: k === ui.node }" @click="ui.node = k">
             <td>{{ u.node.name }}</td>
-            <td>{{ u.node.ip || 'Broadcast' }}<span v-if="u.node.ip && resolvedIp(k) && resolvedIp(k) !== u.node.ip" class="hint"> ({{ resolvedIp(k) }})</span></td>
+            <td v-if="isLocal(u.node)" class="ok">lokal (Master)</td>
+            <td v-else>{{ u.node.ip || 'Broadcast' }}<span v-if="u.node.ip && resolvedIp(k) && resolvedIp(k) !== u.node.ip" class="hint"> ({{ resolvedIp(k) }})</span></td>
             <td>{{ u.node.port || '–' }}</td>
             <td>{{ u.node.start }}–{{ u.node.start + u.node.unis - 1 }}</td>
             <td>{{ u.used }}</td><td>{{ u.tubes }}</td><td>{{ u.leds }}</td>
-            <td :class="u.over ? 'bad' : 'ok'">{{ u.over ? `ÜBERLAUF +${u.used - u.node.unis}` : 'ok' }}</td>
+            <td v-if="isLocal(u.node)" :class="localOver(u) ? 'bad' : 'ok'">{{ localOver(u) ? 'mehr LEDs als der Ausgang' : 'ok' }}</td>
+            <td v-else :class="u.over ? 'bad' : 'ok'">{{ u.over ? `ÜBERLAUF +${u.used - u.node.unis}` : 'ok' }}</td>
           </tr>
         </tbody>
       </table>
@@ -69,8 +78,9 @@ function autoUniverses () {
         <div class="field"><span class="lbl">Universes</span><input class="in num" type="number" min="1" v-model.number="nd.unis"></div>
         <div class="field"><span class="lbl">LEDs / Universe</span><input class="in num" type="number" min="1" max="170" v-model.number="nd.perUni"></div>
       </div>
-      <datalist id="ln-found"><option v-for="f in clients.found" :key="f.ip" :value="f.ip">{{ f.name }}</option></datalist>
-      <div class="hint">Ein Node ist ein Ausgang (Port) eines Client-Controllers. Mit Client-Port ≥ 1 kann der Master den Client unten einrichten.</div>
+      <datalist id="ln-found"><option value="local">eigene Ausgänge des Masters</option><option v-for="f in clients.found" :key="f.ip" :value="f.ip">{{ f.name }}</option></datalist>
+      <div class="hint">Ein Node ist ein Ausgang (Port) eines Client-Controllers. Mit Client-Port ≥ 1 kann der Master den Client unten einrichten. IP <b>local</b> = ein eigener Ausgang des Masters (kein Art-Net).</div>
+      <div v-if="isLocal(nd)" class="hint">Ausgänge des Masters: <span v-for="(p, i) in ownPorts" :key="i">Port {{ i + 1 }}: {{ p.len }} LEDs{{ p.gpio !== undefined ? ` (GPIO ${p.gpio})` : '' }}{{ i < ownPorts.length - 1 ? ', ' : '' }}</span><span v-if="!ownPorts.length">keine</span></div>
       <div class="row">
         <button class="btn" @click="addNode">NODE HINZUFÜGEN</button>
         <button class="btn warn" :disabled="setup.nodes.length <= 1" @click="deleteNode">LÖSCHEN</button>
@@ -91,11 +101,11 @@ function autoUniverses () {
         <thead><tr><th>Client</th><th>Ports</th><th>Status</th><th /></tr></thead>
         <tbody>
           <tr v-for="c in clients.list" :key="c.host">
-            <td>{{ c.name || c.host }}<div class="hint">{{ c.ip }}</div></td>
+            <td>{{ c.local ? 'Master (lokal)' : (c.name || c.host) }}<div class="hint">{{ c.ip }}</div></td>
             <td><div v-for="w in c.want" :key="w.port">P{{ w.port }}: U{{ w.start }} · {{ w.leds }} LEDs</div></td>
             <td :class="c.diffs.length ? 'bad' : 'ok'" style="white-space:normal">{{ c.diffs.length ? c.diffs.join(' · ') : 'ok' }}</td>
             <td style="text-align:right">
-              <button class="btn sm" :disabled="!c.online" @click="sendUniverses(c)">Universes</button>
+              <button v-if="!c.local" class="btn sm" :disabled="!c.online" @click="sendUniverses(c)">Universes</button>
               <button class="btn sm" :disabled="!c.online || !c.ledDiff" @click="sendLeds(c)">LED-Zahl</button>
             </td>
           </tr>
@@ -110,8 +120,10 @@ function autoUniverses () {
         <thead><tr><th>Tube</th><th>Node</th><th>LEDs</th><th>Universe</th><th>Kanal</th><th>IP</th><th>Status</th></tr></thead>
         <tbody>
           <tr v-for="(c, i) in patch" :key="i">
-            <td>{{ c.nr }}</td><td>{{ c.nodeName }}</td><td>{{ c.count }}</td><td>{{ c.universe }}</td><td>{{ c.channel }}</td>
-            <td>{{ c.ip || 'Broadcast' }}</td><td :class="c.over ? 'bad' : 'ok'">{{ c.over ? 'über' : 'ok' }}</td>
+            <td>{{ c.nr }}</td><td>{{ c.nodeName }}</td><td>{{ c.count }}</td>
+            <template v-if="(c.ip || '').toLowerCase() === 'local'"><td>–</td><td>–</td></template>
+            <template v-else><td>{{ c.universe }}</td><td>{{ c.channel }}</td></template>
+            <td>{{ (c.ip || '').toLowerCase() === 'local' ? 'lokal' : (c.ip || 'Broadcast') }}</td><td :class="c.over ? 'bad' : 'ok'">{{ c.over ? 'über' : 'ok' }}</td>
           </tr>
         </tbody>
       </table>

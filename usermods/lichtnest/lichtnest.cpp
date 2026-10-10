@@ -806,8 +806,9 @@ class Lichtnest : public Usermod {
     // render our effect over all placed tubes, overriding the stock FX
     WLED_O2_ATTR void handleOverlayDraw() override {
       if (!enabled) return;
-      if (_master) {                                     // the master's own strip stays dark; the show goes out over Art-Net
+      if (_master) {                                     // the show goes out over Art-Net; local nodes onto the own strip
         for (uint16_t i = 0; i < strip.getLengthTotal(); i++) strip.setPixelColor(i, 0);
+        if (_fb && _ms) outputLocal();
         return;
       }
       if (realtimeMode && !realtimeOverride) return;   // Art-Net/E1.31/DDP input owns the pixels
@@ -1101,6 +1102,35 @@ class Lichtnest : public Usermod {
       strlcpy(d.tag, tag ? tag : "", sizeof(d.tag));
       startFade(ly, nd, fadeMs);
     }
+    // the master's own outputs: tubes on a "local" node, copied from the frame buffer onto
+    // the strip at the node's output (Port = n-th physical output, 0 = the strip from LED 0)
+    void outputLocal() {
+      const uint8_t dim = testActive(millis()) ? 255 : _mDim;   // the dimmer does not apply to tests
+      for (uint8_t ti = 0; ti < _ms->nTubes; ti++) {
+        const LnTube& tu = _ms->tubes[ti];
+        if (!tu.leds) continue;
+        const LnNode& nd = _ms->nodes[tu.node];
+        if (!nd.local) continue;
+        uint16_t base = 0, len = strip.getLengthTotal();
+        if (nd.port) {
+          const Bus* bus = nullptr;
+          for (size_t i = 0, n = 0; i < BusManager::getNumBusses(); i++) {
+            const Bus* b = BusManager::getBus(i);
+            if (!b || b->isVirtual()) continue;
+            if (++n == nd.port) { bus = b; break; }
+          }
+          if (!bus) continue;                            // no such output
+          base = bus->getStart(); len = bus->getLength();
+        }
+        const uint8_t* px = _fb + (size_t)tu.first * 3;
+        for (uint16_t j = 0; j < tu.leds; j++, px += 3) {
+          uint16_t off = tu.nodeOff + j;
+          if (off >= len) break;                         // never spill into the next output
+          strip.setPixelColor(base + off, RGBW32((px[0] * (dim + 1)) >> 8, (px[1] * (dim + 1)) >> 8, (px[2] * (dim + 1)) >> 8, 0));
+        }
+      }
+    }
+
     // A speed change must not make the animation jump. Schwarm and Impuls move with
     // speed * elapsed, so the clip's clock is rescaled to keep the current position
     // (Schwarm exactly; Impuls keeps the leading band, later bands shift slightly).
@@ -1282,6 +1312,7 @@ class Lichtnest : public Usermod {
         o["name"] = nd.name; o["host"] = nd.host;
         o["ip"] = nd.resolved ? nd.ip.toString() : String();
         o["start"] = nd.start; o["unis"] = nd.unis; o["used"] = _ms->usedUniverses(k);
+        o["port"] = nd.port; if (nd.local) o["local"] = true;
         o["tubes"] = nd.tubes; o["leds"] = nd.leds;
       }
     }

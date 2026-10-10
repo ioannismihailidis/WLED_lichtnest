@@ -1,7 +1,7 @@
 // Setup model of the master UI: tubes, tube types, Art-Net nodes, canvas.
 // File format = the TouchDesigner project's setups/<name>.setup.json (tables of strings,
 // row 0 = header). Nodes carry an optional extra "Port" column: the client output the node
-// stands for (1-based), used by the client management.
+// stands for (1-based), used by the client management. IP "local" = the master's own output.
 // Edits are autosaved ~1 s after the last change; the device then reloads the file.
 import { reactive, watch } from 'vue'
 import { dev, uploadFile, readFile, masterCmd, listFiles } from './api.js'
@@ -68,6 +68,7 @@ export function nodeIndex (name) {
   for (let i = setup.nodes.length - 1; i >= 0; i--) if (setup.nodes[i].name === name) return i   // last one wins
   return 0
 }
+export const isLocal = (n) => (n?.ip || '').toLowerCase() === 'local'
 export function nodesOrDefault () {
   return setup.nodes.length ? setup.nodes : [{ name: 'Default', ip: '', start: 0, unis: 64, perUni: 170, port: 0 }]
 }
