@@ -35,10 +35,10 @@ export function desired () {
   const { usage } = compute()
   const map = new Map()
   setup.nodes.forEach((n, k) => {
-    if (!n.ip || !n.port) return
+    if (!n.ip) return                                // broadcast nodes have no client
     const c = map.get(n.ip) || { host: n.ip, local: isLocal(n), ports: [] }
-    c.ports.push({ port: n.port, node: n.name, start: n.start, leds: usage[k]?.leds || 0, perUni: n.perUni })
-    map.set(n.ip, c)
+    map.set(n.ip, c)                                 // listed as soon as a node points at it
+    if (n.port) c.ports.push({ port: n.port, node: n.name, start: n.start, leds: usage[k]?.leds || 0, perUni: n.perUni })
   })
   return [...map.values()]
 }
@@ -137,14 +137,18 @@ export async function discover () {
     found = (r.nodes || []).map((n) => ({ name: n.name, ip: n.ip }))
   } catch (e) { /* keep the last list */ return }
   clients.found = found
-  const infos = await Promise.all(found.map((f) => getJson(`http://${f.ip}/json/info`, 2500).then((i) => ({ f, i })).catch(() => ({ f, i: null }))))
+  const infos = await Promise.all(found.map(async (f) => {
+    const i = await getJson(`http://${f.ip}/json/info`, 2500).catch(() => null)
+    const mdns = i ? await getJson(`http://${f.ip}/json/cfg`, 2500).then((c) => c?.id?.mdns || '').catch(() => '') : ''
+    return { f, i, mdns }
+  }))
   const byMac = new Map()
-  for (const { f, i } of infos) {
+  for (const { f, i, mdns } of infos) {
     const key = i?.mac || f.ip
     const d = byMac.get(key) || { mac: i?.mac || '', name: i?.name || f.name, mdns: '', eth: '', wifi: '', ips: [], ports: [], online: !!i }
     d.ips.push(f.ip)
     if (i) {
-      d.online = true; d.name = i.name || d.name
+      d.online = true; d.name = i.name || d.name; d.mdns = mdns || d.mdns
       d.eth = i.net?.eth || d.eth; d.wifi = i.net?.wifi || d.wifi
       if (Array.isArray(i.ports) && i.ports.length) d.ports = i.ports.map((p) => ({ len: p.len, gpio: p.gpio }))
       else if (!d.ports.length && i.leds) d.ports = [{ len: i.leds.count }]
@@ -158,7 +162,8 @@ export const deviceInSetup = (d) => setup.nodes.some((n) => n.ip && (d.ips.inclu
 // one node per output of a found device, start universes following the last used one
 export function adoptDevice (d, nextUniverse) {
   let u = nextUniverse
-  const base = (d.name && d.name !== 'WLED' ? d.name : (d.ip || '').split('.').pop()).replace(/\s+/g, '-')
+  // name the nodes after the device: its mDNS name (unique on the network), else its WLED name
+  const base = (d.mdns || (d.name && d.name !== 'WLED' ? d.name : `Client-${(d.ip || '').split('.').pop()}`)).replace(/\s+/g, '-')
   d.ports.forEach((p, i) => {
     const unis = Math.max(1, Math.ceil((p.len || 1) / 170))
     setup.nodes.push({ name: `${base}-P${i + 1}`, ip: d.ip, start: u, unis, perUni: 170, port: i + 1 })

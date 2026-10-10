@@ -2,7 +2,7 @@
 // Keyframe list editor: rows of { t (seconds), v[, c:[r,g,b]] }. Used for the strobe
 // frequency and the solid's tempo+colour over time. Rows keep insertion order (stable
 // editing); the effect sorts by time when it samples. The step ends at the latest time.
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { rgbToHex, hexToRgb } from '../wled.js'
 
 const props = defineProps({
@@ -33,6 +33,11 @@ function commit (arr) {
 }
 function cycleE (i) { const a = clone(); a[i].e = ((a[i].e || 0) + 1) % 4; commit(a) }
 function setT (i, val) { const a = clone(); a[i].t = Math.max(0, +val || 0); commit(a) }
+// the time field keeps its own text while it is being typed in ("1." must not become "1");
+// the value is taken over on change (blur / Enter)
+const editI = ref(-1), editText = ref('')
+function startEdit (i, k) { editI.value = i; editText.value = String(k.t) }
+function endEdit (i) { if (editI.value === i) { setT(i, editText.value); editI.value = -1 } }
 function bumpT (i, d) { const a = clone(); a[i].t = Math.max(0, +(((+a[i].t || 0) + d)).toFixed(1)); commit(a) }
 function setV (i, val) { const a = clone(); a[i].v = +val; commit(a) }
 function setC (i, hex) { const a = clone(); a[i].c = hexToRgb(hex); commit(a) }
@@ -50,7 +55,7 @@ function remove (i) { if (rows.value.length <= 1) return; const a = clone(); a.s
     <div v-for="(k, i) in rows" :key="i" class="row">
       <div class="tgrp">
         <button class="tb" @click="bumpT(i, -0.5)">−</button>
-        <input class="tin mono" type="number" min="0" step="0.1" :value="k.t" @input="setT(i, $event.target.value)">
+        <input class="tin mono" type="number" min="0" step="0.1" :value="editI === i ? editText : k.t" @focus="startEdit(i, k)" @input="editText = $event.target.value" @change="endEdit(i)" @blur="endEdit(i)" @keydown.enter="$event.target.blur()">
         <button class="tb" @click="bumpT(i, 0.5)">+</button>
       </div>
       <input class="vr" type="range" :min="vMin" :max="vMax" :step="vStep" :value="k.v" @input="setV(i, $event.target.value)">

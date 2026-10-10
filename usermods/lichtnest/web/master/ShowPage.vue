@@ -12,6 +12,7 @@ import {
 } from './show.js'
 import Preview from './Preview.vue'
 import ParamEditor from './ParamEditor.vue'
+import LazyInput from './LazyInput.vue'
 import { bgGet, bgSet, bgImage } from './bg.js'
 
 const BLENDS = ['normal', 'add', 'screen', 'multiply', 'lighten', 'darken', 'difference', 'subtract']
@@ -118,7 +119,7 @@ function renamePage () { const n = window.prompt('Name der Page:', page.value.na
           <div class="row" style="align-items:center">
             <button class="btn warn" @click="allBlack">ALL BLACK</button>
             <span class="m-spacer" />
-            <span class="lbl">Fade</span><input class="in num" type="number" min="0" step="0.1" :value="fade" @change="fade = $event.target.value"><span class="mono">s</span>
+            <span class="lbl">Fade</span><LazyInput class="in num" type="number" min="0" step="0.1" :model-value="fade" @commit="fade = $event" /><span class="mono">s</span>
           </div>
           <div class="hint">Leertaste = GO · Klick auf einen Cue-Kopf startet den Cue, auf eine Zelle nur diesen Clip.</div>
           <div class="mons">

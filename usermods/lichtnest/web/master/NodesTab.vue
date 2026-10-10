@@ -4,6 +4,7 @@ import { setup, ui, compute, addNode, deleteNode, nodeInUse, renameNode, isLocal
 import { dev } from './api.js'
 import { clients, refreshClients, applyUniverses, applyLedCounts, discover, needsReboot, recheck, deviceInSetup, adoptDevice } from './clients.js'
 import ClientNet from './ClientNet.vue'
+import LazyInput from './LazyInput.vue'
 
 const addr = computed(() => compute())
 const nd = computed(() => setup.nodes[ui.node] || null)
@@ -49,6 +50,15 @@ function localOver (u) {
   const cap = p ? p.len : ownPorts.value.reduce((a, x) => a + x.len, 0)
   return u.leds > cap
 }
+// output assignment per client: which node feeds which of the client's outputs
+const outputsOf = (c) => (c.cfg?.hw?.led?.ins || []).map((b, i) => ({ i, len: b.len || 0 }))
+const nodesOf = (c) => setup.nodes.map((n, k) => ({ n, k })).filter((x) => x.n.ip === c.host)
+const nodeOn = (c, i) => { const x = nodesOf(c).find((y) => y.n.port === i + 1); return x ? String(x.k) : '' }
+function assign (c, i, k) {
+  for (const x of nodesOf(c)) if (x.n.port === i + 1) x.n.port = 0   // the output had another node
+  if (k !== '') setup.nodes[+k].port = i + 1
+}
+const wantOn = (c, i) => c.want.find((w) => w.port === i + 1)
 function autoUniverses () {
   const byHost = new Map()
   setup.nodes.forEach((n, k) => { if (n.ip) { const l = byHost.get(n.ip) || []; l.push(k); byHost.set(n.ip, l) } })
@@ -84,7 +94,7 @@ function autoUniverses () {
     <div class="sec">NODE</div>
     <div v-if="nd" class="card" style="display:flex;flex-direction:column;gap:10px">
       <div class="row">
-        <div class="field"><span class="lbl">Name</span><input class="in" style="width:120px" :value="nd.name" @change="renameNode(nd, $event.target.value.trim())"></div>
+        <div class="field"><span class="lbl">Name</span><LazyInput class="in" style="width:120px" :model-value="nd.name" @commit="renameNode(nd, $event)" /></div>
         <div class="field"><span class="lbl">IP / Name</span>
           <input class="in" style="width:150px" v-model.trim="nd.ip" placeholder="leer = Broadcast" list="ln-found"></div>
         <div class="field"><span class="lbl">Client-Port</span><input class="in num" type="number" min="0" v-model.number="nd.port" title="0 = nicht verwaltet"></div>
@@ -118,7 +128,18 @@ function autoUniverses () {
         <tbody>
           <tr v-for="c in clients.list" :key="c.host">
             <td>{{ c.local ? 'Master (lokal)' : (c.name || c.host) }}<div class="hint">{{ c.ip }}</div></td>
-            <td><div v-for="w in c.want" :key="w.port">P{{ w.port }}: U{{ w.start }} · {{ w.leds }} LEDs</div></td>
+            <td>
+              <div v-for="o in outputsOf(c)" :key="o.i" class="prow">
+                <span class="mono">P{{ o.i + 1 }}</span>
+                <select class="sel" :value="nodeOn(c, o.i)" @change="assign(c, o.i, $event.target.value)">
+                  <option value="">— frei —</option>
+                  <option v-for="x in nodesOf(c)" :key="x.k" :value="String(x.k)">{{ x.n.name }}</option>
+                </select>
+                <span v-if="wantOn(c, o.i)" class="hint">U{{ wantOn(c, o.i).start }} · {{ wantOn(c, o.i).leds }}/{{ o.len }} LEDs</span>
+                <span v-else class="hint">{{ o.len }} LEDs</span>
+              </div>
+              <div v-if="!c.online" class="hint">{{ c.want.map((w) => `P${w.port}: U${w.start}`).join(' · ') || 'keine Ports zugeordnet' }}</div>
+            </td>
             <td :class="c.diffs.length ? 'bad' : 'ok'" style="white-space:normal">{{ c.diffs.length ? c.diffs.join(' · ') : 'ok' }}</td>
             <td style="text-align:right">
               <button class="btn sm" :disabled="!c.online" @click="sendUniverses(c)">Universes</button>
@@ -135,7 +156,7 @@ function autoUniverses () {
         <thead><tr><th>Gerät</th><th>Adressen</th><th>Ports</th><th /></tr></thead>
         <tbody>
           <tr v-for="d in clients.devices" :key="d.mac || d.ip">
-            <td>{{ d.name }}<div class="hint">{{ d.mac ? d.mac.replace(/(..)(?!$)/g, '$1:') : '' }}</div></td>
+            <td>{{ d.mdns || d.name }}<div class="hint">{{ d.mdns && d.name !== d.mdns ? d.name + ' · ' : '' }}{{ d.mac ? d.mac.replace(/(..)(?!$)/g, '$1:') : '' }}</div></td>
             <td><div v-if="d.eth">ETH {{ d.eth }}</div><div v-if="d.wifi">WLAN {{ d.wifi }}</div><div v-if="!d.eth && !d.wifi">{{ d.ips.join(', ') }}</div></td>
             <td><div v-for="(p, i) in d.ports" :key="i">P{{ i + 1 }}: {{ p.len }} LEDs{{ p.gpio !== undefined ? ` · GPIO ${p.gpio}` : '' }}</div><span v-if="!d.online" class="bad">nicht erreichbar</span></td>
             <td style="text-align:right">
@@ -164,3 +185,8 @@ function autoUniverses () {
     </div>
   </div>
 </template>
+
+<style scoped>
+.prow { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+.prow .sel { padding: 3px 6px; font-size: 11px; }
+</style>

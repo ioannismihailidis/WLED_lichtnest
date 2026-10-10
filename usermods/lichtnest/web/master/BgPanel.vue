@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { bgGet, bgSet, bgImage, chooseImage, clearImage } from './bg.js'
+import LazyInput from './LazyInput.vue'
 
 const fileEl = ref(null)
 const busy = ref(false)
@@ -37,9 +38,9 @@ const num = (k, v) => bgSet(k, +v)
       </select>
     </div>
     <div class="row" style="align-items:center">
-      <span class="lbl">Zoom</span><input class="in num" type="number" min="0.1" step="0.05" :value="bgGet('Bgzoom')" @change="num('Bgzoom', $event.target.value)">
-      <span class="lbl">Versatz X</span><input class="in num" type="number" step="0.01" :value="bgGet('Bgoffsetx')" @change="num('Bgoffsetx', $event.target.value)">
-      <span class="lbl">Y</span><input class="in num" type="number" step="0.01" :value="bgGet('Bgoffsety')" @change="num('Bgoffsety', $event.target.value)">
+      <span class="lbl">Zoom</span><LazyInput class="in num" type="number" min="0.1" step="0.05" :model-value="bgGet('Bgzoom')" @commit="num('Bgzoom', $event)" />
+      <span class="lbl">Versatz X</span><LazyInput class="in num" type="number" step="0.01" :model-value="bgGet('Bgoffsetx')" @commit="num('Bgoffsetx', $event)" />
+      <span class="lbl">Y</span><LazyInput class="in num" type="number" step="0.01" :model-value="bgGet('Bgoffsety')" @commit="num('Bgoffsety', $event)" />
     </div>
     <div class="row" style="align-items:center">
       <span class="lbl">Anzeigen in</span>

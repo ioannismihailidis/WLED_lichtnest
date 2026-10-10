@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { setup, ui, addType, deleteType, typeInUse, renameType } from './setup.js'
+import LazyInput from './LazyInput.vue'
 
 const ty = computed(() => setup.types[ui.type] || null)
 const count = (t) => setup.tubes.filter((tb) => tb.type === t.name || tb.type === t.id).length
@@ -22,7 +23,7 @@ const count = (t) => setup.tubes.filter((tb) => tb.type === t.name || tb.type ==
     <div class="sec">TYP</div>
     <div v-if="ty" class="card" style="display:flex;flex-direction:column;gap:10px">
       <div class="row">
-        <div class="field"><span class="lbl">Name</span><input class="in" :value="ty.name" @change="renameType(ty, $event.target.value.trim())"></div>
+        <div class="field"><span class="lbl">Name</span><LazyInput class="in" :model-value="ty.name" @commit="renameType(ty, $event)" /></div>
         <div class="field"><span class="lbl">LEDs</span><input class="in num" type="number" min="0" v-model.number="ty.leds"></div>
         <div class="field"><span class="lbl">Länge px</span><input class="in num" type="number" min="0" v-model.number="ty.length"></div>
       </div>
