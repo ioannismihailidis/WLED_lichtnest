@@ -108,6 +108,11 @@ export async function applyLedCounts (c) {
   return postJson(clientUrl(c, '/json/cfg'), { hw: { led: { ins } }, rb: true }, 8000)
 }
 
+// network settings (id / eth / nw) -> client cfg, then reboot: new addresses need it
+export async function applyNetwork (c, patch) {
+  return postJson(clientUrl(c, '/json/cfg'), { ...patch, rb: true }, 8000)
+}
+
 // WLED devices the master has seen on the network (needs "node broadcast" on the clients)
 export async function discover () {
   try {

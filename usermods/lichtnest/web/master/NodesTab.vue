@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { setup, ui, compute, addNode, deleteNode, nodeInUse, renameNode, isLocal } from './setup.js'
 import { dev } from './api.js'
 import { clients, refreshClients, applyUniverses, applyLedCounts, discover, needsReboot } from './clients.js'
+import ClientNet from './ClientNet.vue'
 
 const addr = computed(() => compute())
 const nd = computed(() => setup.nodes[ui.node] || null)
@@ -12,6 +13,9 @@ const ownPorts = computed(() => dev.info?.ports || [])     // the master's physi
 const patch = computed(() => addr.value.chunks.map((c) => ({ ...c, nr: c.tube + 1, nodeName: (setup.nodes[c.node] || { name: 'Default' }).name })))
 
 onMounted(() => { refreshClients(); discover() })
+const netOf = ref('')                 // host whose network form is open
+const netClient = computed(() => clients.list.find((c) => c.host === netOf.value) || null)
+function netSaved () { netOf.value = ''; setTimeout(refreshClients, 15000) }
 
 async function sendUniverses (c) {
   const rb = needsReboot(c)
@@ -112,10 +116,12 @@ function autoUniverses () {
             <td style="text-align:right">
               <button class="btn sm" :disabled="!c.online" @click="sendUniverses(c)">Universes</button>
               <button class="btn sm" :disabled="!c.online || !c.ledDiff" @click="sendLeds(c)">LED-Zahl</button>
+              <button class="btn sm" :class="{ on: netOf === c.host }" :disabled="!c.online" @click="netOf = netOf === c.host ? '' : c.host">Netzwerk</button>
             </td>
           </tr>
         </tbody>
       </table>
+      <ClientNet v-if="netClient" :client="netClient" @close="netOf = ''" @saved="netSaved" />
       <div v-if="clients.found.length" class="hint">Im Netz gesehen: {{ clients.found.map((f) => `${f.name} (${f.ip})`).join(', ') }}</div>
     </div>
 
