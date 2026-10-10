@@ -2,7 +2,8 @@
 // File format = the TouchDesigner project's setups/<name>.setup.json (tables of strings,
 // row 0 = header). Nodes carry an optional extra "Port" column: the client output the node
 // stands for (1-based), used by the client management. IP "local" = the master's own output.
-// Edits are autosaved ~1 s after the last change; the device then reloads the file.
+// Edits go to the master right away (RAM only, {"setup":{...}} ~120 ms after a change, so
+// a moved tube shows at once); the file is written ~3 s after the last change.
 import { reactive, watch } from 'vue'
 import { dev, uploadFile, readFile, masterCmd, listFiles } from './api.js'
 
@@ -130,20 +131,29 @@ export async function loadSetup (path) {
   quiet = false
 }
 
-let timer = null
+let timer = null, liveTimer = null, liveOk = true
 watch(() => [setup.canvasW, setup.canvasH, setup.types, setup.nodes, setup.tubes, setup.extra], () => {
   if (quiet || !setup.loaded) return
   save.pending = true
+  clearTimeout(liveTimer)
+  liveTimer = setTimeout(pushLive, 120)
   clearTimeout(timer)
-  timer = setTimeout(saveNow, 1000)
+  timer = setTimeout(saveNow, 3000)
 }, { deep: true })
+
+// live apply: the master takes the setup over in RAM, nothing is written to flash
+async function pushLive () {
+  clearTimeout(liveTimer); liveTimer = null
+  liveOk = await masterCmd({ setup: toFile() })
+}
 
 export async function saveNow () {
   clearTimeout(timer)
   if (!setup.path) return false
   save.busy = true; save.error = ''
+  if (liveTimer) await pushLive()                       // the last edit may still be waiting
   const ok = await uploadFile(setup.path, JSON.stringify(toFile()))
-  if (ok) await masterCmd({ reload: true })
+  if (ok && !liveOk) { await masterCmd({ reload: true }); liveOk = true }   // live push failed: load from the file
   save.busy = false; save.pending = false
   if (ok) save.at = Date.now(); else save.error = 'Speichern fehlgeschlagen'
   return ok

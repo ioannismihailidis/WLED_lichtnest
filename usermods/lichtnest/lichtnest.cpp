@@ -217,6 +217,7 @@ class Lichtnest : public Usermod {
     LnSetup*  _ms = nullptr;
     LnArtnet* _art = nullptr;
     uint8_t*  _fb = nullptr;           // frame: RGB per setup LED, data order
+    size_t    _fbSize = 0;             // bytes allocated for _fb
     MLayer*   _layers = nullptr;
     uint8_t   _nLayers = LN_MAX_LAYERS;
     uint8_t   _mValid[LN_MAX_TUBES]; uint8_t _mValidN = 0;   // tubes with LEDs, in table order
@@ -947,10 +948,18 @@ class Lichtnest : public Usermod {
 
     void loadMasterSetup() {
       if (!_ms->load(_msetup)) _ms->fromJson(JsonObject());   // missing file: empty setup, one default node
-      if (_fb) { free(_fb); _fb = nullptr; }
-      if (_ms->total) {
-        _fb = (uint8_t*)d_malloc((size_t)_ms->total * 3);
-        if (_fb) memset(_fb, 0, (size_t)_ms->total * 3);
+      applyMasterSetup();
+    }
+
+    // Take over the parsed setup (_ms): frame buffer + effect geometry. Also used for a setup
+    // pushed by the UI while editing ({"setup":{...}}): applied in RAM at once, the UI writes
+    // the file later, so a moved tube shows immediately and no flash write stalls the show.
+    void applyMasterSetup() {
+      size_t need = (size_t)_ms->total * 3;
+      if (_fb && _fbSize != need) { free(_fb); _fb = nullptr; _fbSize = 0; }   // same size: keep the frame, no black flash
+      if (!_fb && need) {
+        _fb = (uint8_t*)d_malloc(need);
+        if (_fb) { memset(_fb, 0, need); _fbSize = need; }
       }
       // the effect engine reads tube geometry from geo*: fill it with the setup's tubes
       geoCount = 0; _mValidN = 0;
@@ -1182,6 +1191,7 @@ class Lichtnest : public Usermod {
     //   {"L":i,"fx":n,"p":{..},"fade":s}  launch clip   ·  {"L":i,"p":{..}} live tweak (no restart)
     //   {"L":i,"off":true,"fade":s}       layer to black ·  {"L":i,"blend":"add","op":0.8}
     //   {"black":true,"fade":s}  all layers to black     ·  {"dim":0..1,"out":bool,"fps":n,"reload":true}
+    //   {"setup":{lichtnest-setup}}       apply a setup in RAM (live edit), the file is not touched
     void masterCommand(JsonObject m, bool nested = false) {
       float fadeS = m["fade"] | _mFadeS;
       uint32_t fadeMs = fadeS > 0 ? (uint32_t)(fadeS * 1000.0f) : 0;
@@ -1214,6 +1224,8 @@ class Lichtnest : public Usermod {
       if (m.containsKey("layers")) { int n = m["layers"] | LN_MAX_LAYERS; _nLayers = n < 1 ? 1 : (n > LN_MAX_LAYERS ? LN_MAX_LAYERS : n); }
       if (m.containsKey("dfade")) { float f = m["dfade"] | 2.0f; _mFadeS = f < 0 ? 0 : f; }
       if (m["reload"] | false) loadMasterSetup();
+      JsonObject su = m["setup"];
+      if (!su.isNull() && strcmp(su["format"] | "", "lichtnest-setup") == 0) { _ms->fromJson(su); applyMasterSetup(); }
       JsonArray batch = m["batch"];                     // several commands at once (a cue: all layers in one go)
       if (!batch.isNull() && !nested) for (JsonObject b : batch) masterCommand(b, true);   // one level only
       if (m["act"].is<const char*>()) strlcpy(_mActive, m["act"].as<const char*>(), sizeof(_mActive));

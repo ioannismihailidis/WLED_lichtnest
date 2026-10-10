@@ -52,7 +52,7 @@ Role switch: Lichtnest UI → System → ROLLE, or the master UI status bar
 `POST /json/state {"lichtnest":{"m":{...}}}` — layer commands `{"L":i,"fx":n,"p":{},"fade":s,"tag":"p.c.l"}`,
 `{"L":i,"off":true}`, `{"L":i,"p":{}}` (live tweak), `{"L":i,"blend":"add","op":0.8}`;
 `batch` (one level), `black`, `dim`, `out`, `fps`, `dfade`, `layers`, `open`, `showfile`,
-`act`, `test`, `reload`. Status: `/json/info` → `master`, `/json/state` → `lichtnest.m`.
+`act`, `test`, `reload`, `setup` (setup object applied in RAM while editing; the UI writes the file ~3 s later). Status: `/json/info` → `master`, `/json/state` → `lichtnest.m`.
 
 A node with IP `local` is one of the master's own outputs (Port = n-th physical output).
 With the master's Art-Net output off, Art-Net from outside is shown on its own outputs.

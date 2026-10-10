@@ -111,15 +111,21 @@ class LnSetup {
         int cN = col(h, "Name"), cI = col(h, "IP"), cS = col(h, "StartUniverse"), cU = col(h, "Universes"), cP = col(h, "LedsPerUniverse"), cO = col(h, "Port");
         for (size_t r = 1; r < n.size() && nNodes < LN_MAX_NODES; r++) {
           JsonArray row = n[r]; LnNode& nd = nodes[nNodes];
+          // a re-apply (live edit in the UI) keeps the resolved address of a node whose host
+          // did not change: the stream to that client must not pause until mDNS answers again
+          char oldHost[sizeof(nd.host)]; strlcpy(oldHost, nd.host, sizeof(oldHost));
+          bool oldResolved = nd.resolved; IPAddress oldIp = nd.ip;
           cell(row, cN, nd.name, sizeof(nd.name), nullptr);
           if (!nd.name[0]) snprintf(nd.name, sizeof(nd.name), "Node%u", (unsigned)r);
           cell(row, cI, nd.host, sizeof(nd.host), "");
           nd.start  = (uint16_t)toNum(at(row, cS), 0);
           int u = (int)toNum(at(row, cU), 1); nd.unis = u < 1 ? 1 : u;
           int p = (int)toNum(at(row, cP), 170); nd.perUni = p < 1 ? 1 : (p > 170 ? 170 : p);
-          nd.resolved = false; nd.lastTry = 0;
           int po = (int)toNum(at(row, cO), 0); nd.port = po < 0 ? 0 : (po > 255 ? 255 : po);
           nd.local = strcasecmp(nd.host, "local") == 0;
+          nd.resolved = nd.local || (oldResolved && strcmp(oldHost, nd.host) == 0);   // own output: nothing to resolve
+          if (nd.resolved && !nd.local) nd.ip = oldIp;
+          nd.lastTry = 0;
           nNodes++;
         }
       }
