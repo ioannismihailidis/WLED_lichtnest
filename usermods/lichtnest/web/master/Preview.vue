@@ -10,6 +10,7 @@ import { dev } from './api.js'
 import { cellOfTag, effectByKey } from './show.js'
 import { buildScene, buildField, programLayers, prepDeck, evaluator, draw } from './scene.js'
 import { newDeckState } from './mfx.js'
+import { bgShown } from './bg.js'
 
 const props = defineProps({
   mode: { type: String, default: 'program' },
@@ -19,12 +20,13 @@ const props = defineProps({
   fps: { type: Number, default: 25 },
   cells: { type: Number, default: 96 },
   restartKey: { type: Number, default: 0 },
+  fieldDim: { type: Number, default: 0.38 },
 })
 const canvas = ref(null)
 let scene = null, fieldGrid = null
 function rebuild () { scene = buildScene(); fieldGrid = props.field ? buildField(scene, props.cells) : null }
 let rebuildT = null
-watch(() => [setup.canvasW, setup.canvasH, setup.tubes, setup.types], () => { clearTimeout(rebuildT); rebuildT = setTimeout(rebuild, 200) }, { deep: true })
+watch(() => [setup.canvasW, setup.canvasH, setup.tubes, setup.types, props.field], () => { clearTimeout(rebuildT); rebuildT = setTimeout(rebuild, 200) }, { deep: true })
 
 // clip mode: a free-running deck with its own state
 let clipStart = performance.now(), clipState = newDeckState(), clipDeck = null
@@ -53,7 +55,8 @@ function frame (t) {
       layers = l ? [{ ...l, blend: 0, op: 256 }] : []
     } else layers = all
   }
-  draw(c, scene, fieldGrid, evaluator(layers, scene), { field: props.field, pad: props.mode === 'layer' ? 3 : 8 })
+  const bg = bgShown(props.mode === 'program' ? 'program' : 'layers')
+  draw(c, scene, fieldGrid, evaluator(layers, scene), { field: props.field, fieldDim: props.fieldDim, bg, pad: props.mode === 'layer' ? 3 : 8 })
 }
 onMounted(() => { rebuild(); raf = requestAnimationFrame(frame) })
 onUnmounted(() => cancelAnimationFrame(raf))

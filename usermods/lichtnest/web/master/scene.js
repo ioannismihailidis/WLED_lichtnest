@@ -2,6 +2,7 @@
 // point, using the firmware-identical engine in mfx.js.
 import { parseParams, prepFrame, pixelColor, tubeColor, stepSeconds, newDeckState, blendCol, composite, cR, cG, cB } from './mfx.js'
 import { setup, findType } from './setup.js'
+import { bgRect, bgGet, bgImage } from './bg.js'
 
 // tubes with LEDs, in table order (= the firmware's render / strobe order)
 export function buildScene () {
@@ -132,8 +133,16 @@ export function draw (canvas, scene, field, colorAt, opts = {}) {
   const cw = scene.W * s, ch = scene.H * s
   const ox = (w - cw) / 2, oy = (h - ch) / 2
   g.fillStyle = '#0b0c0f'; g.fillRect(ox, oy, cw, ch)
+  const withBg = opts.bg && bgImage.img
+  if (withBg) {
+    const r = bgRect(ox, oy, cw, ch)
+    g.save(); g.beginPath(); g.rect(ox, oy, cw, ch); g.clip()
+    g.globalAlpha = Math.max(0, Math.min(1, +bgGet('Bgopacity')))
+    g.drawImage(bgImage.img, r.x, r.y, r.w, r.h)
+    g.restore()
+  }
   if (field && opts.field !== false) {
-    const dim = opts.fieldDim ?? 0.38
+    const dim = opts.fieldDim ?? 0.38   // 0..1 brightness of the colour field
     const img = g.createImageData(field.cols, field.rows)
     field.pts.forEach((p, i) => {
       const c = colorAt(p.k, p.x, p.y, p.ci)
@@ -143,18 +152,24 @@ export function draw (canvas, scene, field, colorAt, opts = {}) {
     tmp.width = field.cols; tmp.height = field.rows
     tmp.getContext('2d').putImageData(img, 0, 0)
     g.imageSmoothingEnabled = true
+    if (withBg) g.globalCompositeOperation = 'lighter'      // colours glow over the image instead of hiding it
     g.drawImage(tmp, ox, oy, cw, ch)
+    g.globalCompositeOperation = 'source-over'
   }
   g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 1; g.strokeRect(ox + 0.5, oy + 0.5, cw - 1, ch - 1)
   const sz = Math.max(1.5, Math.min(4, opts.led ?? s * 6))
+  const offStyle = withBg ? 'rgba(255,255,255,.18)' : 'rgba(255,255,255,.07)'
   for (const t of scene.tubes) {
     const px = ox + t.x * cw
     for (let j = 0; j < t.n; j++) {
       const y = t.y0 + t.dy * j
       const c = colorAt(t.k, t.x, y, t.first + j)
-      if (c === 0) g.fillStyle = 'rgba(255,255,255,.07)'
-      else g.fillStyle = `rgb(${cR(c)},${cG(c)},${cB(c)})`
+      const r = cR(c), gg = cG(c), b = cB(c)
+      const off = Math.max(r, gg, b) < 6                     // near-black reads as off (no dark marks on the image)
+      g.globalCompositeOperation = withBg && !off ? 'lighter' : 'source-over'
+      g.fillStyle = off ? offStyle : `rgb(${r},${gg},${b})`
       g.fillRect(px - sz / 2, oy + y * ch - sz / 2, sz, Math.max(1, sz * 0.6))
     }
   }
+  g.globalCompositeOperation = 'source-over'
 }

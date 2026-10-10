@@ -1101,6 +1101,14 @@ class Lichtnest : public Usermod {
       strlcpy(d.tag, tag ? tag : "", sizeof(d.tag));
       startFade(ly, nd, fadeMs);
     }
+    // A speed change must not make the animation jump. Schwarm and Impuls move with
+    // speed * elapsed, so the clip's clock is rescaled to keep the current position
+    // (Schwarm exactly; Impuls keeps the leading band, later bands shift slightly).
+    void keepPhaseOnSpeed(MDeck& d, uint8_t oldSpeed, float el) {
+      uint8_t s2 = d.p.speed;
+      if (s2 == oldSpeed || s2 == 0 || oldSpeed == 0 || (d.p.fx != 0 && d.p.fx != 2)) return;
+      d.startMs = millis() - (uint32_t)(el * oldSpeed / s2 * 1000.0f);
+    }
     // fade a layer to black
     void layerOff(uint8_t L, uint32_t fadeMs) {
       MLayer& ly = _layers[L];
@@ -1139,7 +1147,16 @@ class Lichtnest : public Usermod {
           if (m.containsKey("op")) { float o = m["op"] | 1.0f; _layers[L].opacity = o < 0 ? 0 : (o > 1 ? 1 : o); }
           if (m.containsKey("fx")) launchClip(L, m["p"], m["fx"] | 3, fadeMs, m["tag"] | "");
           else if (m["off"] | false) layerOff(L, fadeMs);
-          else if (m.containsKey("p")) { MDeck& d = _layers[L].d[_layers[L].cur]; if (d.on) parseParams(m["p"], d.p); }
+          else if (m.containsKey("p")) {                 // live tweak: no restart
+            MDeck& d = _layers[L].d[_layers[L].cur];
+            if (d.on) {
+              uint8_t s1 = d.p.speed;
+              float el = (millis() - d.startMs) / 1000.0f;
+              float D = stepSeconds(d.p); if (D > 0.05f) el = fmodf(el, D);   // position in the loop, with the old timing
+              parseParams(m["p"], d.p);
+              keepPhaseOnSpeed(d, s1, el);
+            }
+          }
         }
       }
       if (m["black"] | false) for (uint8_t L = 0; L < _nLayers; L++) layerOff(L, fadeMs);

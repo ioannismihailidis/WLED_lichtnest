@@ -3,6 +3,7 @@
 // ~14 screen px; arrow keys move the selected tube (Shift = 10x step) on the TUBES tab.
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { setup, ui, findType, nodeIndex, nudge } from './setup.js'
+import { bgShown, bgRect, bgGet, bgImage } from './bg.js'
 
 const props = defineProps({ mode: { type: String, default: 'tubes' } })
 const svg = ref(null)
@@ -20,6 +21,8 @@ onMounted(() => { ro = new ResizeObserver(measure); ro.observe(svg.value); measu
 onUnmounted(() => { ro?.disconnect(); window.removeEventListener('keydown', onKey) })
 
 const W = computed(() => setup.canvasW), H = computed(() => setup.canvasH)
+// background image inside the canvas (svg y grows downwards like the screen)
+const bg = computed(() => { bgImage.rev; if (!bgShown('setup')) return null; const r = bgRect(0, 0, W.value, H.value); return r && { ...r, href: bgImage.img.src, op: +bgGet('Bgopacity') } })
 const margin = computed(() => Math.max(W.value, H.value) * 0.03)
 const viewBox = computed(() => `${-margin.value} ${-margin.value} ${W.value + 2 * margin.value} ${H.value + 2 * margin.value}`)
 
@@ -77,7 +80,9 @@ function onKey (ev) {
 
 <template>
   <svg ref="svg" class="plan" :viewBox="viewBox" preserveAspectRatio="xMidYMid meet" @click="onClick">
+    <defs><clipPath id="ln-canvas-clip"><rect :x="0" :y="0" :width="W" :height="H" /></clipPath></defs>
     <rect :x="0" :y="0" :width="W" :height="H" class="canvas" :stroke-width="1.5 * scale" />
+    <image v-if="bg" :href="bg.href" :x="bg.x" :y="bg.y" :width="bg.w" :height="bg.h" :opacity="bg.op" preserveAspectRatio="none" clip-path="url(#ln-canvas-clip)" />
     <g v-for="t in tubes" :key="t.i">
       <line :x1="t.x" :y1="t.ya" :x2="t.x" :y2="t.yb" :class="['tube', { sel: isSel(t), bad: !t.ok }]" :stroke-width="(isSel(t) ? 5 : 3.5) * scale" />
       <circle v-if="t.ok" :cx="t.x" :cy="t.ya" :r="(isSel(t) ? 4.5 : 3) * scale" class="led1" />

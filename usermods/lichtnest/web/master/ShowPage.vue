@@ -12,6 +12,7 @@ import {
 } from './show.js'
 import Preview from './Preview.vue'
 import ParamEditor from './ParamEditor.vue'
+import { bgGet, bgSet, bgImage } from './bg.js'
 
 const BLENDS = ['normal', 'add', 'screen', 'multiply', 'lighten', 'darken', 'difference', 'subtract']
 const page = computed(() => show.pages[view.page] || { name: '', cues: [] })
@@ -70,6 +71,13 @@ let layerT = null
 watch(() => show.layers.map((l) => l.blend + l.opacity), () => { clearTimeout(layerT); layerT = setTimeout(syncLayers, 120) })
 function newCueAfterSel () { const i = addCue(view.sel ? view.sel.cue + 1 : undefined); view.sel = { cue: i, layer: view.sel?.layer ?? 0 } }
 
+// colour field of the program preview: a per-viewer setting (browser storage)
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v) } catch (e) { return d } }
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch (e) { /* ignore */ } }
+const fieldOn = ref(lsGet('ln_field_on', true))
+const fieldDim = ref(lsGet('ln_field_dim', 0.38))
+watch(fieldOn, (v) => lsSet('ln_field_on', v))
+watch(fieldDim, (v) => lsSet('ln_field_dim', v))
 const fade = computed({ get: () => show.fadetime, set: (v) => { show.fadetime = Math.max(0, +v || 0); masterCmd({ dfade: show.fadetime }) } })
 function confirmDeletePage () { if (window.confirm(`Page „${page.value.name}“ mit allen Cues löschen?`)) deletePage() }
 function renamePage () { const n = window.prompt('Name der Page:', page.value.name); if (n) page.value.name = n.trim() }
@@ -92,7 +100,14 @@ function renamePage () { const n = window.prompt('Name der Page:', page.value.na
 
     <section class="center">
       <div class="top">
-        <div class="prog"><Preview mode="program" /></div>
+        <div class="prog">
+          <Preview mode="program" :field="fieldOn" :field-dim="fieldDim" />
+          <div class="pvctl">
+            <label class="tog" :class="{ on: fieldOn }" @click="fieldOn = !fieldOn"><span class="dot" />FARBFELD</label>
+            <input v-if="fieldOn" type="range" min="0.05" max="1" step="0.01" v-model.number="fieldDim" style="width:80px" title="Helligkeit des Farbfelds">
+            <label v-if="bgImage.img" class="tog" :class="{ on: bgGet('Bgshow') && bgGet('Bgactive') }" @click="bgSet('Bgshow', !(bgGet('Bgshow') && bgGet('Bgactive'))); bgSet('Bgactive', true)"><span class="dot" />HINTERGRUND</label>
+          </div>
+        </div>
         <div v-if="!view.edit" class="transport card">
           <div class="nn"><span class="lbl">Jetzt</span><span class="mono big">{{ nowName }}</span></div>
           <div class="nn"><span class="lbl">Nächster</span><span class="mono">{{ nextCue }}</span></div>
@@ -227,7 +242,8 @@ function renamePage () { const n = window.prompt('Name der Page:', page.value.na
 .show { display: flex; height: 100%; min-height: 0; }
 .center { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 12px 14px; gap: 10px; overflow: auto; }
 .top { display: flex; gap: 12px; height: 42vh; min-height: 240px; }
-.prog { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.prog { position: relative; flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.pvctl { position: absolute; top: 8px; right: 10px; display: flex; gap: 12px; align-items: center; background: rgba(8,9,11,.7); padding: 5px 10px; border-radius: 9px; }
 .transport { width: 320px; display: flex; flex-direction: column; gap: 9px; overflow: auto; }
 .nn { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .big { font-size: 16px; color: var(--text); }

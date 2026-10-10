@@ -74,9 +74,10 @@ export async function postState (obj) {
 }
 export const masterCmd = (m) => postState({ lichtnest: { m } })
 
-export async function uploadFile (path, text) {
+export async function uploadFile (path, data) {        // data: text (JSON) or a Blob
   const fd = new FormData()
-  fd.append('data', new Blob([text], { type: 'application/json' }), path.replace(/^\//, ''))
+  const blob = data instanceof Blob ? data : new Blob([data], { type: 'application/json' })
+  fd.append('data', blob, path.replace(/^\//, ''))
   try {
     const r = await fetch(url('/upload'), { method: 'POST', body: fd })
     return r.ok

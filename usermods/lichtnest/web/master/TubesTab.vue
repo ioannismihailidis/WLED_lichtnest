@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue'
 import { setup, ui, findType, addTube, deleteTube, moveTube, nudge, distribute } from './setup.js'
+import BgPanel from './BgPanel.vue'
 
 const t = computed(() => setup.tubes[ui.tube] || null)
 const listEl = ref(null)
@@ -71,5 +72,8 @@ const typeOk = (tb) => { const ty = findType(tb.type); return !!ty && ty.leds > 
       <span class="lbl">Höhe</span><input class="in num" type="number" min="1" v-model.number="setup.canvasH">
       <span class="hint">Pixel; X/Y und Tube-Längen sind in diesen Pixeln</span>
     </div>
+
+    <div class="sec">HINTERGRUND</div>
+    <BgPanel />
   </div>
 </template>
