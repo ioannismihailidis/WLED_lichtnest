@@ -1,6 +1,6 @@
 # Lichtnest master / client — project memory
 
-State as of 2026-10-10, branch `zugvoegel-janni` (not pushed). Read this before changing
+State as of 2026-10-10, branch `zugvoegel-janni`. Read this before changing
 the master role, the master UI or the lichtnest effect engine.
 
 ## Goal
@@ -57,6 +57,17 @@ Role switch: Lichtnest UI → System → ROLLE, or the master UI status bar
 A node with IP `local` is one of the master's own outputs (Port = n-th physical output).
 With the master's Art-Net output off, Art-Net from outside is shown on its own outputs.
 
+## Client management (master UI → SETUP → ART-NET NODES → CLIENTS)
+
+- **Found devices**: WLED devices the master sees (`/json/nodes`), one row per controller
+  (merged by MAC, Ethernet address preferred), refreshed every 5 s; "Als Node übernehmen"
+  adds one node per output, named after the device's mDNS name (e.g. `lichtnest-01-P1`).
+- **Client table**: every client a node points at; per client output a selector which node
+  feeds it; PRÜFEN (differences), Universes, LED-Zahl, Netzwerk (name, mDNS, Ethernet / WiFi,
+  keep WiFi alongside, "Art-Net über"). Reboots only after confirmation.
+- Input fields that commit on change use `LazyInput` / `IpInput` (keep the typed text while
+  focused) — a plain `:value` binding is reset by the periodic re-renders.
+
 ## Limits (no PSRAM)
 
 - 64 tubes (= effect geometry `ZV_MAXGEO`), 512 chunks, 8192 LEDs (per type 2048) — the UI warns.
@@ -85,10 +96,29 @@ Also verified: firmware Art-Net channel map for 4 setups, broken / hostile setup
 commands (no crash), 8 + 5 min soak (no reboot, no leak), 51 inputs and 53 buttons of the
 master UI, client management against the fake node, normal role regression.
 
+Also verified with real hardware: TD → lichtnest-02 + fake node (every LED of the TD test
+pattern "Universes" correct), and lichtnest-01 set up as a client entirely through the master
+UI (universes, LED count, network; 333/333 LEDs correct).
+
+## Devices (test rig)
+
+| Device | Role | Address |
+|---|---|---|
+| lichtnest-02 | master (Art-Net output on) | `192.168.178.250` (Ethernet, type 13 Gledopto) |
+| lichtnest-01 | client, P1 from universe 32, 333 LEDs, WiFi alongside off | `192.168.178.170` (Ethernet, type 13) |
+| fake-wled.mjs | fake client on the dev PC | `192.168.178.126` |
+
+lichtnest-02's `/lichtnest.setup.json` is a test setup: local nodes Master-1/2, tubes 6–8 on
+`lichtnest-01-P1`, the other nodes → the PC. `platformio_override.ini` (gitignored) has
+`esp32_eth_gled` = esp32_eth with `WLED_ETH_DEFAULT=13` for freshly flashed boards — an
+existing cfg.json on the device overrides it.
+
+## Firmware notes
+
+- Ethernet up + "keep WiFi alongside" off switches WiFi off (also when the Ethernet link came
+  up before WiFi was started); WiFi returns as fallback when Ethernet is lost.
+- Opening the serial port of a CH340 board resets the ESP — query devices over the network.
+
 ## Open
 
-- Client management against a **real** second ESP (only the fake node so far).
-- TD → master / fake reception test: waits for the user's consent in the TD session
-  (routing: TD nodes 1–4 → master, the rest → fake node).
-- Test rig: lichtnest-02 (`192.168.178.250`, Ethernet type 13 Gledopto), normally in the
-  normal role; its `/lichtnest.setup.json` is a test setup (local nodes Master-1/2, other nodes → the PC).
+- More clients: only one real client (lichtnest-01) so far.
