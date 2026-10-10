@@ -989,6 +989,12 @@ void WLED::handleConnection()
     DEBUG_PRINTLN(F("WiFi alongside Ethernet not connected, retrying."));
     WiFi.reconnect();
   }
+  // WiFi not wanted alongside Ethernet: when the Ethernet link came up before the WiFi was
+  // started, the ETH event could not switch it off - do it here (it comes back if Ethernet fails)
+  if (!ethKeepWiFi && !apActive && Network.isEthernet() && (WiFi.getMode() & WIFI_MODE_STA)) {
+    DEBUG_PRINTLN(F("Ethernet up, WiFi not kept alongside: switching WiFi off."));
+    WiFi.disconnect(true);
+  }
   #endif
 }
 

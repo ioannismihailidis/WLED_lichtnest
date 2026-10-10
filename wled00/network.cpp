@@ -433,8 +433,9 @@ void WiFiEvent(WiFiEvent_t event)
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       #if defined(ARDUINO_ARCH_ESP32) && defined(WLED_USE_ETHERNET)
-      // WiFi running alongside Ethernet: interfaces stay up on Ethernet, the WiFi driver reconnects on its own
-      if (ethKeepWiFi && Network.isEthernet()) break;
+      // on Ethernet a WiFi drop changes nothing: alongside Ethernet the driver reconnects on its own,
+      // and without "keep WiFi" it was switched off on purpose (no reconnect loop)
+      if (Network.isEthernet()) break;
       #endif
       if (wasConnected && interfacesInited) {
         DEBUG_PRINTF_P(PSTR("WiFi-E: Disconnected! @ %lus\n"), millis()/1000);
