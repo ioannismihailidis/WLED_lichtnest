@@ -1,8 +1,8 @@
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { setup, ui, compute, addNode, deleteNode, nodeInUse, renameNode, isLocal, MAX_CHUNKS } from './setup.js'
 import { dev } from './api.js'
-import { clients, refreshClients, applyUniverses, applyLedCounts, discover, needsReboot, recheck } from './clients.js'
+import { clients, refreshClients, applyUniverses, applyLedCounts, discover, needsReboot, recheck, deviceInSetup, adoptDevice } from './clients.js'
 import ClientNet from './ClientNet.vue'
 
 const addr = computed(() => compute())
@@ -12,7 +12,12 @@ const ownPorts = computed(() => dev.info?.ports || [])     // the master's physi
 // patch table: one row per tube and universe
 const patch = computed(() => addr.value.chunks.map((c) => ({ ...c, nr: c.tube + 1, nodeName: (setup.nodes[c.node] || { name: 'Default' }).name })))
 
-onMounted(() => { refreshClients(); discover() })
+let discT = null
+onMounted(() => { refreshClients(); discover(); discT = setInterval(discover, 5000) })
+onUnmounted(() => clearInterval(discT))
+// next free start universe after everything the setup's network nodes use
+const nextUniverse = computed(() => addr.value.usage.reduce((m, u) => (isLocal(u.node) ? m : Math.max(m, u.node.start + u.node.unis)), 0))
+function adopt (d) { adoptDevice(d, nextUniverse.value); ui.node = setup.nodes.length - 1; setTimeout(refreshClients, 1500) }
 // node / tube edits change what the clients should get: update targets + status at once
 watch(() => [setup.nodes, setup.tubes, setup.types], recheck, { deep: true })
 const netOf = ref('')                 // host whose network form is open
@@ -124,7 +129,22 @@ function autoUniverses () {
         </tbody>
       </table>
       <ClientNet v-if="netClient" :client="netClient" @close="netOf = ''" @saved="netSaved" />
-      <div v-if="clients.found.length" class="hint">Im Netz gesehen: {{ clients.found.map((f) => `${f.name} (${f.ip})`).join(', ') }}</div>
+      <div class="lbl" style="margin-top:6px">Gefundene Geräte <span class="hint">(WLED-Geräte im Netz, alle 5 s aktualisiert)</span></div>
+      <div v-if="!clients.devices.length" class="hint">Noch keine gefunden — die Clients müssen im selben Netz sein und „Node broadcast“ eingeschaltet haben (WLED-Standard).</div>
+      <table v-else class="t">
+        <thead><tr><th>Gerät</th><th>Adressen</th><th>Ports</th><th /></tr></thead>
+        <tbody>
+          <tr v-for="d in clients.devices" :key="d.mac || d.ip">
+            <td>{{ d.name }}<div class="hint">{{ d.mac ? d.mac.replace(/(..)(?!$)/g, '$1:') : '' }}</div></td>
+            <td><div v-if="d.eth">ETH {{ d.eth }}</div><div v-if="d.wifi">WLAN {{ d.wifi }}</div><div v-if="!d.eth && !d.wifi">{{ d.ips.join(', ') }}</div></td>
+            <td><div v-for="(p, i) in d.ports" :key="i">P{{ i + 1 }}: {{ p.len }} LEDs{{ p.gpio !== undefined ? ` · GPIO ${p.gpio}` : '' }}</div><span v-if="!d.online" class="bad">nicht erreichbar</span></td>
+            <td style="text-align:right">
+              <span v-if="deviceInSetup(d)" class="ok">im Setup</span>
+              <button v-else class="btn sm acc" :disabled="!d.online || !d.ports.length" @click="adopt(d)">Als Node übernehmen</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <div class="sec">PATCH</div>

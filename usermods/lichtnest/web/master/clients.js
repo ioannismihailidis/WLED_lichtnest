@@ -9,7 +9,7 @@ import { setup, compute, isLocal } from './setup.js'
 const ARTNET_PORT = 6454
 const DMX_RGB = 4
 
-export const clients = reactive({ list: [], found: [], busy: false })
+export const clients = reactive({ list: [], found: [], devices: [], busy: false })
 
 // the master's own outputs ("local" nodes) are configured on the master itself
 const clientUrl = (c, p) => (c.local ? url(p) : `http://${c.ip}${p}`)
@@ -126,10 +126,42 @@ export async function applyNetwork (c, patch) {
   return postJson(clientUrl(c, '/json/cfg'), { ...patch, rb: true }, 8000)
 }
 
-// WLED devices the master has seen on the network (needs "node broadcast" on the clients)
+// WLED devices the master has seen on the network (needs "node broadcast" on the clients).
+// clients.found = raw addresses (IP field suggestions); clients.devices = one entry per device
+// (merged by MAC: a controller on Ethernet + WiFi shows up once, Ethernet address preferred)
+// with its outputs from its own /json/info.
 export async function discover () {
+  let found = []
   try {
     const r = await getJson(url('/json/nodes'))
-    clients.found = (r.nodes || []).map((n) => ({ name: n.name, ip: n.ip }))
-  } catch (e) { clients.found = [] }
+    found = (r.nodes || []).map((n) => ({ name: n.name, ip: n.ip }))
+  } catch (e) { /* keep the last list */ return }
+  clients.found = found
+  const infos = await Promise.all(found.map((f) => getJson(`http://${f.ip}/json/info`, 2500).then((i) => ({ f, i })).catch(() => ({ f, i: null }))))
+  const byMac = new Map()
+  for (const { f, i } of infos) {
+    const key = i?.mac || f.ip
+    const d = byMac.get(key) || { mac: i?.mac || '', name: i?.name || f.name, mdns: '', eth: '', wifi: '', ips: [], ports: [], online: !!i }
+    d.ips.push(f.ip)
+    if (i) {
+      d.online = true; d.name = i.name || d.name
+      d.eth = i.net?.eth || d.eth; d.wifi = i.net?.wifi || d.wifi
+      if (Array.isArray(i.ports) && i.ports.length) d.ports = i.ports.map((p) => ({ len: p.len, gpio: p.gpio }))
+      else if (!d.ports.length && i.leds) d.ports = [{ len: i.leds.count }]
+    }
+    byMac.set(key, d)
+  }
+  clients.devices = [...byMac.values()].map((d) => ({ ...d, ip: d.eth || d.ips[0] }))
+}
+// is this device (any of its addresses) already used by a node?
+export const deviceInSetup = (d) => setup.nodes.some((n) => n.ip && (d.ips.includes(n.ip) || n.ip === d.eth || n.ip === d.wifi))
+// one node per output of a found device, start universes following the last used one
+export function adoptDevice (d, nextUniverse) {
+  let u = nextUniverse
+  const base = (d.name && d.name !== 'WLED' ? d.name : (d.ip || '').split('.').pop()).replace(/\s+/g, '-')
+  d.ports.forEach((p, i) => {
+    const unis = Math.max(1, Math.ceil((p.len || 1) / 170))
+    setup.nodes.push({ name: `${base}-P${i + 1}`, ip: d.ip, start: u, unis, perUni: 170, port: i + 1 })
+    u += unis
+  })
 }
