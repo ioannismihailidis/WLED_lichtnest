@@ -200,13 +200,16 @@ class Lichtnest : public Usermod {
     struct MLayer { uint8_t blend = 0; float opacity = 1; MDeck d[2]; uint8_t cur = 0; bool fading = false; uint32_t fadeStart = 0, fadeMs = 0; DeckState st; };
     // rolling 2 s window of master frame timing
     struct MStat {
-      uint32_t sumR = 0, sumS = 0, peakR = 0, frames = 0, winMs = 0;
-      uint32_t renderAvg = 0, renderPeak = 0, sendAvg = 0, fps = 0;
+      uint32_t sumR = 0, sumS = 0, peakR = 0, frames = 0, winMs = 0, lastMs = 0, ivMinW = 0xFFFFFFFF, ivMaxW = 0;
+      uint32_t renderAvg = 0, renderPeak = 0, sendAvg = 0, fps = 0, ivMin = 0, ivMax = 0;   // ivMin/ivMax: frame interval (ms) in the window
       void add(uint32_t r, uint32_t s, uint32_t now) {
         sumR += r; sumS += s; frames++; if (r > peakR) peakR = r;
+        if (lastMs) { uint32_t iv = now - lastMs; if (iv < ivMinW) ivMinW = iv; if (iv > ivMaxW) ivMaxW = iv; }
+        lastMs = now;
         uint32_t win = now - winMs; if (win < 2000) return;
         renderAvg = sumR / frames; sendAvg = sumS / frames; renderPeak = peakR; fps = (frames * 1000 + win / 2) / win;
-        sumR = sumS = peakR = frames = 0; winMs = now;
+        ivMin = ivMinW == 0xFFFFFFFF ? 0 : ivMinW; ivMax = ivMaxW;
+        sumR = sumS = peakR = frames = 0; ivMinW = 0xFFFFFFFF; ivMaxW = 0; winMs = now;
       }
     };
     bool      _masterCfg = false;      // configured role
@@ -225,7 +228,8 @@ class Lichtnest : public Usermod {
     uint8_t   _mDim = 255;             // master dimmer (output only)
     uint8_t   _mFps = 40;
     float     _mFadeS = 2.0f;          // default fade
-    uint32_t  _mLastFrame = 0, _mResolveMs = 0;
+    uint32_t  _mResolveMs = 0;
+    TaskHandle_t _mTask = nullptr;     // frame task (render + Art-Net send), see masterTask()
     MStat     _mStat;
     // Master state is touched from two tasks: the frame loop (loopTask) and JSON commands /
     // status requests (async_tcp, another core). One mutex serialises them: a command or
@@ -944,6 +948,24 @@ class Lichtnest : public Usermod {
       if (!_ms || !_art || !_layers) { DEBUG_PRINTLN(F("Lichtnest master: out of memory")); return; }
       _master = true;
       loadMasterSetup();
+      // Frames come from their own task with a fixed period: WLED's loop blocks for up to one
+      // strip transmission (~36 ms at 1190 LEDs) per show(), which made the frame intervals
+      // alternate between 40 and 76 ms and the clients judder. Core 0, below the network tasks.
+      if (!_mTask) xTaskCreatePinnedToCore(masterTaskEntry, "lnMaster", 8192, this, 1, &_mTask, 0);
+    }
+
+    static void masterTaskEntry(void* p) { ((Lichtnest*)p)->masterTask(); }
+    void masterTask() {
+      TickType_t last = xTaskGetTickCount();
+      for (;;) {
+        TickType_t period = pdMS_TO_TICKS(1000 / (_mFps ? _mFps : 40));
+        if (period < 1) period = 1;
+        vTaskDelayUntil(&last, period);
+        masterFrame();
+        // a frame that took longer than the period: resync instead of running flat out, and
+        // yield so the idle task (watchdog) on this core keeps running
+        if (xTaskGetTickCount() - last > period) { last = xTaskGetTickCount(); delay(1); }
+      }
     }
 
     void loadMasterSetup() {
@@ -974,14 +996,21 @@ class Lichtnest : public Usermod {
       computeCenter();
     }
 
+    // main loop part of the master: node host resolution (frames: masterTask / masterFrame)
     void masterLoop() {
+      uint32_t now = millis();
+      if (now - _mResolveMs < 1000) return;
       MLock lock(_mMutex);
       if (!lock.ok) return;
+      _mResolveMs = now;
+      _art->resolve(*_ms, IPAddress(255, 255, 255, 255));
+    }
+
+    // one frame: render the layers into _fb and stream it (called from masterTask)
+    void masterFrame() {
+      MLock lock(_mMutex);
+      if (!lock.ok || !_fb) return;
       uint32_t now = millis();
-      if (now - _mResolveMs > 1000) { _mResolveMs = now; _art->resolve(*_ms, IPAddress(255, 255, 255, 255)); }
-      uint32_t interval = 1000 / (_mFps ? _mFps : 40);
-      if (!_fb || now - _mLastFrame < interval) return;
-      _mLastFrame = now;
       uint32_t t0 = micros();
       bool test = testActive(now);
       if (!test || !_tPat) masterRender(now);            // a test pattern replaces the show completely
@@ -1343,6 +1372,7 @@ class Lichtnest : public Usermod {
       m["fps"] = _mStat.fps; m["render"] = _mStat.renderAvg; m["renderPeak"] = _mStat.renderPeak;
       m["test"] = testActive(millis());
       m["send"] = _mStat.sendAvg; m["packets"] = _art->packets;
+      m["ivMin"] = _mStat.ivMin; m["ivMax"] = _mStat.ivMax;   // frame interval spread (ms): pacing quality
       JsonArray nodes = m.createNestedArray("nodes");
       for (uint8_t k = 0; k < _ms->nNodes; k++) {
         const LnNode& nd = _ms->nodes[k];

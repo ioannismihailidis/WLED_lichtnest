@@ -76,7 +76,11 @@ With the master's Art-Net output off, Art-Net from outside is shown on its own o
 - **Every flash write pauses the master for up to ~0.4 s** (ESP32 stops both cores): no
   uploads / autosaves / cfg writes during a show. The show autosaves after 5 s idle and
   never from the dimmer.
-- Master commands run in the async_tcp task; a mutex (`_mMutex`) serialises them with the frame loop.
+- Frames (render + Art-Net send) run in their own task `lnMaster` (core 0, fixed period via
+  `vTaskDelayUntil`), host resolution and the local strip output stay in WLED's loop. Master
+  commands run in the async_tcp task; the mutex `_mMutex` serialises all three. WLED's loop
+  blocks for one strip transmission per show() (~36 ms at 1190 LEDs), so a frame loop inside
+  it alternated 40 / 76 ms intervals; `/json/info` → `master.ivMin/ivMax` shows the spread.
 
 ## Tests (all green on lichtnest-02, 2026-10-10)
 
