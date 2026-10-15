@@ -268,15 +268,16 @@ export function strobeColor (p, tubeIdx, tubeTotal, flash) {
 
 import { noiseValue } from './noise.js'
 // fx: 0 impulse, 1 strobe, 2 schwarm, 3 solid, 4 noise. p: param pool. (x,y) normalised 0..1.
-// `phase` is the accumulated phase for this effect; (cx,cy) is the radial centre.
-export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase, cx = 0.5, cy = 0.5) {
+// `phase` is the accumulated phase for this effect; (cx,cy) is the radial centre; invAspect =
+// plan height / width (4:3 plan): radial distances scale dy by it so rings are circles.
+export function fxColor (fx, p, x, y, chainIdx, chainTotal, tubeIdx, tubeTotal, phase, cx = 0.5, cy = 0.5, invAspect = 0.75) {
   const col = p.color || [255, 255, 255]
   switch (fx) {
     case 0: { // Puls — Frequenz = emission rate, Geschwindigkeit = travel; linear or radial (pmode)
       if ((p.speed || 0) === 0) return [0, 0, 0]              // no travel → nothing is emitted
       let u, u0
       if (p.pmode === 1) {                                    // radial: distance from the centre, origin = centre
-        const dx = x - cx, dy = y - cy
+        const dx = x - cx, dy = (y - cy) * invAspect
         u = Math.sqrt(dx * dx + dy * dy); u0 = 0
       } else {                                                // linear: projection along the direction, origin = near edge
         const ang = (p.angle || 0) * Math.PI / 180

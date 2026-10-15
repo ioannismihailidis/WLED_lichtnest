@@ -126,12 +126,13 @@ function noiseVal (P, F, x, y) {
 }
 
 // ------------------------------------------------------------------ geometry context
-// ctx = { tubes: [{x1,y1,x2,y2}], cx, cy, total }   (plan coordinates: x 0..1 right, y 0..1 down)
+// ctx = { tubes: [{x1,y1,x2,y2}], cx, cy, total, invAspect }   (plan coordinates: x 0..1 right, y 0..1 down;
+// invAspect = canvas H / W: radial distances scale dy by it so rings are circles, as in the firmware)
 const srcNum = (P) => P.srcs.length || 1
 function srcOf (P, si) { return P.srcs.length ? P.srcs[si] : { orig: P.origin, mode: P.pmode, ang: P.angle } }
 function srcDist (P, si, x, y, ctx) {
   const s = srcOf(P, si)
-  if (s.mode === 1) { const dx = x - ctx.cx, dy = y - ctx.cy; return Math.sqrt(dx * dx + dy * dy) }   // no markers on the master: auto centre
+  if (s.mode === 1) { const dx = x - ctx.cx, dy = (y - ctx.cy) * (ctx.invAspect ?? 1); return Math.sqrt(dx * dx + dy * dy) }   // no markers on the master: auto centre
   const a = s.ang * Math.PI / 180, ax = Math.cos(a), ay = Math.sin(a)
   return x * ax + y * ay - ((ax < 0 ? ax : 0) + (ay < 0 ? ay : 0))
 }
@@ -233,7 +234,7 @@ export function prepFrame (P, elapsed, st, ctx, F = {}) {
       for (let k = 0; k < Nn; k++) { const tk = k * iv; if (elapsed < tk) break; F.head.push(v * (elapsed - tk)) }
       for (let si = 0; si < srcNum(P); si++) {
         const s = srcOf(P, si)
-        if (s.mode === 1) { F.src.push({ m: 1, x: ctx.cx, y: ctx.cy }); continue }
+        if (s.mode === 1) { F.src.push({ m: 1, x: ctx.cx, y: ctx.cy, ia: ctx.invAspect ?? 1 }); continue }
         const a = s.ang * Math.PI / 180, ax = Math.cos(a), ay = Math.sin(a)
         F.src.push({ m: 0, ax, ay, u0: (ax < 0 ? ax : 0) + (ay < 0 ? ay : 0) })
       }
@@ -306,7 +307,7 @@ export function pixelColor (P, F, x, y, chainIdx) {
     case 0: {
       let acc = 0, any = false, bestAll = 2
       for (const s of F.src) {
-        const d = s.m === 1 ? Math.hypot(x - s.x, y - s.y) : x * s.ax + y * s.ay - s.u0
+        const d = s.m === 1 ? Math.hypot(x - s.x, (y - s.y) * s.ia) : x * s.ax + y * s.ay - s.u0
         let bestg = 2
         for (const h of F.head) { const g = (h - d) * F.invW; if (g >= 0 && g <= 1 && g < bestg) bestg = g }
         if (P.smix === 0) { if (bestg < bestAll) bestAll = bestg; continue }

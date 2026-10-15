@@ -193,6 +193,9 @@ class Lichtnest : public Usermod {
     // render two strobes with different clocks don't re-roll per pixel.
     DeckState _st;                     // noise drift + strobe picks of the local effect / playlist
     float    _cx = 0.5f, _cy = 0.5f;   // radial centre = centroid of the tube geometry
+    // plan height / width: radial distances scale dy by this so a ring is a circle in real
+    // space (x stays in plan-width units). Normal role: the plan is 4:3; master: the canvas.
+    float    _invAspect = 0.75f;
     FxFrame  _frameA, _frameB;         // per-frame render context of the two decks (current / crossfade target)
 
     // --- master role (cfg "master", takes effect at boot) ---
@@ -216,6 +219,7 @@ class Lichtnest : public Usermod {
     bool      _master = false;         // running as master (allocations done)
     char      _msetup[40] = "/lichtnest.setup.json";
     char      _mshow[40]  = "/lichtnest.show.json";   // current show file (the UI loads it)
+    bool      _mAuto = true;           // cfg "mauto": at boot, launch the first cue of the show file
     char      _mActive[16] = "";                       // active cue ("page.cue"), shared by all UIs
     LnSetup*  _ms = nullptr;
     LnArtnet* _art = nullptr;
@@ -415,7 +419,7 @@ class Lichtnest : public Usermod {
       if (mode == 1) {
         float ox = _cx, oy = _cy;                          // default: auto centre (tube centroid)
         if (orig != 255) pointPosition(orig, ox, oy);      // else: named marker, if it still exists
-        float dx = x - ox, dy = y - oy; return sqrtf(dx * dx + dy * dy);
+        float dx = x - ox, dy = (y - oy) * _invAspect; return sqrtf(dx * dx + dy * dy);
       }
       float a = angDeg * 3.14159265f / 180.0f;
       float ax = cosf(a), ay = sinf(a);
@@ -685,7 +689,7 @@ class Lichtnest : public Usermod {
           float bestAll = 2.0f;
           for (uint8_t si = 0; si < F.nsrc; si++) {
             float d;
-            if (F.smode[si] == 1)      { float dx = x - F.sx[si], dy = y - F.sy[si]; d = sqrtf(dx * dx + dy * dy); }
+            if (F.smode[si] == 1)      { float dx = x - F.sx[si], dy = (y - F.sy[si]) * _invAspect; d = sqrtf(dx * dx + dy * dy); }
             else if (F.smode[si] == 2) { d = (x - F.sx[si]) * F.sax[si] + (y - F.sy[si]) * F.say[si]; if (d < 0) continue; }   // behind a marker plane
             else                       d = x * F.sax[si] + y * F.say[si] - F.su0[si];
             float bestg = 2.0f;
@@ -745,6 +749,7 @@ class Lichtnest : public Usermod {
       loadSchedule();
       if (_masterCfg) {
         initMaster();
+        autoFirstCue();
         // the master serves its own UI at "/" (registered before WLED's routes, so it wins);
         // the Lichtnest UI stays at /lichtnest, the stock UI at /classic
         server.on("/", HTTP_GET, [](AsyncWebServerRequest* r) {
@@ -983,6 +988,7 @@ class Lichtnest : public Usermod {
         _fb = (uint8_t*)d_malloc(need);
         if (_fb) { memset(_fb, 0, need); _fbSize = need; }
       }
+      _invAspect = (_ms->canvasW > 0 && _ms->canvasH > 0) ? _ms->canvasH / _ms->canvasW : 1.0f;
       // the effect engine reads tube geometry from geo*: fill it with the setup's tubes
       geoCount = 0; _mValidN = 0;
       for (uint8_t ti = 0; ti < _ms->nTubes && geoCount < ZV_MAXGEO; ti++) {
@@ -994,6 +1000,90 @@ class Lichtnest : public Usermod {
       }
       pointCount = 0;
       computeCenter();
+    }
+
+    // effect keys of the show file (web/src/effects.js); -1 = unknown, treated as "off" like the UI
+    static int8_t fxByKey(const char* key) {
+      static const char* const keys[] = { "pulse", "strobe", "schwarm", "solid", "noise", "fill" };
+      static const int8_t ids[] = { 0, 1, 2, 3, 4, 5 };
+      for (uint8_t i = 0; i < 6; i++) if (strcmp(key, keys[i]) == 0) return ids[i];
+      return -1;
+    }
+
+    // At boot: the first cue of page 1 of the show file, as GO in the UI would do it. Layers
+    // (blend, opacity), fade time and dimmer come from the file as well, so the master lights
+    // the installation without anyone opening the UI. Tags match the UI ("1.1", "1.1.L").
+    void autoFirstCue() {
+      if (!_mAuto || !_layers || !WLED_FS.exists(_mshow)) return;
+      File f = WLED_FS.open(_mshow, "r");
+      if (!f) return;
+      DynamicJsonDocument doc(f.size() * 3 + 2048);     // tables of strings, like the setup file
+      DeserializationError err = deserializeJson(doc, f);
+      f.close();
+      if (err || strcmp(doc["format"] | "", "lichtnest-show") != 0) return;
+      auto colIdx = [](JsonArray h, const char* name) -> int { for (size_t i = 0; i < h.size(); i++) if (strcmp(h[i] | "", name) == 0) return (int)i; return -1; };
+      auto num = [](JsonVariant v, float d) -> float {    // TD writes every cell as a string
+        if (v.isNull()) return d;
+        if (v.is<const char*>()) { const char* s = v.as<const char*>(); return (s && *s) ? atof(s) : d; }
+        return v.as<float>();
+      };
+      JsonObject st = doc["settings"];
+      float ft = num(st["Fadetime"], 2.0f); _mFadeS = ft < 0 ? 0 : ft;
+      float dm = num(st["Dimmer"], 1.0f); _mDim = (uint8_t)((dm < 0 ? 0 : (dm > 1 ? 1 : dm)) * 255.0f + 0.5f);
+      // layers [Layer, Name, Blend, Opacity]: at most LN_MAX_LAYERS (layers 4+ are dropped, as in the UI)
+      uint8_t n = 0;
+      JsonArray la = doc["layers"];
+      if (!la.isNull() && la.size() > 1) {
+        JsonArray h = la[0]; int cL = colIdx(h, "Layer"), cB = colIdx(h, "Blend"), cO = colIdx(h, "Opacity");
+        for (size_t r = 1; r < la.size(); r++) {
+          JsonArray row = la[r];
+          int L = (int)num(cL >= 0 ? row[cL].as<JsonVariant>() : JsonVariant(), (float)r) - 1;
+          if (L < 0 || L >= LN_MAX_LAYERS) continue;
+          int8_t bi = cB >= 0 ? blendIndex(row[cB] | "normal") : 0; _layers[L].blend = bi < 0 ? 0 : bi;
+          float op = num(cO >= 0 ? row[cO].as<JsonVariant>() : JsonVariant(), 1.0f); _layers[L].opacity = op < 0 ? 0 : (op > 1 ? 1 : op);
+          if (L + 1 > n) n = L + 1;
+        }
+      }
+      _nLayers = n ? n : 1;
+      // columns [Page, Column, Name, Fade]: the lowest column of page 1 is the first cue
+      int firstCol = -1; float fade = _mFadeS;
+      JsonArray co = doc["columns"];
+      if (!co.isNull() && co.size() > 1) {
+        JsonArray h = co[0]; int cP = colIdx(h, "Page"), cC = colIdx(h, "Column"), cF = colIdx(h, "Fade");
+        if (cP >= 0 && cC >= 0) for (size_t r = 1; r < co.size(); r++) {
+          JsonArray row = co[r];
+          if ((int)num(row[cP], 0) != 1) continue;
+          int c = (int)num(row[cC], 0);
+          if (c >= 1 && (firstCol < 0 || c < firstCol)) { firstCol = c; fade = cF >= 0 ? num(row[cF], _mFadeS) : _mFadeS; }
+        }
+      }
+      if (firstCol < 0) return;
+      uint32_t fadeMs = fade > 0 ? (uint32_t)(fade * 1000.0f) : 0;
+      // clips [Page, Column, Layer, Effect, Params(json)] of that cue; a layer without a clip goes off
+      bool has[LN_MAX_LAYERS] = { false };
+      JsonArray cl = doc["clips"];
+      if (!cl.isNull() && cl.size() > 1) {
+        JsonArray h = cl[0]; int cP = colIdx(h, "Page"), cC = colIdx(h, "Column"), cL = colIdx(h, "Layer"), cE = colIdx(h, "Effect"), cPa = colIdx(h, "Params");
+        if (cP >= 0 && cC >= 0 && cL >= 0 && cE >= 0) for (size_t r = 1; r < cl.size(); r++) {
+          JsonArray row = cl[r];
+          if ((int)num(row[cP], 0) != 1 || (int)num(row[cC], 0) != firstCol) continue;
+          int L = (int)num(row[cL], 0) - 1;
+          if (L < 0 || L >= _nLayers) continue;
+          has[L] = true;
+          const char* key = row[cE] | "";
+          if (strcmp(key, "hold") == 0) continue;                 // keeps what plays: nothing at boot
+          int8_t fx = fxByKey(key);
+          if (fx < 0) { layerOff(L, fadeMs); continue; }          // "off" and unknown effects
+          char tag[16]; snprintf(tag, sizeof(tag), "1.1.%d", L + 1);
+          DynamicJsonDocument pd(2048); JsonObject p;
+          JsonVariant pv = cPa >= 0 ? row[cPa].as<JsonVariant>() : JsonVariant();
+          if (pv.is<const char*>()) { if (deserializeJson(pd, pv.as<const char*>()) == DeserializationError::Ok) p = pd.as<JsonObject>(); }
+          else if (pv.is<JsonObject>()) p = pv.as<JsonObject>();
+          launchClip(L, p, (uint8_t)fx, fadeMs, tag);
+        }
+      }
+      for (uint8_t L = 0; L < _nLayers; L++) if (!has[L]) layerOff(L, fadeMs);
+      strlcpy(_mActive, "1.1", sizeof(_mActive));
     }
 
     // main loop part of the master: node host resolution (frames: masterTask / masterFrame)
@@ -1555,7 +1645,7 @@ class Lichtnest : public Usermod {
     void addToConfig(JsonObject& root) override {
       JsonObject top = root.createNestedObject(FPSTR(_name));
       top[FPSTR(_enabled)] = enabled;
-      top["master"] = _masterCfg; top["msetup"] = _msetup; top["mshow"] = _mshow; top["mfps"] = _mFps;
+      top["master"] = _masterCfg; top["msetup"] = _msetup; top["mshow"] = _mshow; top["mfps"] = _mFps; top["mauto"] = _mAuto;
       top["fx"] = _manual.fx;
       top["speed"] = _manual.speed; top["width"] = _manual.width; top["angle"] = _manual.angle; top["pmode"] = _manual.pmode; top["origin"] = _manual.origin;
       top["hz"] = _manual.hz; top["duty"] = _manual.duty; top["mode"] = _manual.mode;
@@ -1573,8 +1663,11 @@ class Lichtnest : public Usermod {
       JsonObject top = root[FPSTR(_name)];
       bool ok = !top.isNull();
       ok &= getJsonValue(top[FPSTR(_enabled)], enabled, true);
-      getJsonValue(top["master"], _masterCfg, false);
-      getJsonValue(top["mfps"], _mFps, (uint8_t)40);
+      // defaults = current values: a partial /json/cfg update (e.g. only "mfps") must not reset
+      // the role, which happens when WLED re-reads the posted object and then writes cfg.json
+      getJsonValue(top["master"], _masterCfg, _masterCfg);
+      getJsonValue(top["mfps"], _mFps, _mFps);
+      getJsonValue(top["mauto"], _mAuto, _mAuto);
       if (top["msetup"].is<const char*>()) strlcpy(_msetup, top["msetup"].as<const char*>(), sizeof(_msetup));
       if (top["mshow"].is<const char*>()) strlcpy(_mshow, top["mshow"].as<const char*>(), sizeof(_mshow));
       getJsonValue(top["fx"], _manual.fx, _manual.fx);

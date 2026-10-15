@@ -6,7 +6,7 @@ import { show, view, showSave, saveShowNow, showName, newShow, openShow, saveSho
 import SetupPage from './SetupPage.vue'
 import ShowPage from './ShowPage.vue'
 
-const page = ref('setup')
+const page = ref('show')                 // the show is the daily view; setup is the exception
 const m = computed(() => dev.master)
 const addr = computed(() => compute())
 const artUsage = computed(() => addr.value.usage.filter((u) => !isLocal(u.node)))   // local nodes send no Art-Net

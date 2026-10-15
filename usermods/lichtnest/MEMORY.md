@@ -20,6 +20,7 @@ One **master ESP32** renders the show and streams it over Art-Net (Ethernet) to 
 | Clients | managed from the master: universes per port, LED counts per port (reboot after confirmation), network settings |
 | Effects | keep the lichtnest effects, do not port the TD effects |
 | Empty layer | transparent; fade in / out acts as layer presence (deviates from TD only in `normal`) |
+| Radial | a ring is a circle in real space: dy is scaled by plan H/W (`_invAspect`, 4:3 plan or master canvas) in firmware, mfx.js, fxsim.js and impulse.js |
 
 ## Where things are
 
@@ -53,6 +54,11 @@ Role switch: Lichtnest UI → System → ROLLE, or the master UI status bar
 `{"L":i,"off":true}`, `{"L":i,"p":{}}` (live tweak), `{"L":i,"blend":"add","op":0.8}`;
 `batch` (one level), `black`, `dim`, `out`, `fps`, `dfade`, `layers`, `open`, `showfile`,
 `act`, `test`, `reload`, `setup` (setup object applied in RAM while editing; the UI writes the file ~3 s later). Status: `/json/info` → `master`, `/json/state` → `lichtnest.m`.
+
+Boot: with cfg `um.Lichtnest.mauto` (default true, switch in the Lichtnest UI → System → ROLLE)
+the master launches the first cue of page 1 of its show file itself (`autoFirstCue`: layers,
+fade time, dimmer from the file; unknown effect keys = off, like the UI). The master UI opens
+on the SHOW tab.
 
 A node with IP `local` is one of the master's own outputs (Port = n-th physical output).
 With the master's Art-Net output off, Art-Net from outside is shown on its own outputs.

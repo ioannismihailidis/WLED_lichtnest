@@ -423,6 +423,8 @@ async function save () {
 }
 // --- role: normal controller or master (renders the show for all controllers) ---------
 const isMaster = computed(() => !!c.value?.um?.Lichtnest?.master)
+const autoCue = computed(() => c.value?.um?.Lichtnest?.mauto !== false)   // master: first cue of the show at boot
+async function setAutoCue (v) { await saveCfg({ um: { Lichtnest: { mauto: v } } }) }
 const masterUi = ref(null)            // master.htm.gz on the device? (null = unknown)
 onMounted(async () => {
   try { const l = await (await fetch(getHost() + '/edit?list=/')).json(); masterUi.value = l.some((f) => /master\.htm(\.gz)?$/.test(f.name)) } catch (e) { masterUi.value = null }
@@ -656,6 +658,8 @@ async function reboot () { if (await confirmDialog({ title: 'Controller neu star
       <div class="panel pad">
         <div class="row brd"><span class="lbl">Rolle<small>{{ isMaster ? 'rendert die Show und beliefert die anderen Controller' : 'eigene Effekte, Art-Net-Empfang möglich' }}</small></span>
           <div class="seg"><button :class="{ on: !isMaster }" @click="isMaster && setRole(false)">Normal</button><button :class="{ on: isMaster }" @click="!isMaster && setRole(true)">Master</button></div></div>
+        <div v-if="isMaster" class="row brd"><span class="lbl">Autostart<small>beim Start den ersten Cue der Show starten</small></span>
+          <button class="sw" :class="{ on: autoCue }" @click="setAutoCue(!autoCue)"><span /></button></div>
         <div v-if="masterUi === false" class="alert soft">Die Master-Oberfläche (master.htm.gz) fehlt auf diesem Controller — vorher mit <b>npm run deploy</b> hochladen, sonst zeigt der Master nur diese Oberfläche.</div>
         <div v-if="isMaster" class="hint mono">Master-Oberfläche: <a :href="(getHost() || '') + '/'">/</a> · diese Oberfläche: /lichtnest</div>
       </div>

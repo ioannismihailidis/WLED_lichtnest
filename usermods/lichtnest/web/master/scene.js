@@ -22,7 +22,7 @@ export function buildScene () {
   })
   let cx = 0.5, cy = 0.5
   if (ends.length) { cx = ends.reduce((a, e) => a + (e.x1 + e.x2) / 2, 0) / ends.length; cy = ends.reduce((a, e) => a + (e.y1 + e.y2) / 2, 0) / ends.length }
-  return { W, H, tubes, total, ctx: { tubes: ends, cx, cy, total } }
+  return { W, H, tubes, total, ctx: { tubes: ends, cx, cy, total, invAspect: W > 0 ? H / W : 1 } }
 }
 
 // field grid over the canvas: every cell borrows tube + chain index of its nearest LED

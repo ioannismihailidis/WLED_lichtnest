@@ -30,11 +30,12 @@ export function impulseSources (p) {
 
 // Resolve the sources against the geometry. `pts` = sample points (tube endpoints /
 // field corners) for umax; (cx,cy) = auto centre (tube centroid); markerPos(id) →
-// [x,y] | null. Returns { sources, umax } ready for per-pixel sampling.
-export function impulseField (p, pts, cx, cy, markerPos) {
+// [x,y] | null; invAspect = plan height / width (4:3): radial distances scale dy by it so
+// rings are circles (same as the firmware). Returns { sources, umax } ready for per-pixel sampling.
+export function impulseField (p, pts, cx, cy, markerPos, invAspect = 0.75) {
   const sources = impulseSources(p).map((s) => {
     const m = (s.origin !== 255 && markerPos) ? markerPos(s.origin) : null
-    if (s.pmode === 1) return { pmode: 1, ox: m ? m[0] : cx, oy: m ? m[1] : cy }
+    if (s.pmode === 1) return { pmode: 1, ox: m ? m[0] : cx, oy: m ? m[1] : cy, ia: invAspect }
     const ang = (s.angle || 0) * Math.PI / 180, ax = Math.cos(ang), ay = Math.sin(ang)
     if (m) return { pmode: 0, ax, ay, ox: m[0], oy: m[1], marker: true }
     const u0 = (ax < 0 ? ax : 0) + (ay < 0 ? ay : 0)   // near field edge (unit square)
@@ -50,7 +51,7 @@ export function impulseField (p, pts, cx, cy, markerPos) {
 // distance of (x,y) from one resolved source; null = pixel not covered (behind a
 // linear marker plane — the wave only travels forward from the marker)
 export function sourceDist (s, x, y) {
-  if (s.pmode === 1) { const dx = x - s.ox, dy = y - s.oy; return Math.sqrt(dx * dx + dy * dy) }
+  if (s.pmode === 1) { const dx = x - s.ox, dy = (y - s.oy) * (s.ia ?? 0.75); return Math.sqrt(dx * dx + dy * dy) }
   if (s.marker) { const d = (x - s.ox) * s.ax + (y - s.oy) * s.ay; return d < 0 ? null : d }
   return x * s.ax + y * s.ay - s.u0
 }
